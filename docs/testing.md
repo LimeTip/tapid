@@ -187,13 +187,13 @@ them on another run):
 
 | Controlled scenario | Calls | Output bytes | Safe next action / limitation |
 | --- | ---: | ---: | --- |
-| Project contention, then release | 2 | 1,508 | Retry only after release; contender inputs stay unchanged. |
-| Two projects, shared-store expiry, then release | 3 | 7,482 | `STORE_BUSY`, `unchanged`, `after_contention`; retry succeeds after release. Expiry measured 5,039 ms. |
-| Existing lost commit response and frozen offline recovery | 3 | 2,682 | Inspect pending recovery, then preserve the committed lock through recovery. |
-| Abrupt interruption at `activation_complete` | 3 | 5,254 | Status preserves all entries/bytes; recovery rolls back project activation and published trees. |
-| Abrupt interruption at `commit_decision` | 3 | 5,268 | Status preserves evidence; recovery retains the committed lock, installed package, and store trees. |
-| Abrupt interruption at `post_commit_cleanup` | 3 | 5,268 | Activation cleanup has run; recovery removes remaining evidence without undoing commit. |
-| Completed install with response withheld, unchanged status, later add, status | 4 | 11,709 | Reconcile expected state; subsequent status describes the later state, without historical attribution. |
+| Project contention, then release | 2 | 1,514 | Retry only after release; contender inputs stay unchanged. |
+| Two projects, shared-store expiry, then release | 3 | 7,496 | `STORE_BUSY`, `unchanged`, `after_contention`; retry succeeds after release. Expiry measured 5,043 ms. |
+| Existing lost commit response and frozen offline recovery | 3 | 2,694 | Inspect pending recovery, then preserve the committed lock through recovery. |
+| Abrupt interruption at `activation_complete` | 3 | 5,267 | Status preserves all entries/bytes; recovery rolls back project activation and published trees. |
+| Abrupt interruption at `commit_decision` | 3 | 5,282 | Status preserves evidence; recovery retains the committed lock, installed package, and store trees. |
+| Abrupt interruption at `post_commit_cleanup` | 3 | 5,282 | Activation cleanup has run; recovery removes remaining evidence without undoing commit. |
+| Completed install with response withheld, unchanged status, later add, status | 4 | 11,745 | Reconcile expected state; subsequent status describes the later state, without historical attribution. |
 
 Every scenario reports zero unnecessary repeated failures and enforces the 8 KiB
 per-result budget. Retrying after observed lock release is necessary and excluded
@@ -205,9 +205,15 @@ crash tests also cover store publication and activation boundaries.
 
 Store unit tests use a subprocess watchdog for the real five-second default,
 short private deadlines for shared/exclusive and recovery escalation, compatible
-readers, release before expiry, error preservation, and repeated recovery whose
-execution crosses the original deadline. CLI contention permits two seconds of
-scheduling tolerance and kills/reaps a contender at its nine-second watchdog.
+readers, and error preservation. Recovery accounting uses thread-local controlled
+monotonic time advanced after real filesystem recovery: expiry after the second
+recovery and expiry during the first recovery are checked without
+scheduler-dependent sleeps. A guard restores test overrides on panic. Native
+shared/exclusive release-during-wait tests synchronize unlock with an observed
+contended attempt and use channel watchdogs. The CLI separately proves expiry
+followed by a successful retry launched after confirmed release. CLI contention
+permits two seconds of scheduling tolerance and kills/reaps a contender at its
+nine-second watchdog.
 Whole-command duration is not bounded. Status snapshots include manifest,
 lockfile, installed layout, store contents, and recovery evidence, ignoring access
 timestamps. Status neither acquires transaction locks nor opens the shared store.

@@ -537,13 +537,13 @@ fn agent_shared_store_contention_expires_and_release_allows_retry() {
         fs::read(second.path().join("node_modules/KEEP")).unwrap(),
         b"previous"
     );
-    // A new attempt may proceed once contention is resolved, without a failed retry.
+    // Retry after observed release; store tests cover release during an active wait.
+    FileExt::unlock(&holder).unwrap();
     let mut child = command(&second, &home, &args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    FileExt::unlock(&holder).unwrap();
     let deadline = Instant::now() + Duration::from_secs(9);
     loop {
         if child.try_wait().unwrap().is_some() {

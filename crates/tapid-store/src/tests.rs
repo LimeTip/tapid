@@ -1431,26 +1431,53 @@ fn store_lock_budget_covers_exclusive_and_recovery_escalation() {
     drop(lock_file(project.path(), true).unwrap());
 }
 
+struct StoreLockTestGuard;
+
+impl Drop for StoreLockTestGuard {
+    fn drop(&mut self) {
+        STORE_LOCK_TIME.with(|time| time.set(None));
+        BUDGET_RECOVERIES.with(|count| count.set(0));
+        BUDGET_RECOVERY_STEP.with(|step| step.set(std::time::Duration::ZERO));
+        STORE_RECOVERY_CHECKPOINT.with(|checkpoint| checkpoint.set(None));
+        STORE_LOCK_CONTENDED.with(|checkpoint| *checkpoint.borrow_mut() = None);
+    }
+}
+
 #[test]
 fn store_lock_release_before_expiry_allows_acquisition() {
     use std::time::{Duration, Instant};
     let project = tapid_test_support::TempProject::new("store-lock-release").unwrap();
     for exclusive in [false, true] {
+        let _reset = StoreLockTestGuard;
         let holder = open_store_lock(project.path(), true).unwrap();
         FileExt::lock(&holder).unwrap();
-        let started = Instant::now();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                // This is the synchronized holder's duration, not a startup delay.
-                std::thread::sleep(Duration::from_millis(100));
-                FileExt::unlock(&holder).unwrap();
-            });
-            drop(
-                lock_file_until(project.path(), exclusive, started + Duration::from_secs(2))
-                    .unwrap(),
-            );
+        let (observed, waiting) = std::sync::mpsc::sync_channel(1);
+        let (released, release) = std::sync::mpsc::sync_channel(1);
+        STORE_LOCK_CONTENDED.with(|checkpoint| {
+            let mut observed = Some(observed);
+            *checkpoint.borrow_mut() = Some(Box::new(move || {
+                if let Some(observed) = observed.take() {
+                    observed.send(()).unwrap();
+                    release.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }));
         });
-        assert!(started.elapsed() >= Duration::from_millis(100));
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(move || {
+                let contention = waiting.recv_timeout(Duration::from_secs(5));
+                // Release even if acquisition failed before observing contention.
+                FileExt::unlock(&holder).unwrap();
+                contention.unwrap();
+                released.send(()).unwrap();
+            });
+            let acquired = lock_file_until(
+                project.path(),
+                exclusive,
+                Instant::now() + Duration::from_secs(5),
+            );
+            holder.join().unwrap();
+            drop(acquired.unwrap());
+        });
     }
 }
 
@@ -1464,21 +1491,27 @@ fn store_lock_preserves_non_contention_errors() {
     );
 }
 
-#[test]
-fn store_recovery_retries_do_not_restart_the_acquisition_budget() {
+thread_local! {
+    static BUDGET_RECOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BUDGET_RECOVERY_STEP: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+fn recovery_budget_case(step: std::time::Duration, expected_recoveries: usize) {
     use std::time::{Duration, Instant};
-    thread_local! {
-        static RECOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
+    let _reset = StoreLockTestGuard;
+    BUDGET_RECOVERIES.with(|count| count.set(0));
+    BUDGET_RECOVERY_STEP.with(|value| value.set(step));
     let project = tapid_test_support::TempProject::new("store-budget-recovery").unwrap();
     let root = project.path().join("store");
     fs::create_dir(&root).unwrap();
     let coordinator = coordinator(project.path(), "Prepared");
     write_store_journal(&root, &coordinator, &[], false).unwrap();
     fs::copy(root.join(STORE_JOURNAL), root.join("fixture-journal")).unwrap();
+    let started = Instant::now();
+    STORE_LOCK_TIME.with(|time| time.set(Some(started)));
     STORE_RECOVERY_CHECKPOINT.with(|checkpoint| {
         checkpoint.set(Some(|root| {
-            let count = RECOVERIES.with(|count| {
+            let count = BUDGET_RECOVERIES.with(|count| {
                 count.set(count.get() + 1);
                 count.get()
             });
@@ -1489,16 +1522,38 @@ fn store_recovery_retries_do_not_restart_the_acquisition_budget() {
             if count == 1 {
                 fs::copy(root.join("fixture-journal"), root.join(STORE_JOURNAL)).unwrap();
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }))
+            // Advance controlled time only after real filesystem recovery completes.
+            STORE_LOCK_TIME.with(|time| {
+                time.set(Some(
+                    time.get().unwrap() + BUDGET_RECOVERY_STEP.with(|step| step.get()),
+                ));
+            });
+        }));
     });
-    let started = Instant::now();
-    let result = lock_file_until(&root, false, started + Duration::from_millis(150));
-    STORE_RECOVERY_CHECKPOINT.with(|checkpoint| checkpoint.set(None));
+    let deadline = started + Duration::from_millis(150);
+    let result = lock_file_until(&root, false, deadline);
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
-    assert_eq!(RECOVERIES.with(|count| count.get()), 2);
-    assert!(!root.join(STORE_JOURNAL).exists());
-    // Recovery finished after the budget, but no subsequent shared attempt began.
-    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(
+        BUDGET_RECOVERIES.with(|count| count.get()),
+        expected_recoveries
+    );
+    assert_eq!(root.join(STORE_JOURNAL).exists(), expected_recoveries == 1);
+    // Expiry prevents another attempt even though the native lock is now available.
+    assert_eq!(
+        lock_file_until(&root, false, deadline).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    STORE_RECOVERY_CHECKPOINT.with(|checkpoint| checkpoint.set(None));
     drop(lock_file(&root, false).unwrap());
+    assert!(!root.join(STORE_JOURNAL).exists());
+}
+
+#[test]
+fn store_recovery_retries_do_not_restart_the_acquisition_budget() {
+    recovery_budget_case(std::time::Duration::from_millis(100), 2);
+}
+
+#[test]
+fn store_recovery_finishes_when_first_recovery_exhausts_budget() {
+    recovery_budget_case(std::time::Duration::from_millis(200), 1);
 }

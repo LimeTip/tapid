@@ -55,6 +55,8 @@ const REPLAY_LEASE: &str = ".tapid-replay-lease";
 thread_local! {
     static SNAPSHOT_BYTE_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SNAPSHOT_CLONE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STORE_LOCK_TIME: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    static STORE_LOCK_CONTENDED: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     static STORE_RECOVERY_CHECKPOINT: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
@@ -1604,8 +1606,16 @@ fn open_store_lock(root: &Path, create: bool) -> io::Result<File> {
     Ok(file)
 }
 
+fn store_lock_now() -> std::time::Instant {
+    #[cfg(test)]
+    if let Some(now) = STORE_LOCK_TIME.with(|time| time.get()) {
+        return now;
+    }
+    std::time::Instant::now()
+}
+
 fn lock_file(root: &Path, exclusive: bool) -> io::Result<File> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = store_lock_now() + std::time::Duration::from_secs(5);
     lock_file_until(root, exclusive, deadline)
 }
 
@@ -1615,7 +1625,7 @@ fn acquire_store_lock(
     deadline: std::time::Instant,
 ) -> io::Result<()> {
     loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(store_lock_now());
         if remaining.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -1631,9 +1641,15 @@ fn acquire_store_lock(
             Ok(()) => return Ok(()),
             Err(TryLockError::Error(error)) => return Err(error),
             Err(TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                STORE_LOCK_CONTENDED.with(|checkpoint| {
+                    if let Some(checkpoint) = checkpoint.borrow_mut().as_mut() {
+                        checkpoint();
+                    }
+                });
                 std::thread::sleep(
                     std::time::Duration::from_millis(25)
-                        .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                        .min(deadline.saturating_duration_since(store_lock_now())),
                 );
             }
         }
