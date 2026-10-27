@@ -597,3 +597,18 @@ null under the common envelope. Neither schema validation nor a successful
 preview establishes artifact availability, runtime compatibility or an executable
 installation plan. The identifier selects v1 independently of the Tapid version;
 consumers must allow additive fields.
+
+Discovery modes for `install` and `ci` include `conditional_effects`. Start with
+that mode's base `effects`, then apply every rule whose `when` argument values
+match the invocation. Rule keys are maintained Clap argument identifiers;
+omitted effects retain their base value. Rules only narrow possible effects.
+Offline disables network and hook execution; frozen install disables hooks but
+still permits retrieval of missing pinned content. Neither flag makes an install
+read-only. The dry-run mode remains read-only under either flag. Hook permission
+in an online base mode is a possibility subject to lifecycle policy, approval,
+and backend checks, never evidence of approval or execution.
+
+The top-level `constraints` also exposes application-level install conflicts:
+`package` and `allow_unverified_registry_artifacts` each conflict with any of
+`offline` or `frozen`. These supplement the conflicts derived from Clap; they do
+not move validation or imply every application prerequisite is statically checked.

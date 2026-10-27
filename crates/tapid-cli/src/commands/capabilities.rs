@@ -264,6 +264,21 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         modes.push(export);
     }
     for mode in &mut modes {
+        // These rules only narrow possible effects. All matching rules apply;
+        // frozen alone still permits retrieval of missing pinned content.
+        if matches!(path, "install" | "ci") {
+            let mut rules = vec![json!({
+                "when": {"offline": true},
+                "effects": {"network_possible": false, "hook_execution_possible": false}
+            })];
+            if path == "install" {
+                rules.push(json!({
+                    "when": {"frozen": true},
+                    "effects": {"hook_execution_possible": false}
+                }));
+            }
+            mode["conditional_effects"] = json!(rules);
+        }
         if mode["json"] == "stdout_envelope" {
             mode["envelope_schema"] = json!("tapid.envelope.v1");
             if mode["schema_coverage"] == "not_yet_published" {
@@ -317,6 +332,8 @@ fn discover() -> Value {
         "tapid_version": env!("CARGO_PKG_VERSION"), "commands": commands,
         "compatibility": {"schema_version_independent_of_tapid_version": true, "unknown_schema_version": "unsupported", "unknown_fields": "ignore_additive", "unknown_reason_or_identifier": "unchecked", "incomplete_coverage": "unchecked"},
         "constraints": [
+            {"command": "install", "argument": "package", "conflicts_with_any": ["offline", "frozen"]},
+            {"command": "install", "argument": "allow_unverified_registry_artifacts", "conflicts_with_any": ["offline", "frozen"]},
             {"command": "outdated", "argument": "json_limit", "requires_global": "json"},
             {"command": "run", "global_json_requires": "preflight"},
             {"command": "run", "preflight_defers": ["environment_values", "backend_probes", "enforcement", "cleanup"]}

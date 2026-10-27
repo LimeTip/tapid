@@ -749,3 +749,156 @@ fn dependency_preview_schema_covers_read_only_resolution() {
     assert!(!project.path().join("tapid.lock").exists());
     assert!(!project.path().join("node_modules").exists());
 }
+
+#[test]
+fn discovery_describes_replay_effects_and_application_constraints() {
+    let project = TempProject::new("discovery-replay-effects").unwrap();
+    let (_, report) = invoke(&project, &["--json", "capabilities"]);
+    for path in ["install", "ci"] {
+        let command = report["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == path)
+            .unwrap();
+        for mode in command["modes"].as_array().unwrap() {
+            let rules = mode["conditional_effects"]
+                .as_array()
+                .expect("conditional effects");
+            for rule in rules {
+                for argument in rule["when"].as_object().unwrap().keys() {
+                    assert!(
+                        command["arguments"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|arg| arg["id"] == argument.as_str())
+                    );
+                }
+            }
+            let offline = rules
+                .iter()
+                .find(|rule| rule["when"] == json!({"offline": true}))
+                .unwrap();
+            assert_eq!(offline["effects"]["network_possible"], false);
+            assert_eq!(offline["effects"]["hook_execution_possible"], false);
+            // Offline replay still writes the installed layout; previews do not.
+            assert_eq!(
+                mode["effects"]["project_writes_possible"],
+                mode["id"] != "dry_run"
+            );
+            if path == "install" {
+                let frozen = rules
+                    .iter()
+                    .find(|rule| rule["when"] == json!({"frozen": true}))
+                    .unwrap();
+                assert_eq!(frozen["effects"]["hook_execution_possible"], false);
+                assert!(frozen["effects"].get("network_possible").is_none());
+            }
+        }
+    }
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/cli/capabilities.v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&report["data"]));
+    let index = report["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|command| command["path"] == "install")
+        .unwrap();
+    for invalid in [
+        json!({"when": {"offline": "yes"}, "effects": {"network_possible": false}}),
+        json!({"when": {"offline": true}, "effects": {"network_possible": true}}),
+    ] {
+        let mut broken = report["data"].clone();
+        broken["commands"][index]["modes"][0]["conditional_effects"] = json!([invalid]);
+        assert!(!validator.is_valid(&broken));
+    }
+    let constraints = report["data"]["constraints"].as_array().unwrap();
+    for argument in ["package", "allow_unverified_registry_artifacts"] {
+        assert!(constraints.iter().any(|rule| rule["command"] == "install"
+            && rule["argument"] == argument
+            && rule["conflicts_with_any"] == json!(["offline", "frozen"])));
+        let args = if argument == "package" {
+            vec!["--json", "install", "dep@1", "--offline"]
+        } else {
+            vec![
+                "--json",
+                "install",
+                "--allow-unverified-registry-artifacts",
+                "--offline",
+            ]
+        };
+        project
+            .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+            .unwrap();
+        let (output, failure) = invoke(&project, &args);
+        assert!(!output.status.success());
+        assert_eq!(failure["errors"][0]["code"], "INVALID_REQUEST");
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn discovery_guides_read_only_project_and_script_inspection() {
+    let project = TempProject::new("discovery-inspection-flow").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","scripts":{"postinstall":"never execute"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    for (path, mode_id, arguments) in [
+        ("status", "default", vec!["--json", "status"]),
+        (
+            "run",
+            "preflight",
+            vec!["--json", "run", "missing", "--preflight"],
+        ),
+    ] {
+        let command = discovery["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == path)
+            .unwrap();
+        let mode = command["modes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mode| mode["id"] == mode_id)
+            .unwrap();
+        for effect in [
+            "project_writes_possible",
+            "store_writes_possible",
+            "network_possible",
+            "child_execution_possible",
+        ] {
+            assert_eq!(mode["effects"][effect], false);
+        }
+        let id = mode["schema"].as_str().unwrap();
+        let (_, schema) = invoke(&project, &["--json", "capabilities", "--schema", id]);
+        let (_, report) = invoke(&project, &arguments);
+        assert!(
+            jsonschema::validator_for(&schema["data"]["schema"])
+                .unwrap()
+                .is_valid(&report["data"]),
+            "{report}"
+        );
+        if path == "status" {
+            assert_eq!(
+                report["data"]["lifecycle"]["enforcement"],
+                "not_established"
+            );
+            assert_eq!(
+                report["data"]["lifecycle"]["dependency_source_discovery"],
+                "unchecked"
+            );
+        } else {
+            assert_eq!(report["data"]["assessment"], "blocked");
+        }
+    }
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+}

@@ -307,6 +307,45 @@
                     "type": "string"
                   },
                   "description": "Structured input schema identifiers; separate from result payload coverage."
+                },
+                "conditional_effects": {
+                  "type": "array",
+                  "description": "Narrow base possible effects with every matching rule; omitted effects retain their base value. Argument identifiers are Clap IDs. These declarations do not authorize execution.",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "when",
+                      "effects"
+                    ],
+                    "properties": {
+                      "when": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "properties": {
+                          "offline": {
+                            "const": true
+                          },
+                          "frozen": {
+                            "const": true
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "effects": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "properties": {
+                          "network_possible": {
+                            "const": false
+                          },
+                          "hook_execution_possible": {
+                            "const": false
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    }
+                  }
                 }
               },
               "allOf": [
@@ -434,6 +473,13 @@
           },
           "preflight_defers": {
             "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "conflicts_with_any": {
+            "type": "array",
+            "minItems": 1,
             "items": {
               "type": "string"
             }

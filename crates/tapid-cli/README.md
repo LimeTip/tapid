@@ -531,3 +531,9 @@ project compatibility: use the maintained manifest parser and status checks.
 dependency-preview payload schema. Discovery references it for `install`, `add`,
 `remove` and `update` dry runs. Metadata observations do not establish artifact
 availability or successful installation; failure data uses the common envelope.
+
+Install/CI discovery includes conditional effect reductions for offline and
+frozen replay. Apply every matching rule over the selected mode's base effects;
+frozen permits pinned retrieval, while offline forbids network access. Installs
+may still write project state. Application-level install argument restrictions
+supplement the conflicts derived from Clap. See [JSON results](../../docs/json-results.md).
