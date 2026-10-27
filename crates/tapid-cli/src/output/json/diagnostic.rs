@@ -76,6 +76,24 @@ fn bound(value: &mut Value, pointer: &str, truncated: &mut Vec<String>) {
     }
 }
 
+pub(super) fn exclusion_truncation(
+    value: &crate::application::outcome::CandidateExclusions,
+    pointer: &str,
+    truncated: &mut Vec<String>,
+) {
+    for (index, group) in value.packages.iter().enumerate() {
+        let pointer = format!("{pointer}/packages/{index}");
+        for field in &group.truncated_fields {
+            truncated.push(format!("{pointer}/{field}"));
+        }
+        for (index, candidate) in group.candidates.iter().enumerate() {
+            for field in &candidate.truncated_fields {
+                truncated.push(format!("{pointer}/candidates/{index}/{field}"));
+            }
+        }
+    }
+}
+
 pub(super) fn error(
     error: &OperationalError,
     phase: Option<&str>,
@@ -86,6 +104,13 @@ pub(super) fn error(
         json!({"code": error.kind.code(), "context": error.diagnostic.as_deref().map(context)});
     if let Some(phase) = phase {
         result["phase"] = json!(phase);
+    }
+    if let Some(context) = &error.diagnostic {
+        exclusion_truncation(
+            &context.candidate_exclusions,
+            &format!("{pointer}/context/candidate_exclusions"),
+            truncated,
+        );
     }
     bound(
         &mut result["context"],

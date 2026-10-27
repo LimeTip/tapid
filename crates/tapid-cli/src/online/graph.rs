@@ -2,6 +2,7 @@ use super::*;
 use crate::application::lifecycle::UpdateRequest;
 
 pub(super) struct ResolvedGraph {
+    pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,
     pub resolution: Resolution,
@@ -311,7 +312,7 @@ pub(super) fn resolve_package_graph(
         }
     }
     resolving.set(true);
-    let (resolution, records) = resolution::resolve_with_preferences(
+    let (resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
         &overrides,
@@ -353,6 +354,7 @@ pub(super) fn resolve_package_graph(
         })
         .transpose()?;
     Ok(ResolvedGraph {
+        candidate_exclusions,
         updated_manifest,
         metadata_lookups,
         resolution,

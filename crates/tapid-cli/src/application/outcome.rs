@@ -10,7 +10,8 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 mod diagnostic;
 mod lifecycle;
 pub(crate) use diagnostic::{
-    Declaration, DiagnosticContext, DiagnosticPackage, RequirementDiagnostic,
+    CandidateExclusions, Declaration, DependencyCategory, DiagnosticContext, DiagnosticPackage,
+    ExcludedCandidate, ExcludedPackage, ExclusionReason, RequirementDiagnostic,
 };
 pub(crate) use lifecycle::LifecycleReport;
 

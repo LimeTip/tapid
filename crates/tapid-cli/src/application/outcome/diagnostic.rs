@@ -117,6 +117,76 @@ pub(crate) struct Comparison {
     pub(crate) observed: String,
 }
 
+/// Stable, allowlisted normalization failures; never retain rejected metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExclusionReason {
+    UnsupportedDependencyName,
+    EmptyDependencyRequirement,
+    UnsupportedDependencyRequirement,
+    PlatformMismatch,
+    UndeclaredOptionalPeer,
+    UnsupportedJsrAlias,
+}
+
+impl ExclusionReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::UnsupportedDependencyName => "unsupported_dependency_name",
+            Self::EmptyDependencyRequirement => "empty_dependency_requirement",
+            Self::UnsupportedDependencyRequirement => "unsupported_dependency_requirement",
+            Self::PlatformMismatch => "platform_mismatch",
+            Self::UndeclaredOptionalPeer => "undeclared_optional_peer",
+            Self::UnsupportedJsrAlias => "unsupported_jsr_alias",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DependencyCategory {
+    Dependency,
+    PeerDependency,
+    OptionalDependency,
+    OptionalPeer,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ExcludedCandidate {
+    pub(crate) version: String,
+    pub(crate) reason_code: ExclusionReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dependency_category: Option<DependencyCategory>,
+    pub(crate) truncated_fields: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ExcludedPackage {
+    pub(crate) source: String,
+    pub(crate) name: String,
+    pub(crate) total_candidates: usize,
+    pub(crate) omitted_candidates: usize,
+    pub(crate) truncated: bool,
+    pub(crate) truncated_fields: Vec<&'static str>,
+    pub(crate) candidates: Vec<ExcludedCandidate>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct CandidateExclusions {
+    pub(crate) total_packages: usize,
+    pub(crate) total_candidates: usize,
+    pub(crate) omitted_packages: usize,
+    pub(crate) omitted_candidates: usize,
+    pub(crate) truncated: bool,
+    pub(crate) packages: Vec<ExcludedPackage>,
+}
+
+impl CandidateExclusions {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.total_candidates == 0
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct DiagnosticContext {
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -127,6 +197,8 @@ pub(crate) struct DiagnosticContext {
     pub(crate) comparison: Option<Comparison>,
     pub(crate) requirements: Vec<RequirementDiagnostic>,
     pub(crate) available: Vec<String>,
+    #[serde(skip_serializing_if = "CandidateExclusions::is_empty")]
+    pub(crate) candidate_exclusions: CandidateExclusions,
 }
 
 impl DiagnosticContext {
