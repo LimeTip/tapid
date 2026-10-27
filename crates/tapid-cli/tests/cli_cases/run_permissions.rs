@@ -1111,3 +1111,107 @@ fn run_preflight_reports_selected_member_manifest_for_missing_script() {
     assert!(!project.path().join("node_modules").exists());
     assert!(!project.path().join("tapid.toml").exists());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_preflight_handles_non_utf8_paths_without_launching() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let owner = project();
+    let path = owner
+        .path()
+        .join(OsString::from_vec(b"project-\xff".to_vec()));
+    fs::create_dir(&path).unwrap();
+    let manifest = br#"{"name":"probe","scripts":{"probe":"node probe.js"}}"#;
+    fs::write(path.join("package.json"), manifest).unwrap();
+    fs::write(
+        path.join("tapid.toml"),
+        b"[run.scripts.probe]\nassurance='restricted'\n",
+    )
+    .unwrap();
+    let (_runtime, node) = private_node_runtime();
+    let runtime_dir = owner
+        .path()
+        .join(OsString::from_vec(b"runtime-\xff".to_vec()));
+    fs::create_dir(&runtime_dir).unwrap();
+    let runtime = runtime_dir.join("node");
+    fs::copy(node, &runtime).unwrap();
+    for script in ["probe", "missing"] {
+        for machine in [false, true] {
+            let mut command = isolated_command(&path, &[], true);
+            if machine {
+                command.arg("--json");
+            }
+            let output = command
+                .args(["run", script, "--preflight", "--node-runtime"])
+                .arg(&runtime)
+                .output()
+                .unwrap();
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+                "{output:?}"
+            );
+            if machine {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).expect("JSON report");
+                assert_eq!(value["data"]["enforcement_established"], false);
+                let schema: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../schemas/cli/run-preflight.v1.schema.json"
+                ))
+                .unwrap();
+                assert!(
+                    jsonschema::validator_for(&schema)
+                        .unwrap()
+                        .is_valid(&value["data"]),
+                    "{value}"
+                );
+                if script == "missing" {
+                    assert_eq!(value["data"]["blockers"][0]["code"], "SCRIPT_MISSING");
+                } else {
+                    assert!(value["data"]["runtime"]["path"].is_string());
+                }
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("Script preflight:"),
+                    "{output:?}"
+                );
+            }
+            assert_eq!(fs::read(path.join("package.json")).unwrap(), manifest);
+            assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preflight_reports_non_utf8_missing_project() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let owner = project();
+    let path = owner
+        .path()
+        .join(OsString::from_vec(b"missing-\xff".to_vec()));
+    for machine in [false, true] {
+        let mut command = isolated_command(owner.path(), &[], true);
+        if machine {
+            command.arg("--json");
+        }
+        let output = command
+            .args(["run", "missing", "--preflight", "--project-dir"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{output:?}"
+        );
+        if machine {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["data"]["assessment"], "blocked");
+            assert_eq!(value["data"]["enforcement_established"], false);
+            assert!(value["data"]["blockers"][0]["location"]["selected_manifest"].is_null());
+            assert_eq!(value["project_path"]["encoding"], "unix_bytes_base64");
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Script preflight:"));
+        }
+    }
+    assert_eq!(fs::read_dir(owner.path()).unwrap().count(), 1);
+}

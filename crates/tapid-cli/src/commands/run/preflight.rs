@@ -17,8 +17,8 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
     let mut preparation_reason = None;
     let mut evidence = planning::SelectionEvidence::default();
     let outcome = planning::select(args, &mut evidence).and_then(|plan| {
-        data["script"]["project"] = json!(plan.project_dir);
-        data["script"]["working_directory"] = json!(plan.working_directory);
+        data["script"]["project"] = json!(plan.project_dir.display().to_string());
+        data["script"]["working_directory"] = json!(plan.working_directory.display().to_string());
         crate::run::validate_allowlisted_environment_names(plan.selection.policy.environment(), cfg!(windows))
             .map_err(|_| super::RunFailure::EnvironmentInvalid)?;
         // An empty map means values were deliberately not collected. It does
@@ -33,8 +33,8 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
                 });
                 super::RunFailure::PreparationFailed
             })?;
-        data["runtime"] = json!({"path": prepared.node_runtime(), "selection": "locally_validated_path", "identity": "deferred_until_launch"});
-        data["script"]["working_directory"] = json!(prepared.request().working_directory());
+        data["runtime"] = json!({"path": prepared.node_runtime().display().to_string(), "selection": "locally_validated_path", "identity": "deferred_until_launch"});
+        data["script"]["working_directory"] = json!(prepared.request().working_directory().display().to_string());
         let blocker = prepared.request().static_platform_blocker();
         data["platform"] = json!({"os": std::env::consts::OS, "evidence": "static_declaration", "support": if blocker.is_some() { "unsupported" } else { "unchecked" }});
         if let Some(blocker) = blocker {
@@ -72,7 +72,7 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
         let (code, action, description) = preparation_reason.unwrap_or((error.code(), "review_run_inputs", "Review script selection, runtime path and requested permissions; launch checks remain deferred."));
         data["blockers"] = json!([{
             "code": code,
-            "location": {"project": args.project_dir, "manifest": "package.json", "configuration": "tapid.toml", "selected_manifest": evidence.manifest_path},
+            "location": {"project": args.project_dir.display().to_string(), "manifest": "package.json", "configuration": "tapid.toml", "selected_manifest": evidence.manifest_path.as_ref().map(|path| path.display().to_string())},
             "action": {"id": action, "description": description}
         }]);
         if matches!(error, super::RunFailure::ScriptMissing) {

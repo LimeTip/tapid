@@ -14,6 +14,9 @@ use tapid_runner::{
 };
 use tapid_test_support::TempProject;
 
+#[path = "support/tcp_host.rs"]
+mod tcp_host;
+
 #[path = "support/windows_acl.rs"]
 mod windows_acl;
 #[path = "support/windows_node.rs"]
@@ -340,40 +343,11 @@ fn windows_network_grant_runs_stock_node_loopback_tcp() {
         ("::1", true),
     ] {
         let fixture = NodeNetworkProject::new();
-        let listener = TcpListener::bind((address, 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
+        let mut host = tcp_host::TcpHost::start(address);
         let endpoint = format!(
             "{{\"host\":{address:?},\"port\":{}}}",
-            listener.local_addr().unwrap().port()
+            host.address().port()
         );
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let host_cancel = cancel.clone();
-        let host = std::thread::spawn(move || -> Result<(), String> {
-            while !host_cancel.load(std::sync::atomic::Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(3)))
-                            .map_err(|e| e.to_string())?;
-                        stream
-                            .set_write_timeout(Some(Duration::from_secs(3)))
-                            .map_err(|e| e.to_string())?;
-                        let mut payload = [0; 4];
-                        stream.read_exact(&mut payload).map_err(|e| e.to_string())?;
-                        if &payload != b"NODE" {
-                            return Err("wrong client payload".into());
-                        }
-                        stream.write_all(b"HOST").map_err(|e| e.to_string())?;
-                        return Ok(());
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(e) => return Err(e.to_string()),
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err("control cancelled".into())
-        });
         let payload = r#"const net=require('node:net');const opts=JSON.parse(process.env.TAPID_NETWORK_ENDPOINT);const s=net.connect(opts,()=>s.write('NODE'));let data='';s.on('data',b=>{data+=b;if(data==='HOST'){console.log('NODE_NETWORK_GRANTED');s.end()}});s.on('error',e=>{console.error(e);process.exitCode=1});"#;
         let script = if descendant {
             format!(
@@ -386,12 +360,17 @@ fn windows_network_grant_runs_stock_node_loopback_tcp() {
         if address == "127.0.0.1" && !descendant {
             std::thread::sleep(Duration::from_secs(9));
         }
+        let started = std::time::Instant::now();
         let outcome = execute(&fixture.request(&script, &endpoint, true, 12));
-        cancel.store(true, std::sync::atomic::Ordering::Release);
-        let host_result = host.join();
+        let host_result = host.finish();
         assert!(
-            matches!(&host_result, Ok(Ok(()))),
-            "host control failed: {host_result:?}; contained outcome: {outcome:?}"
+            host_result.is_ok()
+                && outcome
+                    .as_ref()
+                    .is_ok_and(|result| result.termination() == &Termination::Exited(0)),
+            "endpoint={} descendant={descendant} elapsed={:?} host={host_result:?} execution={outcome:?}",
+            host.address(),
+            started.elapsed(),
         );
         assert_node_network_success(
             outcome.expect("network=true must run contained stock Node"),

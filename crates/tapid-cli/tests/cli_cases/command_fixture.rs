@@ -4,22 +4,26 @@ use std::path::PathBuf;
 #[test]
 fn command_fixture_preserves_coverage_profile_destination() {
     let fixture = CliFixture::new("coverage-command-fixture");
-    let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") else {
+    let Some(profile) = std::env::var_os("TAPID_PROFILE_FIXTURE_CHILD") else {
         let profiles = tapid_test_support::TempProject::new("coverage-profile-owner").unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "command_fixture_tests::command_fixture_preserves_coverage_profile_destination",
-                "--nocapture",
-            ])
-            .env(
-                "LLVM_PROFILE_FILE",
-                profiles.path().join("child-%p.profraw"),
-            )
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        for profile in [
+            PathBuf::from("child-%p.profraw"),
+            profiles.path().join("absolute-%p.profraw"),
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "command_fixture_tests::command_fixture_preserves_coverage_profile_destination",
+                    "--nocapture",
+                ])
+                .current_dir(profiles.path())
+                .env("TAPID_PROFILE_FIXTURE_CHILD", &profile)
+                .env("LLVM_PROFILE_FILE", &profile)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
         return;
     };
     let mut command = fixture.command(&["--json", "capabilities"]);
@@ -29,7 +33,7 @@ fn command_fixture_preserves_coverage_profile_destination() {
             .find(|(key, _)| *key == "LLVM_PROFILE_FILE"),
         Some((
             std::ffi::OsStr::new("LLVM_PROFILE_FILE"),
-            Some(profile.as_os_str())
+            Some(std::path::absolute(&profile).unwrap().as_os_str())
         ))
     );
     let output = command.output().unwrap();

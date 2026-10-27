@@ -76,6 +76,7 @@ static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
 type ResolveAndFetchOutput = Result<PreparedInstall, OperationalError>;
 
 pub(crate) struct PreparedInstall {
+    pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub lock: Lockfile,
     pub layout: PreparedLayout,
     pub transaction: StoreTransaction,
@@ -910,6 +911,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
+        candidate_exclusions,
         metadata_lookups: _,
         resolution,
         records,
@@ -1312,6 +1314,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     Ok(PreparedInstall {
+        candidate_exclusions,
         lock,
         layout: PreparedLayout {
             input: NamedLayoutInput {
