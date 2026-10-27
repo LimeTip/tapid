@@ -53,7 +53,7 @@ fn fetched_locked_versions_fill_missing_registry_urls_without_changing_pins() {
                 )
             })
             .collect::<Vec<_>>();
-        let (_, records) = resolution::resolve_with_preferences(
+        let (_, records, _) = resolution::resolve_with_preferences(
             &roots,
             |parent, _| Ok(parent.clone()),
             &BTreeMap::new(),
@@ -105,7 +105,7 @@ fn fetched_locked_versions_refresh_only_peer_metadata() {
         )
     })
     .collect::<Vec<_>>();
-    let (resolution, records) = resolution::resolve_with_preferences(
+    let (resolution, records, _) = resolution::resolve_with_preferences(
         &roots,
         |parent, _| Ok(parent.clone()),
         &BTreeMap::new(),
@@ -157,7 +157,7 @@ fn optional_alias_fetches_the_actual_package_and_retains_the_local_edge() {
         "1".parse().unwrap(),
     )];
     let mut fetched = Vec::new();
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         fetched.push(name.to_string());
         match name.as_str() {
             "parent" => Ok(vec![parent.clone()]),
@@ -178,7 +178,10 @@ fn jsr_alias_metadata_never_falls_back_to_a_jsr_package_of_the_same_name() {
     let error = normalize_record(&package)
         .err()
         .expect("npm source cannot be interpreted as JSR");
-    assert!(error.contains("refusing JSR registry fallback"));
+    assert_eq!(
+        error.reason,
+        crate::application::outcome::ExclusionReason::UnsupportedJsrAlias
+    );
 }
 
 #[test]
@@ -189,7 +192,7 @@ fn overriding_an_alias_range_preserves_its_actual_identity() {
         "1".parse().unwrap(),
     )];
     let overrides = BTreeMap::from([("local".parse().unwrap(), "2".parse().unwrap())]);
-    let (resolution, _) =
+    let (resolution, _, _) =
         resolve_with_overrides(&roots, &overrides, |_, name| match name.as_str() {
             "parent" => Ok(vec![named_record(
                 "parent",
@@ -270,7 +273,7 @@ url='https://packages.acme.example'
         },
     );
 
-    let (resolution, _) = match result {
+    let (resolution, _, _) = match result {
         Ok(resolution) => resolution,
         Err(error) => panic!("mixed-origin resolution failed: {error}"),
     };
@@ -315,7 +318,7 @@ url='https://packages.acme.example'
         },
     );
 
-    let (resolution, _) = match result {
+    let (resolution, _, _) = match result {
         Ok(resolution) => resolution,
         Err(error) => panic!("mixed-origin resolution failed: {error}"),
     };
@@ -358,7 +361,7 @@ url='https://packages.acme.example'
             other => panic!("unexpected metadata request for {other}"),
         },
     );
-    let (resolution, _) = match result {
+    let (resolution, _, _) = match result {
         Ok(resolution) => resolution,
         Err(error) => panic!("optional dependency resolution failed: {error}"),
     };
@@ -406,7 +409,7 @@ url='https://packages.acme.example'
         },
     );
 
-    let (resolution, _) = match result {
+    let (resolution, _, _) = match result {
         Ok(resolution) => resolution,
         Err(error) => panic!("cross-origin peer resolution failed: {error}"),
     };
@@ -526,21 +529,22 @@ fn root_override_replaces_a_transitive_dependency_requirement() {
         "1.0.0".parse().unwrap(),
     );
     let overrides = BTreeMap::from([("postcss".parse().unwrap(), "8.5.28".parse().unwrap())]);
-    let (resolution, records) = resolve_with_overrides(&[root], &overrides, |_, name| {
-        match name.to_string().as_str() {
-            "next" => Ok(vec![named_record(
-                "next",
-                "1.0.0",
-                &[("postcss", "8.4.31")],
-            )]),
-            "postcss" => Ok(vec![
-                named_record("postcss", "8.4.31", &[]),
-                named_record("postcss", "8.5.28", &[]),
-            ]),
-            _ => panic!("unexpected metadata request for {name}"),
-        }
-    })
-    .unwrap();
+    let (resolution, records, _) =
+        resolve_with_overrides(&[root], &overrides, |_, name| {
+            match name.to_string().as_str() {
+                "next" => Ok(vec![named_record(
+                    "next",
+                    "1.0.0",
+                    &[("postcss", "8.4.31")],
+                )]),
+                "postcss" => Ok(vec![
+                    named_record("postcss", "8.4.31", &[]),
+                    named_record("postcss", "8.5.28", &[]),
+                ]),
+                _ => panic!("unexpected metadata request for {name}"),
+            }
+        })
+        .unwrap();
 
     assert!(resolution.selected.iter().any(|package| {
         package.name.to_string() == "postcss" && package.version.to_string() == "8.5.28"
@@ -569,7 +573,7 @@ fn wide_required_frontier_rebuilds_metadata_only_once_per_wave() {
         .collect::<Vec<_>>();
     let mut fetched = Vec::new();
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         fetched.push(name.to_string());
         Ok(vec![named_record(&name.to_string(), "1.0.0", &[])])
     })
@@ -586,7 +590,7 @@ fn deep_required_frontier_normalizes_each_version_once() {
     let registry: PackageSource = NPM.parse().unwrap();
     let root = Dependency::new(registry, "pkg-0".parse().unwrap(), "1.0.0".parse().unwrap());
 
-    let (resolution, _) = resolve_with_fetch(&[root], |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&[root], |_, name| {
         let index = name.to_string()[4..].parse::<usize>().unwrap();
         let mut package = named_record(&name.to_string(), "1.0.0", &[]);
         if index < 31 {
@@ -609,7 +613,7 @@ fn one_packument_updates_parent_metadata_once_per_version() {
     let root = Dependency::new(registry, "large".parse().unwrap(), "*".parse().unwrap());
     let version_count = 256;
 
-    let (resolution, _) = resolve_with_fetch(&[root], |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&[root], |_, name| {
         assert_eq!(name.to_string(), "large");
         Ok((0..version_count)
             .map(|patch| named_record("large", &format!("1.0.{patch}"), &[]))
@@ -752,7 +756,10 @@ fn normalization_rejects_optional_marker_for_undeclared_peer() {
         Err(error) => error,
         Ok(_) => panic!("optional marker for an undeclared peer was accepted"),
     };
-    assert!(error.contains("optional peer metadata refers to undeclared peer host"));
+    assert_eq!(
+        error.reason,
+        crate::application::outcome::ExclusionReason::UndeclaredOptionalPeer
+    );
 }
 
 #[test]
@@ -766,8 +773,14 @@ fn malformed_peer_requirement_fails_without_flattening() {
         Ok(_) => panic!("malformed peer metadata was accepted"),
         Err(error) => error,
     };
-    assert!(error.contains("peer dependency host has unsupported requirement"));
-    assert!(!error.contains("ordinary"));
+    assert_eq!(
+        error.reason,
+        crate::application::outcome::ExclusionReason::UnsupportedDependencyRequirement
+    );
+    assert_eq!(
+        error.category,
+        Some(crate::application::outcome::DependencyCategory::PeerDependency)
+    );
 }
 
 #[test]
@@ -781,7 +794,10 @@ fn malformed_peer_name_fails_closed() {
         Ok(_) => panic!("malformed peer metadata was accepted"),
         Err(error) => error,
     };
-    assert!(error.contains("peer dependency ../host has an unsupported name"));
+    assert_eq!(
+        error.reason,
+        crate::application::outcome::ExclusionReason::UnsupportedDependencyName
+    );
 }
 
 #[test]
@@ -818,8 +834,10 @@ fn production_normalization_rejects_empty_registry_dependency_ranges() {
         Ok(_) => panic!("empty registry dependency ranges must be rejected"),
         Err(error) => error,
     };
-    assert!(error.contains("dependency"));
-    assert!(error.contains("empty requirement"));
+    assert_eq!(
+        error.reason,
+        crate::application::outcome::ExclusionReason::EmptyDependencyRequirement
+    );
 }
 
 #[test]
@@ -833,7 +851,7 @@ fn all_unsupported_versions_remain_unavailable_to_the_resolver() {
 }
 
 #[test]
-fn resolution_error_reports_discarded_version_and_requirement() {
+fn resolution_error_reports_safe_excluded_version_and_reason() {
     let roots = vec![Dependency::new(
         NPM.parse().unwrap(),
         "framer-motion".parse().unwrap(),
@@ -850,9 +868,12 @@ fn resolution_error_reports_discarded_version_and_requirement() {
         Err(error) => error,
     };
 
-    assert!(error.contains("discarded version 2.9.5"), "{error}");
     assert!(
-        error.contains("git+https://example.test/popmotion.git"),
+        error.contains("2.9.5 (unsupported_dependency_requirement)"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("git+https://example.test/popmotion.git"),
         "{error}"
     );
 }
@@ -865,7 +886,7 @@ fn selected_bare_major_dependency_range_remains_usable() {
         "*".parse().unwrap(),
     )];
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         Ok(match name.to_string().as_str() {
             "app" => vec![named_record("app", "1.0.0", &[("inherits", "2")])],
             "inherits" => vec![
@@ -910,7 +931,7 @@ fn unavailable_optional_requirement_does_not_fail_resolution() {
         "*".parse().unwrap(),
     )];
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         Ok(match name.to_string().as_str() {
             "app" => {
                 let mut package = named_record("app", "1.0.0", &[]);
@@ -937,7 +958,7 @@ fn unusable_optional_candidate_does_not_become_a_required_edge() {
         "*".parse().unwrap(),
     )];
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         Ok(match name.to_string().as_str() {
             "app" => {
                 let mut package = named_record("app", "1.0.0", &[]);
@@ -969,7 +990,7 @@ fn incremental_resolution_fetches_and_selects_compatible_optional_dependencies()
     )];
     let mut fetched = Vec::new();
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         fetched.push(name.to_string());
         Ok(match name.to_string().as_str() {
             "app" => {
@@ -1009,7 +1030,7 @@ fn incremental_resolution_fetches_only_the_selected_versions_dependencies() {
     )];
     let mut fetched = Vec::new();
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         fetched.push(name.to_string());
         Ok(match name.to_string().as_str() {
             "app" => vec![
@@ -1052,7 +1073,7 @@ fn incremental_resolution_fetches_metadata_before_reporting_constraint_conflicts
     ];
     let mut fetches = 0;
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         fetches += 1;
         assert_eq!(name.to_string(), "shared");
         Ok(vec![
@@ -1085,7 +1106,7 @@ fn incremental_resolution_fetches_one_packument_for_multiple_selected_versions()
     ];
     let mut fetched = Vec::new();
 
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         fetched.push(name.to_string());
         Ok(match name.to_string().as_str() {
             "a" => vec![named_record("a", "1.0.0", &[("debug", "^3.0.0")])],
@@ -1128,7 +1149,7 @@ fn dist_tags_resolve_transitive_alias_and_optional_edges() {
         .insert("optional".into(), "npm:child@next".into());
     let mut tagged = named_record("child", "2.0.0-beta.1", &[]);
     tagged.dist_tags.insert("next".into());
-    let (resolution, _) = resolve_with_fetch(&roots, |_, name| {
+    let (resolution, _, _) = resolve_with_fetch(&roots, |_, name| {
         Ok(if name.as_str() == "parent" {
             vec![parent.clone()]
         } else {
@@ -1158,7 +1179,7 @@ fn dist_tag_peers_fetch_metadata_for_locked_root_providers() {
     ];
     let seed = vec![named_record("host", "1.0.0", &[])];
     let mut fetched_host = false;
-    let (resolution, _) = resolution::resolve_with_preferences(
+    let (resolution, _, _) = resolution::resolve_with_preferences(
         &roots,
         |parent, _| Ok(parent.clone()),
         &BTreeMap::new(),
@@ -1359,7 +1380,7 @@ fn jsr_generated_edges_preserve_bindings_and_route_logical_targets() {
         "1".parse().unwrap(),
     )];
     let mut fetched = Vec::new();
-    let (resolution, _) = resolve_with_fetch_routed(
+    let (resolution, _, _) = resolve_with_fetch_routed(
         &roots,
         |parent, name| config.registry_for_dependency(parent, name),
         |source, name| {
@@ -1398,7 +1419,7 @@ fn jsr_optional_generated_targets_and_ordinary_npm_targets_keep_their_sources() 
         "1".parse().unwrap(),
     )];
     let config = crate::registry::RegistryConfig::from_toml("").unwrap();
-    let (resolution, _) = resolve_with_fetch_routed(
+    let (resolution, _, _) = resolve_with_fetch_routed(
         &roots,
         |parent, name| config.registry_for_dependency(parent, name),
         |source, name| {
@@ -1451,4 +1472,305 @@ fn optional_alias_peer_rejects_a_present_provider_with_the_wrong_identity() {
         result.is_err(),
         "optional peers may be absent, but installed providers must match"
     );
+}
+
+#[test]
+fn terminal_candidate_exclusions_are_bounded_and_safe() {
+    let roots = vec![Dependency::new(
+        NPM.parse().unwrap(),
+        "framer-motion".parse().unwrap(),
+        "^9.0.0".parse().unwrap(),
+    )];
+    let error = resolution::resolve_with_fetch_routed_and_overrides(
+        &roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        |_, _| {
+            Ok((0..12)
+                .map(|n| {
+                    record(
+                        &format!("1.0.{n}"),
+                        Some("git+https://secret@example.test/private"),
+                    )
+                })
+                .chain([record("2.0.0", None)])
+                .collect())
+        },
+        |_| {},
+    )
+    .err()
+    .expect("no matching candidate");
+    let value = serde_json::to_value(error.diagnostic.as_ref().unwrap()).unwrap();
+    let evidence = &value["candidate_exclusions"];
+    assert_eq!(evidence["total_candidates"], 12);
+    assert_eq!(evidence["omitted_candidates"], 4);
+    assert_eq!(
+        evidence["packages"][0]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    assert_eq!(
+        evidence["packages"][0]["candidates"][0]["reason_code"],
+        "unsupported_dependency_requirement"
+    );
+    assert_eq!(value["available"], serde_json::json!(["2.0.0"]));
+    assert!(!error.to_string().contains("example.test"));
+    assert!(error.to_string().contains("4 omitted"));
+}
+
+#[test]
+fn candidate_exclusions_count_without_retaining_unbounded_history() {
+    for history in [1, 12] {
+        let packages = (0..20)
+            .flat_map(|p| {
+                (0..history).map(move |v| {
+                    named_record(
+                        &format!("pkg-{p:02}"),
+                        &format!("1.0.{v}"),
+                        &[("bad", "git+https://secret@example.test/private")],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let observe = |seed| {
+            let (_, _, evidence) = resolution::resolve_with_preferences(
+                &[],
+                |parent, _| Ok(parent.clone()),
+                &BTreeMap::new(),
+                |_, _| panic!("seeded observation needs no fetch"),
+                &Default::default(),
+                seed,
+                |_| {},
+            )
+            .unwrap();
+            serde_json::to_value(evidence).unwrap()
+        };
+        let forward = observe(packages.clone());
+        let mut repeated = packages.clone();
+        repeated.extend(packages.into_iter().rev());
+        let reverse = observe(repeated.into_iter().rev().collect());
+        assert_eq!(forward, reverse);
+        assert_eq!(forward["total_packages"], 20);
+        assert_eq!(forward["total_candidates"], 20 * history);
+        assert_eq!(
+            forward["packages"].as_array().unwrap().len(),
+            if history == 1 { 16 } else { 13 }
+        );
+        assert_eq!(
+            forward["omitted_candidates"],
+            if history == 1 { 4 } else { 140 }
+        );
+        assert_eq!(
+            forward["omitted_packages"],
+            if history == 1 { 4 } else { 7 }
+        );
+        assert_eq!(forward["truncated"], true);
+        assert_eq!(forward["packages"][0]["name"], "pkg-00");
+        assert_eq!(forward["packages"][0]["candidates"][0]["version"], "1.0.0");
+        if history == 12 {
+            assert_eq!(forward["packages"][0]["candidates"][2]["version"], "1.0.10");
+            assert_eq!(forward["packages"][0]["omitted_candidates"], 4);
+            assert_eq!(forward["packages"][12]["omitted_candidates"], 8);
+        }
+    }
+}
+
+#[test]
+fn terminal_conflict_exclusions_ignore_unrelated_history_and_other_origins() {
+    let roots = ["^2", "^3"].map(|requirement| {
+        Dependency::new(
+            NPM.parse().unwrap(),
+            "zz-target".parse().unwrap(),
+            requirement.parse().unwrap(),
+        )
+    });
+    let mut seed = (0..20)
+        .map(|n| named_record(&format!("aaa-{n:02}"), "1.0.0", &[("bad", "")]))
+        .collect::<Vec<_>>();
+    let mut other_origin = named_record("zz-target", "99.0.0", &[("../invalid", "*")]);
+    other_origin.registry = "https://other.example.test".parse().unwrap();
+    seed.push(other_origin);
+    let run = |reverse| {
+        let mut candidates = (0..12)
+            .map(|n| {
+                named_record(
+                    "zz-target",
+                    &format!("1.0.{n}"),
+                    &[("bad", "git+https://user:password@example.test/private")],
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.extend([
+            named_record("zz-target", "2.0.0", &[]),
+            named_record("zz-target", "3.0.0", &[]),
+        ]);
+        if reverse {
+            candidates.reverse();
+        }
+        resolution::resolve_with_preferences(
+            &roots,
+            |parent, _| Ok(parent.clone()),
+            &BTreeMap::new(),
+            |_, _| Ok(candidates.clone()),
+            &Default::default(),
+            seed.clone(),
+            |_| {},
+        )
+        .err()
+        .expect("conflict")
+    };
+    let error = run(false);
+    let context = serde_json::to_value(error.diagnostic.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        context,
+        serde_json::to_value(run(true).diagnostic.as_ref().unwrap()).unwrap()
+    );
+    assert_eq!(context["requirements"].as_array().unwrap().len(), 2);
+    assert_eq!(context["available"], serde_json::json!(["2.0.0", "3.0.0"]));
+    let evidence = &context["candidate_exclusions"];
+    assert_eq!(evidence["total_packages"], 1);
+    assert_eq!(evidence["total_candidates"], 12);
+    assert_eq!(evidence["omitted_candidates"], 4);
+    assert_eq!(evidence["packages"][0]["source"], NPM);
+    assert_eq!(evidence["packages"][0]["name"], "zz-target");
+    let rendered = error.to_string();
+    assert!(!rendered.contains("password"));
+    assert!(!rendered.contains("aaa-"));
+    assert!(!rendered.contains("99.0.0"));
+    assert!(rendered.contains("4 omitted"));
+}
+
+#[test]
+fn candidate_exclusions_keep_primary_reason_and_dependency_category() {
+    let mut bad_name = named_record("sample", "1.0.0", &[("../invalid", "")]);
+    bad_name
+        .peer_dependencies
+        .insert("also-invalid".into(), "".into());
+    let empty = named_record("sample", "2.0.0", &[("dep", " \t")]);
+    let unsupported = named_record(
+        "sample",
+        "3.0.0",
+        &[("dep", "git+https://password@example.test")],
+    );
+    let mut platform = named_record("sample", "4.0.0", &[("../bad", "")]);
+    platform.platform.os = vec!["never-this-platform".into()];
+    let mut optional_peer = named_record("sample", "5.0.0", &[]);
+    optional_peer
+        .optional_peer_dependencies
+        .insert("undeclared".into());
+    let mut alias = named_record("@scope/sample", "6.0.0", &[("alias", "npm:target@1")]);
+    alias.registry = JSR.parse().unwrap();
+    let mut optional = named_record("sample", "7.0.0", &[]);
+    optional
+        .optional_dependencies
+        .insert("dep".into(), "".into());
+    let mut peer = named_record("sample", "8.0.0", &[]);
+    peer.peer_dependencies.insert("dep".into(), "".into());
+    let (_, _, evidence) = resolution::resolve_with_preferences(
+        &[],
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        |_, _| panic!("no fetch"),
+        &Default::default(),
+        vec![
+            bad_name,
+            empty,
+            unsupported,
+            platform,
+            optional_peer,
+            alias,
+            optional,
+            peer,
+        ],
+        |_| {},
+    )
+    .unwrap();
+    let value = serde_json::to_value(evidence).unwrap();
+    let npm = value["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["source"] == NPM)
+        .unwrap();
+    let reasons = npm["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["reason_code"].as_str().unwrap(),
+                c["dependency_category"].as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasons,
+        vec![
+            ("unsupported_dependency_name", Some("dependency")),
+            ("empty_dependency_requirement", Some("dependency")),
+            ("unsupported_dependency_requirement", Some("dependency")),
+            ("platform_mismatch", None),
+            ("undeclared_optional_peer", Some("optional_peer")),
+            ("empty_dependency_requirement", Some("optional_dependency")),
+            ("empty_dependency_requirement", Some("peer_dependency")),
+        ]
+    );
+    let jsr = value["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["source"] == JSR)
+        .unwrap();
+    assert_eq!(jsr["candidates"][0]["reason_code"], "unsupported_jsr_alias");
+    assert!(!value.to_string().contains("password"));
+}
+
+#[test]
+fn all_excluded_long_versions_have_bounded_human_summary() {
+    let roots = [Dependency::new(
+        NPM.parse().unwrap(),
+        "sample".parse().unwrap(),
+        "*".parse().unwrap(),
+    )];
+    let error = resolution::resolve_with_fetch_routed_and_overrides(
+        &roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        |_, _| {
+            Ok((0..12)
+                .map(|n| {
+                    named_record(
+                        "sample",
+                        &format!("1.0.0-{}.v{n:02}", "a".repeat(1024)),
+                        &[(
+                            "bad",
+                            "git+https://user:password@example.test/private?token=secret\u{001b}",
+                        )],
+                    )
+                })
+                .collect())
+        },
+        |_| {},
+    )
+    .err()
+    .expect("all rejected");
+    let message = error.to_string();
+    let summary = message.split(": resolution failed").next().unwrap();
+    assert!(summary.len() <= 2048, "{}", summary.len());
+    assert!(summary.contains("6 omitted"), "{summary}");
+    assert!(!message.contains("password"));
+    let context = serde_json::to_value(error.diagnostic.as_ref().unwrap()).unwrap();
+    assert_eq!(context["package"]["name"], "sample");
+    let evidence = &context["candidate_exclusions"];
+    assert_eq!(evidence["total_candidates"], 12);
+    assert_eq!(evidence["omitted_candidates"], 4);
+    for candidate in evidence["packages"][0]["candidates"].as_array().unwrap() {
+        assert!(candidate["version"].as_str().unwrap().len() <= 256);
+        assert_eq!(
+            candidate["truncated_fields"],
+            serde_json::json!(["version"])
+        );
+    }
 }

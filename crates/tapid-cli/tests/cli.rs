@@ -3993,8 +3993,12 @@ fn lifecycle_add_rejects_invalid_fetched_range_without_state_changes() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("dependency broken"), "{stderr}");
-    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert!(
+        stderr.contains("1.0.0 (unsupported_dependency_requirement)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dependency broken"), "{stderr}");
+    assert!(!stderr.contains("not a valid range"), "{stderr}");
     assert_eq!(
         fs::read(dir.join("package.json")).unwrap(),
         manifest.as_bytes()
@@ -4224,8 +4228,12 @@ fn invalid_fetched_dependency_range_does_not_create_store_state() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("dependency broken"), "{stderr}");
-    assert!(stderr.contains("not a valid range"), "{stderr}");
+    assert!(
+        stderr.contains("1.0.0 (unsupported_dependency_requirement)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dependency broken"), "{stderr}");
+    assert!(!stderr.contains("not a valid range"), "{stderr}");
     assert_eq!(
         fs::read_to_string(dir.join("package.json")).unwrap(),
         manifest
@@ -9314,7 +9322,7 @@ fn jsr_later_dependency_failures_preserve_project_and_verified_store() {
             "integrity" => "integrity mismatch",
             "archive" => "gzip",
             "unavailable" => "cannot read artifact",
-            _ => "empty requirement",
+            _ => "1.0.0 (empty_dependency_requirement)",
         };
         assert!(error.contains(expected), "{failure}: {error}");
         assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);

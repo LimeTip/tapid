@@ -2,7 +2,12 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 
 use super::*;
-use crate::application::outcome::RequirementDiagnostic;
+use crate::application::outcome::{
+    CandidateExclusions, DependencyCategory, ExclusionReason, RequirementDiagnostic,
+};
+
+mod exclusions;
+use exclusions::{candidate_exclusions, with_exclusions};
 
 fn resolution_error(
     error: ResolveError,
@@ -46,68 +51,108 @@ pub(super) struct NormalizedRecord {
     pub(super) optional_dependencies: BTreeMap<PackageName, Requirement>,
 }
 
-type NormalizedRecords = BTreeMap<PackageRecordKey, Result<NormalizedRecord, String>>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CandidateRejection {
+    pub(super) reason: ExclusionReason,
+    pub(super) category: Option<DependencyCategory>,
+}
+
+impl CandidateRejection {
+    fn new(reason: ExclusionReason, category: Option<DependencyCategory>) -> Self {
+        Self { reason, category }
+    }
+}
+
+type NormalizedRecords = BTreeMap<PackageRecordKey, Result<NormalizedRecord, CandidateRejection>>;
+
+// Parsing is shared; callers choose either typed exclusion evidence or the
+// existing explanatory error contract used outside candidate normalization.
+enum RegistryRequirementRejection {
+    Empty,
+    Unsupported(ResolveError),
+}
+
+fn parse_registry_range(requirement: &str) -> Result<Requirement, RegistryRequirementRejection> {
+    if requirement.trim().is_empty() {
+        return Err(RegistryRequirementRejection::Empty);
+    }
+    requirement
+        .parse()
+        .map_err(RegistryRequirementRejection::Unsupported)
+}
 
 pub(super) fn parse_registry_requirement(
     name: &str,
     kind: &str,
     requirement: &str,
 ) -> Result<Requirement, String> {
-    if requirement.trim().is_empty() {
-        return Err(format!("{kind} {name} has an empty requirement"));
-    }
-    requirement.parse::<Requirement>().map_err(|error| {
-        format!("{kind} {name} has unsupported requirement {requirement}: {error}")
+    parse_registry_range(requirement).map_err(|rejection| match rejection {
+        RegistryRequirementRejection::Empty => format!("{kind} {name} has an empty requirement"),
+        RegistryRequirementRejection::Unsupported(error) => {
+            format!("{kind} {name} has unsupported requirement {requirement}: {error}")
+        }
     })
 }
 
-pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedRecord, String> {
+fn normalize_dependencies(
+    values: &BTreeMap<String, String>,
+    category: DependencyCategory,
+) -> Result<BTreeMap<PackageName, Requirement>, CandidateRejection> {
+    values
+        .iter()
+        .map(|(name, requirement)| {
+            let name = name.parse().map_err(|_| {
+                CandidateRejection::new(ExclusionReason::UnsupportedDependencyName, Some(category))
+            })?;
+            let requirement = parse_registry_range(requirement).map_err(|rejection| {
+                CandidateRejection::new(
+                    match rejection {
+                        RegistryRequirementRejection::Empty => {
+                            ExclusionReason::EmptyDependencyRequirement
+                        }
+                        RegistryRequirementRejection::Unsupported(_) => {
+                            ExclusionReason::UnsupportedDependencyRequirement
+                        }
+                    },
+                    Some(category),
+                )
+            })?;
+            Ok((name, requirement))
+        })
+        .collect()
+}
+
+pub(super) fn normalize_record(
+    package: &PackageRecord,
+) -> Result<NormalizedRecord, CandidateRejection> {
+    use DependencyCategory::*;
     if !current_platform_matches(&package.platform) {
-        return Err("version is incompatible with the current platform".to_owned());
+        return Err(CandidateRejection::new(
+            ExclusionReason::PlatformMismatch,
+            None,
+        ));
     }
-    let dependencies = package
-        .dependencies
-        .iter()
-        .map(|(name, requirement)| {
-            let parsed_name =
-                name.parse::<PackageName>()
-                    .map_err(|error: tapid_core::DomainError| {
-                        format!("dependency {name} has an unsupported name: {error}")
-                    })?;
-            let parsed_requirement = parse_registry_requirement(name, "dependency", requirement)?;
-            Ok((parsed_name, parsed_requirement))
-        })
-        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
-    let peer_dependencies = package
-        .peer_dependencies
-        .iter()
-        .map(|(name, requirement)| {
-            let parsed_name =
-                name.parse::<PackageName>()
-                    .map_err(|error: tapid_core::DomainError| {
-                        format!("peer dependency {name} has an unsupported name: {error}")
-                    })?;
-            let parsed_requirement =
-                parse_registry_requirement(name, "peer dependency", requirement)?;
-            Ok((parsed_name, parsed_requirement))
-        })
-        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let dependencies = normalize_dependencies(&package.dependencies, Dependency)?;
+    let peer_dependencies = normalize_dependencies(&package.peer_dependencies, PeerDependency)?;
     let optional_peer_dependencies = package
         .optional_peer_dependencies
         .iter()
         .map(|name| {
-            name.parse::<PackageName>()
-                .map_err(|error: tapid_core::DomainError| {
-                    format!("optional peer dependency {name} has an unsupported name: {error}")
-                })
+            name.parse::<PackageName>().map_err(|_| {
+                CandidateRejection::new(
+                    ExclusionReason::UnsupportedDependencyName,
+                    Some(OptionalPeer),
+                )
+            })
         })
-        .collect::<Result<BTreeSet<PackageName>, String>>()?;
-    if let Some(name) = optional_peer_dependencies
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if optional_peer_dependencies
         .iter()
-        .find(|name| !peer_dependencies.contains_key(*name))
+        .any(|name| !peer_dependencies.contains_key(name))
     {
-        return Err(format!(
-            "optional peer metadata refers to undeclared peer {name}"
+        return Err(CandidateRejection::new(
+            ExclusionReason::UndeclaredOptionalPeer,
+            Some(OptionalPeer),
         ));
     }
     let metadata = PackageVersionMetadata {
@@ -115,23 +160,11 @@ pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedReco
         name: package.name.clone(),
         version: package.version.clone(),
         dependencies,
-        peer_dependencies: peer_dependencies.clone(),
+        peer_dependencies,
         optional_peer_dependencies,
     };
-    let optional_dependencies = package
-        .optional_dependencies
-        .iter()
-        .map(|(name, requirement)| {
-            let parsed_name =
-                name.parse::<PackageName>()
-                    .map_err(|error: tapid_core::DomainError| {
-                        format!("optional dependency {name} has an unsupported name: {error}")
-                    })?;
-            let parsed_requirement =
-                parse_registry_requirement(name, "optional dependency", requirement)?;
-            Ok((parsed_name, parsed_requirement))
-        })
-        .collect::<Result<BTreeMap<PackageName, Requirement>, String>>()?;
+    let optional_dependencies =
+        normalize_dependencies(&package.optional_dependencies, OptionalDependency)?;
     if package.registry.as_str() == JSR
         && metadata
             .dependencies
@@ -140,10 +173,10 @@ pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedReco
             .chain(optional_dependencies.values())
             .any(Requirement::is_alias)
     {
-        return Err(
-            "npm aliases in JSR package metadata are not supported; refusing JSR registry fallback"
-                .into(),
-        );
+        return Err(CandidateRejection::new(
+            ExclusionReason::UnsupportedJsrAlias,
+            None,
+        ));
     }
     Ok(NormalizedRecord {
         metadata,
@@ -151,7 +184,11 @@ pub(super) fn normalize_record(package: &PackageRecord) -> Result<NormalizedReco
     })
 }
 
-type ResolvedRecords = (Resolution, BTreeMap<PackageRecordKey, PackageRecord>);
+type ResolvedRecords = (
+    Resolution,
+    BTreeMap<PackageRecordKey, PackageRecord>,
+    CandidateExclusions,
+);
 
 #[cfg(test)]
 thread_local! {
@@ -395,27 +432,6 @@ pub(super) fn locate_override_requirements(
     context.requirements = located;
 }
 
-fn discarded_version_diagnostics(
-    normalized: &NormalizedRecords,
-    registry: &str,
-    name: &str,
-) -> String {
-    normalized
-        .iter()
-        .filter_map(|((candidate_registry, candidate_name, version), result)| {
-            (candidate_registry == registry && candidate_name == name)
-                .then(|| {
-                    result
-                        .as_ref()
-                        .err()
-                        .map(|reason| format!("discarded version {version}: {reason}"))
-                })
-                .flatten()
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
 pub(super) fn metadata_progress_checkpoint(fetches: usize) -> bool {
     fetches == 1 || fetches.is_multiple_of(50)
 }
@@ -647,25 +663,19 @@ where
                     }
                     continue;
                 }
-                return Ok((resolution, records));
+                return Ok((resolution, records, candidate_exclusions(&normalized, None)));
             }
             Err(ResolveError::MissingMetadata { packages }) => {
                 for (registry, name) in packages {
                     let key = (registry.clone(), name.clone());
                     if !fetched.insert(key) {
-                        let discarded =
-                            discarded_version_diagnostics(&normalized, &registry, &name);
-                        let error = format!(
-                            "resolution failed: metadata for {registry}:{name} remains unavailable"
+                        let error = OperationalError::new(
+                            ErrorKind::Resolution,
+                            format!(
+                                "resolution failed: metadata for {registry}:{name} remains unavailable"
+                            ),
                         );
-                        return if discarded.is_empty() {
-                            Err(OperationalError::new(ErrorKind::Resolution, error))
-                        } else {
-                            Err(OperationalError::new(
-                                ErrorKind::Resolution,
-                                format!("{error}; {discarded}"),
-                            ))
-                        };
+                        return Err(with_exclusions(error, &normalized, &registry, &name));
                     }
                     if metadata_progress_checkpoint(fetched.len()) {
                         progress(fetched.len());
@@ -697,13 +707,12 @@ where
                 };
                 let key = (registry.clone(), name.clone());
                 if !fetched.insert(key) {
-                    let discarded = discarded_version_diagnostics(&normalized, &registry, &name);
-                    return if discarded.is_empty() {
-                        Err(resolution_error(error, &roots, &records).context("resolution failed"))
-                    } else {
-                        Err(resolution_error(error, &roots, &records)
-                            .context(format!("resolution failed; {discarded}")))
-                    };
+                    return Err(with_exclusions(
+                        resolution_error(error, &roots, &records).context("resolution failed"),
+                        &normalized,
+                        &registry,
+                        &name,
+                    ));
                 }
                 if metadata_progress_checkpoint(fetched.len()) {
                     progress(fetched.len());
