@@ -496,7 +496,8 @@ cleanup and value-dependent limits remain unchecked; exit 0 is not launch assura
 possible effects without reading a project or accessing the network. Schema
 coverage is partial: `tapid --json capabilities --schema tapid.run-preflight.v1`
 exports the embedded preflight payload schema by its advertised identifier.
-Use `--schema tapid.capabilities.v1` for the discovery payload schema. Discovery
+Use `--schema tapid.capabilities.v1` for the discovery payload schema and
+`--schema tapid.status.v1` for local compatibility reports. Discovery
 and schema export are separate modes; the export wrapper is not yet schema-covered.
 Other result families are explicitly unpublished. See [JSON results](../../docs/json-results.md)
 for contract/version compatibility and the remaining discovery limits.

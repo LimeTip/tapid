@@ -334,7 +334,20 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
         output.stderr.is_empty(),
         "status JSON must leave stderr empty"
     );
-    let value = serde_json::from_slice(&output.stdout).expect("status JSON result");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("status JSON result");
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../schemas/cli/status.v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(&value["data"]),
+        "{}",
+        validator
+            .iter_errors(&value["data"])
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     (output, value)
 }
 

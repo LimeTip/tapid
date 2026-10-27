@@ -519,8 +519,10 @@ possible effects and additional application constraints. Ordinary run uses its
 separate result/receipt channels; only preflight accepts global JSON.
 
 Schema coverage is currently `partial`. The catalog advertises
-`tapid.run-preflight.v1` and `tapid.capabilities.v1`, targeting the envelope's
-`data` payload for preflight and default discovery respectively. The separate
+`tapid.run-preflight.v1`, `tapid.capabilities.v1`, and `tapid.status.v1`, targeting
+the envelope's `data` payload for preflight, default discovery, and status respectively.
+Status preserves its existing payload fields: select its version using the catalog
+and envelope version, rather than requiring a new payload contract field. The separate
 `schema_export` mode returns an export wrapper whose schema coverage remains
 unpublished. Export an advertised schema with
 `tapid --json capabilities --schema tapid.run-preflight.v1`; the envelope contains

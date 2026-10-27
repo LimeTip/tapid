@@ -13,6 +13,10 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.status.v1",
+        include_str!("../../schemas/cli/status.v1.schema.json"),
+    ),
+    (
         "tapid.run-preflight.v1",
         include_str!("../../schemas/cli/run-preflight.v1.schema.json"),
     ),
@@ -112,7 +116,7 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
     println!(
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
-    println!("JSON Schema coverage: partial; discovery and run-preflight v1 are embedded.");
+    println!("JSON Schema coverage: partial; status, discovery and run-preflight v1 are embedded.");
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
     );
@@ -171,6 +175,10 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         Some((_, family, channel)) => mode("default", family, channel),
         None => json!({"id": "default", "json": "unknown", "coverage": "unclassified"}),
     }];
+    if path == "status" {
+        modes[0]["schema_coverage"] = json!("payload");
+        modes[0]["schema"] = json!("tapid.status.v1");
+    }
     if path == "run" {
         modes[0]["separate_channels"] = json!(["result-file", "receipt-json"]);
         let mut preflight = mode("preflight", "inspection", "stdout_envelope");
@@ -240,7 +248,7 @@ fn discover() -> Value {
         "help_and_version": {"channel": "human_text", "json": "stdout_envelope", "effects": "no_project_mutation"},
         "schema_catalog": SCHEMAS.iter().map(|(id, source)| {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
-            json!({"id": id, "target": "data", "contract": schema["properties"]["contract"]["const"], "schema_version": 1})
+            json!({"id": id, "target": "data", "contract": if *id == "tapid.status.v1" { json!("tapid.status") } else { schema["properties"]["contract"]["const"].clone() }, "schema_version": 1})
         }).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })

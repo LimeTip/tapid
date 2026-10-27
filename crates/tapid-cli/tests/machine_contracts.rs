@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 2);
+    assert_eq!(catalog.len(), 3);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -156,6 +156,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         assert!(output.status.success());
         assert!(output.stdout.len() < 64 * 1024);
         let source: Value = serde_json::from_str(match id {
+            "tapid.status.v1" => include_str!("../schemas/cli/status.v1.schema.json"),
             "tapid.run-preflight.v1" => PREFLIGHT,
             "tapid.capabilities.v1" => include_str!("../schemas/cli/capabilities.v1.schema.json"),
             _ => panic!("unrecognized advertised schema {id}"),
@@ -218,4 +219,68 @@ fn discovery_schema_validates_all_public_modes() {
     let mut additive = discovery["data"].clone();
     additive["future"] = json!(true);
     assert!(validator.is_valid(&additive));
+}
+
+#[test]
+fn status_schema_validates_local_and_blocked_reports() {
+    let project = TempProject::new("status-schema").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &["--json", "capabilities", "--schema", "tapid.status.v1"],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    for source in [
+        include_str!("../schemas/cli/examples/status-blocked.v1.json"),
+        include_str!("../schemas/cli/examples/status-manifest-only.v1.json"),
+    ] {
+        let example: Value = serde_json::from_str(source).unwrap();
+        assert!(validator.is_valid(&example));
+    }
+    for manifest in [
+        None,
+        Some(br#"{"name":"app","version":"1.0.0"}"#.as_slice()),
+    ] {
+        if let Some(bytes) = manifest {
+            project.write("package.json", bytes).unwrap();
+            let lock = tapid_lockfile::Lockfile::new(&format!(
+                "sha256-{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(bytes)
+            ))
+            .unwrap();
+            project
+                .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+                .unwrap();
+        }
+        let (output, report) = invoke(&project, &["--json", "status"]);
+        assert_eq!(output.status.success(), manifest.is_some(), "{report}");
+        assert!(
+            validator.is_valid(&report["data"]),
+            "{}",
+            validator
+                .iter_errors(&report["data"])
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        for (pointer, invalid) in [
+            ("/assessment", json!("compatible")),
+            ("/snapshot/consistency", json!("atomic")),
+            ("/lifecycle/enforcement", json!("established")),
+            ("/operations/native_resolution/support", json!("supported")),
+        ] {
+            let mut changed = report["data"].clone();
+            *changed.pointer_mut(pointer).unwrap() = invalid;
+            assert!(!validator.is_valid(&changed), "accepted {pointer}");
+        }
+        let mut changed = report["data"].clone();
+        changed
+            .as_object_mut()
+            .unwrap()
+            .remove("checks_not_performed");
+        assert!(!validator.is_valid(&changed));
+        let mut additive = report["data"].clone();
+        additive["future"] = json!(true);
+        assert!(validator.is_valid(&additive));
+    }
 }
