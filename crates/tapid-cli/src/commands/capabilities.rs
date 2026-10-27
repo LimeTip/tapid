@@ -13,6 +13,10 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.envelope.v1",
+        include_str!("../../schemas/cli/envelope.v1.schema.json"),
+    ),
+    (
         "tapid.run-receipt.v1",
         include_str!("../../schemas/cli/run-receipt.v1.schema.json"),
     ),
@@ -129,7 +133,7 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
     println!(
-        "JSON Schema coverage: partial; status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
+        "JSON Schema coverage: partial; common envelope, status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
     );
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
@@ -227,6 +231,14 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         export["schema"] = json!("tapid.schema-export.v1");
         modes.push(export);
     }
+    for mode in &mut modes {
+        if mode["json"] == "stdout_envelope" {
+            mode["envelope_schema"] = json!("tapid.envelope.v1");
+            if mode["schema_coverage"] == "not_yet_published" {
+                mode["schema_coverage"] = json!("envelope_only");
+            }
+        }
+    }
     let arguments = command.get_arguments().filter(|arg| !arg.is_hide_set()).map(|arg| {
         json!({
             "id": arg.get_id().as_str(), "long": arg.get_long(), "short": arg.get_short(),
@@ -281,13 +293,14 @@ fn discover() -> Value {
         "schema_catalog": SCHEMAS.iter().map(|(id, source)| {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
             let contract = match *id {
+                "tapid.envelope.v1" => json!("tapid.envelope"),
                 "tapid.status.v1" => json!("tapid.status"),
                 "tapid.run-result.v1" => json!("tapid.run-result"),
                 "tapid.run-receipt.v1" => json!("tapid.run-receipt"),
                 "tapid.schema-export.v1" => json!("tapid.schema-export"),
                 _ => schema["properties"]["contract"]["const"].clone(),
             };
-            json!({"id": id, "target": if *id == "tapid.run-result.v1" { "result_file" } else if *id == "tapid.run-receipt.v1" { "stderr_receipt" } else { "data" }, "contract": contract, "schema_version": 1})
+            json!({"id": id, "target": if *id == "tapid.envelope.v1" { "envelope" } else if *id == "tapid.run-result.v1" { "result_file" } else if *id == "tapid.run-receipt.v1" { "stderr_receipt" } else { "data" }, "contract": contract, "schema_version": 1})
         }).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })

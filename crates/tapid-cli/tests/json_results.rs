@@ -10,6 +10,12 @@ fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_
     let output = command(project, &home, args).output().unwrap();
     let value = serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
     assert!(output.stderr.is_empty(), "{output:?}");
+    static ENVELOPE: std::sync::LazyLock<jsonschema::Validator> = std::sync::LazyLock::new(|| {
+        let schema =
+            serde_json::from_str(include_str!("../schemas/cli/envelope.v1.schema.json")).unwrap();
+        jsonschema::validator_for(&schema).unwrap()
+    });
+    assert!(ENVELOPE.is_valid(&value), "envelope schema drift: {value}");
     (output, value)
 }
 

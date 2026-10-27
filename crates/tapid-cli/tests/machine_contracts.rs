@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 6);
+    assert_eq!(catalog.len(), 7);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -147,7 +147,11 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         .unwrap()
         .iter()
         .flat_map(|command| command["modes"].as_array().unwrap())
-        .filter_map(|mode| mode["schema"].as_str())
+        .flat_map(|mode| {
+            [mode["schema"].as_str(), mode["envelope_schema"].as_str()]
+                .into_iter()
+                .flatten()
+        })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(advertised, referenced);
     let wrapper: Value =
@@ -160,6 +164,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         assert!(output.stdout.len() < 64 * 1024);
         assert!(wrapper_validator.is_valid(&exported["data"]), "{exported}");
         let source: Value = serde_json::from_str(match id {
+            "tapid.envelope.v1" => include_str!("../schemas/cli/envelope.v1.schema.json"),
             "tapid.schema-export.v1" => include_str!("../schemas/cli/schema-export.v1.schema.json"),
             "tapid.run-receipt.v1" => include_str!("../schemas/cli/run-receipt.v1.schema.json"),
             "tapid.run-result.v1" => include_str!("../schemas/cli/run-result.v1.schema.json"),
@@ -444,4 +449,63 @@ fn legacy_run_receipt_schema_preserves_channel_and_version_limits() {
         run["modes"][0]["when"],
         json!({"preflight": false, "result_file": "absent", "receipt_json": false})
     );
+}
+
+#[test]
+fn envelope_schema_covers_protocol_results_without_claiming_payload_coverage() {
+    let project = TempProject::new("envelope-schema").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &["--json", "capabilities", "--schema", "tapid.envelope.v1"],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    let example: Value = serde_json::from_str(include_str!(
+        "../schemas/cli/examples/envelope-failure.v1.json"
+    ))
+    .unwrap();
+    assert!(validator.is_valid(&example));
+    for field in example.as_object().unwrap().keys() {
+        let mut missing = example.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&missing), "accepted missing {field}");
+    }
+    for args in [
+        vec!["--json", "capabilities"],
+        vec!["--json", "status"],
+        vec!["--json", "--help"],
+        vec!["--json", "capabilities", "--schema", "unknown"],
+    ] {
+        let (_, value) = invoke(&project, &args);
+        assert!(validator.is_valid(&value), "{value}");
+        for (pointer, invalid) in [
+            ("/schema_version", json!(2)),
+            ("/outcome", json!("compatible")),
+            ("/changes/state", json!("maybe")),
+            ("/errors", json!([{}])),
+        ] {
+            let mut changed = value.clone();
+            *changed.pointer_mut(pointer).unwrap() = invalid;
+            assert!(!validator.is_valid(&changed), "accepted {pointer}");
+        }
+        let mut unavailable_path = value.clone();
+        unavailable_path["project_path"] = json!({"encoding": "utf8", "value": null});
+        assert!(!validator.is_valid(&unavailable_path));
+        unavailable_path["project_path"]["unavailable"] = json!("capacity_exceeded");
+        assert!(validator.is_valid(&unavailable_path));
+        let mut additive = value.clone();
+        additive["future_field"] = json!(true);
+        additive["data"] = json!({"untyped_payload": true});
+        assert!(validator.is_valid(&additive));
+    }
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    let install = discovery["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["path"] == "install")
+        .unwrap();
+    assert_eq!(install["modes"][0]["schema_coverage"], "envelope_only");
+    assert_eq!(install["modes"][0]["envelope_schema"], "tapid.envelope.v1");
+    assert!(install["modes"][0].get("schema").is_none());
 }

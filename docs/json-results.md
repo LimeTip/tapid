@@ -537,8 +537,13 @@ Export an advertised schema with
 URLs and unknown versions return `SCHEMA_UNKNOWN` without fetching anything.
 Human-mode export prints the schema object directly. The schema and an example
 are packaged under `crates/tapid-cli/schemas/cli/` and embedded into the binary.
-The envelope and other payload families remain outside this initial catalog;
-their complete schemas are still required to finish issue #195. Consumers must treat
+`tapid.envelope.v1` targets the complete common result envelope. Modes using
+`stdout_envelope` name it as `envelope_schema`; `schema_coverage: envelope_only`
+means the command payload has no published schema. The envelope checks framing,
+change states, native path encodings, warning/error code presence and retry values.
+It deliberately leaves `data`, diagnostic contexts, lifecycle records and
+warning-specific details opaque. Validate a published payload schema separately.
+Other payload families and structured inputs still require schemas to finish issue #195. Consumers must treat
 missing schema coverage, unknown reason/command identifiers and unavailable
 observations as unchecked. Unknown contract versions are unsupported; unknown
 additive fields may be ignored. Contract versions are independent of Tapid release

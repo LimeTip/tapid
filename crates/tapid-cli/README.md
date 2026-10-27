@@ -512,3 +512,8 @@ file; `tapid.run-receipt.v1` covers the legacy receipt shape. Export either thro
 `tapid --json capabilities --schema ID`. Catalog targets distinguish result files,
 stderr receipts, and envelope payloads. Validation cannot authenticate child stderr
 or turn a completed nonzero child exit into success.
+
+`tapid.envelope.v1` validates common JSON result framing. Discovery names it as
+`envelope_schema` on stdout-envelope modes. `envelope_only` coverage leaves
+command payloads and detailed diagnostic/lifecycle evidence unchecked; use the
+separate advertised payload schema where available. Export remains offline.

@@ -213,7 +213,8 @@
                 "schema_coverage": {
                   "enum": [
                     "payload",
-                    "not_yet_published"
+                    "not_yet_published",
+                    "envelope_only"
                   ]
                 },
                 "effects": {
@@ -296,6 +297,9 @@
                 },
                 "trusted_channel": {
                   "type": "boolean"
+                },
+                "envelope_schema": {
+                  "const": "tapid.envelope.v1"
                 }
               },
               "allOf": [
@@ -321,6 +325,23 @@
                         "schema"
                       ]
                     }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "json": {
+                        "const": "stdout_envelope"
+                      }
+                    },
+                    "required": [
+                      "json"
+                    ]
+                  },
+                  "then": {
+                    "required": [
+                      "envelope_schema"
+                    ]
                   }
                 }
               ]
@@ -450,7 +471,8 @@
             "enum": [
               "data",
               "result_file",
-              "stderr_receipt"
+              "stderr_receipt",
+              "envelope"
             ]
           },
           "contract": {
