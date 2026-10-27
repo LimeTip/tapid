@@ -14,19 +14,26 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
-The runtime temporary directory must permit direct execution of test-created
-files. Unix installer, verified-tool, and package-bin tests execute their shell
-fixtures directly after setting executable permissions; a `noexec` temporary
-mount produces `PermissionDenied` before those assertions can run. In isolated
-Linux validation workers, provision an executable temporary mount and export
-`TMPDIR` before starting Node and Cargo. If the workspace mount permits execution,
-an isolated worktree-local directory can be selected with
-`mkdir -p target/validation-tmp` followed by
-`TMPDIR="$PWD/target/validation-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked`.
-Confirm execution is permitted in the worker itself; a successful host run does
-not prove the worker mount policy. Keep direct execution assertions intact rather
-than invoking an interpreter to bypass an execution restriction. Native sandbox
-prerequisites remain separate from temporary-filesystem execution permissions.
+The runtime temporary directory must permit executing generated files. Unix
+installer, verified-tool, and package-bin tests directly execute fixture scripts
+after setting their executable bits. A `noexec` temporary mount causes
+`Permission denied` even when those bits are correct. In an isolated validation
+worker, provision a writable, execution-enabled scratch directory and export
+`TMPDIR` to it before starting Node and Cargo. For example, when the build
+filesystem permits execution, run from the repository root:
+
+```sh
+mkdir -p target/test-tmp
+TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked
+```
+
+Confirm execution permissions inside the worker itself; a successful host run
+does not establish worker mount policy. This changes fixture placement, not test
+behavior or containment policy. Do not invoke scripts through an interpreter to
+bypass direct-execution assertions or skip failed execution tests. A worker must
+permit executing its scratch files; changing `TMPDIR` cannot override a sandbox
+execution denial. Native containment tests still require the supported platform
+environment described below.
 
 ## Development prerequisites and build reuse
 
