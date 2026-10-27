@@ -276,6 +276,15 @@
                         "present",
                         "absent"
                       ]
+                    },
+                    "result_file": {
+                      "enum": [
+                        "present",
+                        "absent"
+                      ]
+                    },
+                    "receipt_json": {
+                      "type": "boolean"
                     }
                   }
                 },
@@ -284,6 +293,9 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "trusted_channel": {
+                  "type": "boolean"
                 }
               },
               "allOf": [
@@ -435,7 +447,11 @@
             "type": "string"
           },
           "target": {
-            "const": "data"
+            "enum": [
+              "data",
+              "result_file",
+              "stderr_receipt"
+            ]
           },
           "contract": {
             "type": "string"

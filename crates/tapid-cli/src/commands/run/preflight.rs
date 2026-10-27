@@ -15,8 +15,8 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
         "dimensions": (["filesystem", "network", "environment", "subprocess", "timeout", "output", "process_count", "memory", "descendant_cleanup"].map(|dimension| json!({"dimension": dimension, "support": "unchecked", "evidence": "deferred_until_launch"}))),
     });
     let mut preparation_reason = None;
-    let mut policy_inputs = None;
-    let outcome = planning::select(args, &mut policy_inputs).and_then(|plan| {
+    let mut evidence = planning::SelectionEvidence::default();
+    let outcome = planning::select(args, &mut evidence).and_then(|plan| {
         data["script"]["project"] = json!(plan.project_dir);
         data["script"]["working_directory"] = json!(plan.working_directory);
         crate::run::validate_allowlisted_environment_names(plan.selection.policy.environment(), cfg!(windows))
@@ -43,16 +43,20 @@ pub(super) fn run(args: &Args, machine: bool) -> ExitCode {
         }
         Ok(())
     });
-    if let Some(inputs) = policy_inputs {
+    if let Some(inputs) = evidence.policy_inputs {
         data["policy_inputs"] = inputs;
     }
     if let Err(error) = outcome {
         let (code, action, description) = preparation_reason.unwrap_or((error.code(), "review_run_inputs", "Review script selection, runtime path and requested permissions; launch checks remain deferred."));
         data["blockers"] = json!([{
             "code": code,
-            "location": {"project": args.project_dir, "manifest": "package.json", "configuration": "tapid.toml"},
+            "location": {"project": args.project_dir, "manifest": "package.json", "configuration": "tapid.toml", "selected_manifest": evidence.manifest_path},
             "action": {"id": action, "description": description}
         }]);
+        if matches!(error, super::RunFailure::ScriptMissing) {
+            data["blockers"][0]["location"]["field"] = json!("scripts");
+            data["blockers"][0]["location"]["key"] = json!(args.script);
+        }
     } else {
         data["assessment"] = json!("no_local_blockers");
     }

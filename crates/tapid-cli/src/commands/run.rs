@@ -94,7 +94,10 @@ fn execute(
     args: &Args,
     policy_inputs: &mut Option<serde_json::Value>,
 ) -> Result<tapid_runner::ExecutionOutcome, RunFailure> {
-    let plan = planning::select(args, policy_inputs)?;
+    let mut evidence = planning::SelectionEvidence::default();
+    let plan = planning::select(args, &mut evidence);
+    *policy_inputs = evidence.policy_inputs;
+    let plan = plan?;
     let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
         plan.selection.policy.environment(),
         &plan.registry_credential_names,

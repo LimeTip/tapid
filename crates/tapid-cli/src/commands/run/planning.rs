@@ -3,6 +3,13 @@ use super::{Args, RunFailure, config_error_category, permissions, read_run_confi
 use crate::filesystem::read::ReadError;
 use std::{fs, path::PathBuf};
 
+/// Value-free facts retained even when later selection or policy checks fail.
+#[derive(Default)]
+pub(super) struct SelectionEvidence {
+    pub policy_inputs: Option<serde_json::Value>,
+    pub manifest_path: Option<PathBuf>,
+}
+
 pub(super) struct Plan {
     pub project_dir: PathBuf,
     pub working_directory: PathBuf,
@@ -12,10 +19,7 @@ pub(super) struct Plan {
     pub registry_credential_names: Vec<String>,
 }
 
-pub(super) fn select(
-    args: &Args,
-    policy_inputs: &mut Option<serde_json::Value>,
-) -> Result<Plan, RunFailure> {
+pub(super) fn select(args: &Args, evidence: &mut SelectionEvidence) -> Result<Plan, RunFailure> {
     macro_rules! diagnostic {
         ($($argument:tt)*) => { if !args.preflight { eprintln!($($argument)*); } };
     }
@@ -62,8 +66,10 @@ pub(super) fn select(
             diagnostic!("error: workspace member manifest has no parent");
             return Err(RunFailure::WorkspaceInvalid);
         };
+        evidence.manifest_path = Some(member_manifest.to_owned());
         (manifest, working_directory.to_owned())
     } else {
+        evidence.manifest_path = Some(project_dir.join("package.json"));
         let manifest =
             match crate::commands::manifest::read_manifest(&project_dir.join("package.json")) {
                 Ok(value) => value,
@@ -132,7 +138,7 @@ pub(super) fn select(
             return Err(RunFailure::PermissionsInvalid);
         }
     };
-    *policy_inputs = Some(selection.provenance(&args.permissions));
+    evidence.policy_inputs = Some(selection.provenance(&args.permissions));
     let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
         Ok(config) => config,
         Err(error) => {

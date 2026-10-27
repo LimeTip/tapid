@@ -13,6 +13,14 @@ pub(crate) struct Args {
 
 const SCHEMAS: &[(&str, &str)] = &[
     (
+        "tapid.run-receipt.v1",
+        include_str!("../../schemas/cli/run-receipt.v1.schema.json"),
+    ),
+    (
+        "tapid.run-result.v1",
+        include_str!("../../schemas/cli/run-result.v1.schema.json"),
+    ),
+    (
         "tapid.schema-export.v1",
         include_str!("../../schemas/cli/schema-export.v1.schema.json"),
     ),
@@ -121,7 +129,7 @@ pub(crate) fn run(args: Args, machine: bool) -> ExitCode {
         "Help/version support JSON envelopes. Ordinary run has separate result-file/receipt channels."
     );
     println!(
-        "JSON Schema coverage: partial; status, discovery, schema export and run-preflight v1 are embedded."
+        "JSON Schema coverage: partial; status, discovery, schema export, run-preflight and run result/receipt v1 are embedded."
     );
     println!(
         "Static declarations only; project compatibility and process enforcement are unchecked."
@@ -187,11 +195,27 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
     }
     if path == "run" {
         modes[0]["separate_channels"] = json!(["result-file", "receipt-json"]);
+        modes[0]["when"] =
+            json!({"preflight": false, "result_file": "absent", "receipt_json": false});
+        let mut result = mode("result_file", "execution", "unsupported");
+        result["when"] = json!({"result_file": "present"});
+        result["separate_channels"] = json!(["result-file"]);
+        result["schema_coverage"] = json!("payload");
+        result["schema"] = json!("tapid.run-result.v1");
+        result["trusted_channel"] = json!(true);
+        let mut receipt = mode("receipt_json", "execution", "unsupported");
+        receipt["when"] = json!({"receipt_json": true});
+        receipt["separate_channels"] = json!(["receipt-json"]);
+        receipt["schema_coverage"] = json!("payload");
+        receipt["schema"] = json!("tapid.run-receipt.v1");
+        receipt["trusted_channel"] = json!(false);
         let mut preflight = mode("preflight", "inspection", "stdout_envelope");
         preflight["when"] = json!({"preflight": true});
         preflight["schema_coverage"] = json!("payload");
         preflight["schema"] = json!("tapid.run-preflight.v1");
         modes.push(preflight);
+        modes.push(result);
+        modes.push(receipt);
     }
     if path == "capabilities" {
         modes[0]["schema_coverage"] = json!("payload");
@@ -258,10 +282,12 @@ fn discover() -> Value {
             let schema: Value = serde_json::from_str(source).expect("embedded schema is valid JSON");
             let contract = match *id {
                 "tapid.status.v1" => json!("tapid.status"),
+                "tapid.run-result.v1" => json!("tapid.run-result"),
+                "tapid.run-receipt.v1" => json!("tapid.run-receipt"),
                 "tapid.schema-export.v1" => json!("tapid.schema-export"),
                 _ => schema["properties"]["contract"]["const"].clone(),
             };
-            json!({"id": id, "target": "data", "contract": contract, "schema_version": 1})
+            json!({"id": id, "target": if *id == "tapid.run-result.v1" { "result_file" } else if *id == "tapid.run-receipt.v1" { "stderr_receipt" } else { "data" }, "contract": contract, "schema_version": 1})
         }).collect::<Vec<_>>(), "schema_coverage": "partial",
         "assurance": {"package_manager_support": "separate_from_runner", "process_enforcement": "not_established", "project_compatibility": "unchecked"}
     })

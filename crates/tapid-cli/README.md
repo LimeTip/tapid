@@ -506,3 +506,9 @@ The embedded `tapid.schema-export.v1` schema describes schema-export responses
 (`data.id` and `data.schema`). Export it with
 `tapid --json capabilities --schema tapid.schema-export.v1`; exported schemas
 remain usable offline. Overall result/input schema coverage remains partial.
+
+The embedded `tapid.run-result.v1` schema covers the complete trusted run result
+file; `tapid.run-receipt.v1` covers the legacy receipt shape. Export either through
+`tapid --json capabilities --schema ID`. Catalog targets distinguish result files,
+stderr receipts, and envelope payloads. Validation cannot authenticate child stderr
+or turn a completed nonzero child exit into success.

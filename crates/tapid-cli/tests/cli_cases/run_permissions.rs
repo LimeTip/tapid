@@ -21,6 +21,21 @@ fn invoke(project: &Path, arguments: &[&str]) -> std::process::Output {
     command.output().unwrap()
 }
 
+fn validate_run_result(result: &serde_json::Value) {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../schemas/cli/run-result.v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(result),
+        "{}",
+        validator
+            .iter_errors(result)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 fn project() -> tapid_test_support::TempProject {
     let project = tapid_test_support::TempProject::new("run-permissions").unwrap();
     project
@@ -384,6 +399,7 @@ fn run_result_file_reports_prelaunch_failure_without_mixing_streams() {
     assert_eq!(output.status.code(), Some(1));
     let result: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).expect("prelaunch result file")).unwrap();
+    validate_run_result(&result);
     assert_eq!(result["schema_version"], 1);
     assert_eq!(result["operation"], "run");
     assert_eq!(result["outcome"], "prelaunch_failure");
@@ -491,6 +507,7 @@ process.exitCode=37;
     let bytes = fs::read(&path).unwrap();
     assert_eq!(bytes.last(), Some(&b'\n'));
     let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    validate_run_result(&result);
     assert_eq!(result["outcome"], "completed");
     assert_eq!(result["receipt"]["termination"], "Exited(37)");
     assert_eq!(result["receipt"]["assurance"], "Restricted");
@@ -535,6 +552,7 @@ fn run_result_file_covers_configuration_preparation_and_containment_failures() {
         let output = invoke(project.path(), &arguments);
         assert_eq!(output.status.code(), Some(1));
         let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        validate_run_result(&result);
         assert_eq!(result["outcome"], outcome);
         assert_eq!(result["error"]["code"], code);
         assert!(result["receipt"].is_null());
@@ -574,6 +592,7 @@ fn run_result_file_reports_unsupported_containment_without_fallback() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!project.path().join("spawned").exists());
     let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    validate_run_result(&result);
     assert_eq!(result["outcome"], "execution_failure");
     assert_eq!(result["error"]["code"], "unsupported-containment");
     assert_eq!(
@@ -609,6 +628,7 @@ fn run_result_file_covers_project_manifest_and_workspace_failures() {
         let output = invoke(project.path(), &arguments);
         assert_eq!(output.status.code(), Some(1));
         let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        validate_run_result(&result);
         assert_eq!(result["outcome"], "prelaunch_failure");
         assert_eq!(result["error"]["code"], code);
         assert!(result["error"]["completion"].is_null());
@@ -1018,4 +1038,47 @@ fn run_preflight_shortened_metadata_is_a_typed_failure() {
             .unwrap()
             .contains(&serde_json::json!("/data/script/name"))
     );
+}
+
+#[test]
+fn run_preflight_reports_selected_member_manifest_for_missing_script() {
+    let project = tapid_test_support::TempProject::new("preflight-member-location").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/app/package.json",
+            br#"{"name":"app","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            "missing",
+            "--workspace",
+            "app",
+            "--preflight",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let blocker = &value["data"]["blockers"][0];
+    assert_eq!(blocker["code"], "SCRIPT_MISSING");
+    assert_eq!(
+        blocker["location"]["selected_manifest"],
+        fs::canonicalize(project.path().join("packages/app/package.json"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(blocker["location"]["field"], "scripts");
+    assert_eq!(blocker["location"]["key"], "missing");
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!project.path().join("tapid.toml").exists());
 }

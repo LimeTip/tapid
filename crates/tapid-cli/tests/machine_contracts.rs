@@ -137,7 +137,7 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
     let project = TempProject::new("schema-catalog").unwrap();
     let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
     let catalog = discovery["data"]["schema_catalog"].as_array().unwrap();
-    assert_eq!(catalog.len(), 4);
+    assert_eq!(catalog.len(), 6);
     let advertised = catalog
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
@@ -161,6 +161,8 @@ fn schema_catalog_exports_match_packaged_files_and_have_bounded_complete_output(
         assert!(wrapper_validator.is_valid(&exported["data"]), "{exported}");
         let source: Value = serde_json::from_str(match id {
             "tapid.schema-export.v1" => include_str!("../schemas/cli/schema-export.v1.schema.json"),
+            "tapid.run-receipt.v1" => include_str!("../schemas/cli/run-receipt.v1.schema.json"),
+            "tapid.run-result.v1" => include_str!("../schemas/cli/run-result.v1.schema.json"),
             "tapid.status.v1" => include_str!("../schemas/cli/status.v1.schema.json"),
             "tapid.run-preflight.v1" => PREFLIGHT,
             "tapid.capabilities.v1" => include_str!("../schemas/cli/capabilities.v1.schema.json"),
@@ -324,4 +326,122 @@ fn schema_export_contract_validates_wrappers_and_rejects_invalid_identifiers() {
     let mut additive = exported["data"].clone();
     additive["future"] = json!(true);
     assert!(validator.is_valid(&additive));
+}
+
+#[test]
+fn run_result_schema_validates_trusted_prelaunch_failure() {
+    let project = TempProject::new("run-result-schema").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &["--json", "capabilities", "--schema", "tapid.run-result.v1"],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    for source in [
+        include_str!("../schemas/cli/examples/run-result-prelaunch.v1.json"),
+        include_str!("../schemas/cli/examples/run-result-completed.v1.json"),
+    ] {
+        let example: Value = serde_json::from_str(source).unwrap();
+        assert!(validator.is_valid(&example), "{example}");
+    }
+    let mut completed: Value = serde_json::from_str(include_str!(
+        "../schemas/cli/examples/run-result-completed.v1.json"
+    ))
+    .unwrap();
+    completed["receipt"]["completion"]["cleanup_confidence"] = json!("Unknown");
+    assert!(!validator.is_valid(&completed));
+    completed["receipt"]["completion"]["cleanup_confidence"] = json!("NotGuaranteed");
+    completed["receipt"]["enforced"]["network"] = json!("true");
+    assert!(!validator.is_valid(&completed));
+    let owner = TempProject::new("run-result-schema-owner").unwrap();
+    let home = TempHome::new("run-result-schema").unwrap();
+    let path = owner.path().join("result.json");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+    command
+        .env_clear()
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .current_dir(project.path())
+        .args(["run", "missing", "--result-file"])
+        .arg(&path);
+    #[cfg(windows)]
+    command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(result["outcome"], "prelaunch_failure");
+    assert!(validator.is_valid(&result), "{result}");
+    for (key, value) in [
+        ("schema_version", json!(2)),
+        ("receipt", json!({})),
+        ("error", Value::Null),
+        ("outcome", json!("completed")),
+    ] {
+        let mut invalid = result.clone();
+        invalid[key] = value;
+        assert!(!validator.is_valid(&invalid), "accepted {key}");
+    }
+    let mut missing = result.clone();
+    missing.as_object_mut().unwrap().remove("policy_inputs");
+    assert!(!validator.is_valid(&missing));
+    let mut additive = result;
+    additive["future"] = json!(true);
+    assert!(validator.is_valid(&additive));
+}
+
+#[test]
+fn legacy_run_receipt_schema_preserves_channel_and_version_limits() {
+    let project = TempProject::new("run-receipt-schema").unwrap();
+    let (output, exported) = invoke(
+        &project,
+        &["--json", "capabilities", "--schema", "tapid.run-receipt.v1"],
+    );
+    assert!(output.status.success(), "{exported}");
+    let validator = jsonschema::validator_for(&exported["data"]["schema"]).unwrap();
+    let completed: Value = serde_json::from_str(include_str!(
+        "../schemas/cli/examples/run-result-completed.v1.json"
+    ))
+    .unwrap();
+    let example: Value =
+        serde_json::from_str(include_str!("../schemas/cli/examples/run-receipt.v1.json")).unwrap();
+    assert!(validator.is_valid(&example));
+    let mut receipt = completed["receipt"].clone();
+    assert!(validator.is_valid(&receipt));
+    receipt["schema_version"] = json!(2);
+    assert!(!validator.is_valid(&receipt));
+    receipt["schema_version"] = json!(1);
+    receipt.as_object_mut().unwrap().remove("completion");
+    assert!(!validator.is_valid(&receipt));
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    let run = discovery["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["path"] == "run")
+        .unwrap();
+    let mode = run["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mode| mode["id"] == "receipt_json")
+        .unwrap();
+    assert_eq!(mode["json"], "unsupported");
+    assert_eq!(mode["separate_channels"], json!(["receipt-json"]));
+    assert_eq!(mode["trusted_channel"], false);
+    let discovery_schema: Value =
+        serde_json::from_str(include_str!("../schemas/cli/capabilities.v1.schema.json")).unwrap();
+    let mode_schema =
+        &discovery_schema["properties"]["commands"]["items"]["properties"]["modes"]["items"];
+    let mode_validator = jsonschema::validator_for(mode_schema).unwrap();
+    let mut invalid_mode = mode.clone();
+    invalid_mode["trusted_channel"] = json!("false");
+    assert!(!mode_validator.is_valid(&invalid_mode));
+
+    assert_eq!(
+        run["modes"][0]["when"],
+        json!({"preflight": false, "result_file": "absent", "receipt_json": false})
+    );
 }

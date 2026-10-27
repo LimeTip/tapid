@@ -42,7 +42,7 @@
         "code": {"type": "string", "minLength": 1},
         "location": {
           "type": "object", "required": ["project", "manifest", "configuration"],
-          "properties": {"project": {"type": "string"}, "manifest": {"type": "string"}, "configuration": {"type": "string"}}
+          "properties": {"project": {"type": "string"}, "manifest": {"type": "string"}, "configuration": {"type": "string"}, "selected_manifest": {"type": ["string", "null"]}, "field": {"type": "string"}, "key": {"type": "string"}}
         },
         "action": {"type": "object", "required": ["id", "description"], "properties": {"id": {"type": "string"}, "description": {"type": "string"}}}
       }

@@ -522,6 +522,12 @@ Schema coverage is currently `partial`. The catalog advertises
 `tapid.run-preflight.v1`, `tapid.capabilities.v1`, `tapid.status.v1`, and
 `tapid.schema-export.v1`, targeting the envelope's `data` payload for preflight,
 default discovery, status, and schema export respectively.
+`tapid.run-result.v1` targets the complete trusted `result_file` object, and
+`tapid.run-receipt.v1` targets the legacy `stderr_receipt` object. The run modes
+name their separate channels; neither accepts global JSON. Schema validity checks
+shape and versions, not authenticity or successful child exit. A legacy receipt
+remains mixed with child stderr and is never a trusted result channel.
+The packaged completed examples are synthetic format fixtures, not execution evidence.
 Status preserves its existing payload fields: select its version using the catalog
 and envelope version, rather than requiring a new payload contract field. The separate
 `schema_export` mode returns a wrapper covered by `tapid.schema-export.v1`.
@@ -546,3 +552,8 @@ runner assurance.
 version. Validate the exported schema's payload separately. Wrapper validation
 does not establish project compatibility or process enforcement. Unknown
 additive fields may be ignored; unknown identifiers require explicit handling.
+
+Preflight blocker locations also include `selected_manifest` when shared script
+selection identified it; otherwise this value is null. A missing script identifies
+`field: "scripts"` and the requested `key`, including for selected workspace members.
+These are local selection facts, not proof that runtime launch checks passed.
