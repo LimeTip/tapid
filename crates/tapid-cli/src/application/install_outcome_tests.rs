@@ -322,6 +322,11 @@ fn batch_recovers_existing_transaction_crash_points() {
     // process-global environment changes in the parent test runner.
     if let Some(project) = std::env::var_os("TAPID_BATCH_CRASH_PROJECT") {
         let project = PathBuf::from(project);
+        assert_eq!(
+            fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+            fs::canonicalize(&project).unwrap(),
+            "crash artifacts must stay in the isolated temporary project"
+        );
         batch::run(
             &project,
             None,
@@ -376,6 +381,9 @@ fn batch_recovers_existing_transaction_crash_points() {
         fs::write(&fixture, metadata.to_string()).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "application::install::outcome_tests::batch_recovers_existing_transaction_crash_points", "--nocapture"])
+            // Abort may write a core dump on Linux. Keep it in the fixture,
+            // where TempProject removes it along with the interrupted state.
+            .current_dir(project.path())
             .env_clear()
             .env("HOME", home.path()).env("USERPROFILE", home.path())
             .env("XDG_CACHE_HOME", home.path()).env("LOCALAPPDATA", home.path())

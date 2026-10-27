@@ -101,7 +101,14 @@ fixed control-before-candidate order, no HTTP, and local storage noise. It does
 not establish a production latency percentage or superiority over ordinary
 multi-add for one section.
 
-## Current-source measurements and validation
+## Public implementation measurements and validation
+
+These measurements describe the public implementation before the subsequent
+test-only crash-child isolation repair. That repair changes the crash test's
+working directory and verifies isolation; it does not change the measured path
+or production behavior. The recorded fingerprint is historical rather than the
+fingerprint of the repaired snapshot. See the [validation recovery report](dependency-edits-validation-recovery.md)
+for the repair and checks on that snapshot.
 
 All 60 final samples passed exact declaration/lock-record/binding/layout comparisons. Rust source delta fingerprint: `013af0bf372a79a0427312da24a189417e79584eebfe11ae85e05b8763e4733e`, over base `13c875ee4b1e754d8f4e1d62061aefd194f816e4`. The first line of [raw public samples](dependency-edits-public-samples.jsonl) contains the exact path list, hash recipe, fixture digest, runtime and command. The prototype raw samples remain historical evidence for the earlier go decision; the new file records this implementation. Documentation/sample files are excluded from the Rust fingerprint to avoid self-reference.
 
