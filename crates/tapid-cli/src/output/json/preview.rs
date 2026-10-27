@@ -14,6 +14,11 @@ pub(crate) fn preview(
         .iter()
         .map(|value| value.as_str().expect("truncation pointer").to_owned())
         .collect::<Vec<_>>();
+    super::diagnostic::exclusion_truncation(
+        &report.candidate_exclusions,
+        "/data/candidate_exclusions",
+        &mut truncated,
+    );
     sanitize_preview(&mut data, "/data", &mut truncated);
     result["data"] = data;
     truncated.sort_unstable();
