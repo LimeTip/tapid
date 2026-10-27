@@ -2,6 +2,45 @@ use super::{command_support::CliFixture, isolated_command};
 use std::path::PathBuf;
 
 #[test]
+fn command_fixture_preserves_coverage_profile_destination() {
+    let fixture = CliFixture::new("coverage-command-fixture");
+    let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") else {
+        let profiles = tapid_test_support::TempProject::new("coverage-profile-owner").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "command_fixture_tests::command_fixture_preserves_coverage_profile_destination",
+                "--nocapture",
+            ])
+            .env(
+                "LLVM_PROFILE_FILE",
+                profiles.path().join("child-%p.profraw"),
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    };
+    let mut command = fixture.command(&["--json", "capabilities"]);
+    assert_eq!(
+        command
+            .get_envs()
+            .find(|(key, _)| *key == "LLVM_PROFILE_FILE"),
+        Some((
+            std::ffi::OsStr::new("LLVM_PROFILE_FILE"),
+            Some(profile.as_os_str())
+        ))
+    );
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_dir(fixture.project.path()).unwrap().count(),
+        0
+    );
+}
+
+#[test]
 fn command_fixture_preserves_arguments_including_global_option_order() {
     let project = tapid_test_support::TempProject::new("command-fixture-arguments").unwrap();
     for args in [

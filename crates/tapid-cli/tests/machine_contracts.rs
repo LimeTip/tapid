@@ -387,6 +387,24 @@ fn schema_export_contract_validates_wrappers_and_rejects_invalid_identifiers() {
 #[test]
 fn run_result_schema_validates_trusted_prelaunch_failure() {
     let project = TempProject::new("run-result-schema").unwrap();
+    project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let (_, discovery) = invoke(&project, &["--json", "capabilities"]);
+    let run = discovery["data"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|command| command["path"] == "run")
+        .unwrap();
+    let result_mode = run["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mode| mode["id"] == "result_file")
+        .unwrap();
+    assert_eq!(result_mode["effects"]["other_writes_possible"], true);
     let (output, exported) = invoke(
         &project,
         &["--json", "capabilities", "--schema", "tapid.run-result.v1"],
@@ -429,6 +447,12 @@ fn run_result_schema_validates_trusted_prelaunch_failure() {
     assert!(!output.status.success());
     let result: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(result["outcome"], "prelaunch_failure");
+    assert_eq!(result["error"]["code"], "SCRIPT_MISSING");
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
     assert!(validator.is_valid(&result), "{result}");
     for (key, value) in [
         ("schema_version", json!(2)),

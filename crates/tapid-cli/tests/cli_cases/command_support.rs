@@ -32,6 +32,10 @@ pub(super) fn command_in_home(
     if clear_environment {
         command.env_clear();
     }
+    // Instrumented children must keep profiles outside the isolated project.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     command
         .args(args)
         .current_dir(project)

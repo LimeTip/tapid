@@ -241,6 +241,7 @@ fn describe(command: &clap::Command, path: &str, commands: &mut Vec<Value>) {
         modes[0]["when"] =
             json!({"preflight": false, "result_file": "absent", "receipt_json": false});
         let mut result = mode("result_file", "execution", "unsupported");
+        result["effects"]["other_writes_possible"] = json!(true);
         result["when"] = json!({"result_file": "present"});
         result["separate_channels"] = json!(["result-file"]);
         result["schema_coverage"] = json!("payload");
