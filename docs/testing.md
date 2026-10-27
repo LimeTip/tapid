@@ -14,20 +14,30 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
-The temporary filesystem must permit execution of generated fixture files. Unix
-installer, package-bin, and verified-tool tests deliberately execute scripts after
-setting their executable permissions. A `noexec` mount or worker execution policy
-can return `PermissionDenied` even when the mode bits are correct. Do not skip
-these tests or invoke their scripts through an interpreter: direct execution is
-part of their contract.
+The runtime temporary directory must permit executing generated files. Unix
+installer, verified-tool, and package-bin tests directly execute fixture scripts
+after setting their executable bits. A `noexec` temporary mount causes
+`Permission denied` even when those bits are correct. In an isolated validation
+worker, provision a writable, execution-enabled scratch directory and export
+`TMPDIR` to it before starting Cargo. For example, when the build filesystem
+permits execution, run from the repository root:
 
-For an isolated Linux validation worker, provision a private writable temporary
-directory on an execution-enabled filesystem and export its absolute path as
-`TMPDIR` before starting Cargo. Check the mount options and execution policy in
-that worker if generated fixtures cannot launch; a passing host run cannot prove
-the worker's configuration. Keep validation inside the isolated worker, without
-host credentials or an unsandboxed host fallback. Linux results do not establish
-native macOS or Windows containment behavior.
+```sh
+mkdir -p target/test-tmp
+TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --all-features --locked
+```
+
+This changes fixture placement, not test behavior or containment policy. Do not
+invoke scripts through an interpreter to bypass direct-execution assertions or
+skip failed execution tests. A worker must permit executing its scratch files;
+changing `TMPDIR` cannot override a sandbox execution denial. Native containment
+tests still require the supported platform environment described below.
+
+Keep validation inside the isolated worker, without host credentials or an
+unsandboxed host fallback. Check both mount options and worker execution policy
+when generated fixtures cannot launch; a passing host run cannot prove the
+worker configuration. Linux results do not establish native macOS or Windows
+containment behavior.
 
 ## Development prerequisites and build reuse
 
