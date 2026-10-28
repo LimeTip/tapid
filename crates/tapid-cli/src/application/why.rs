@@ -6,17 +6,9 @@ use crate::{
     filesystem::atomic::digest_bytes,
 };
 use serde::Serialize;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
-use tapid_lockfile::{Lockfile, LockfilePackageKey, LockfilePackageSource};
+use std::{collections::BTreeMap, fs, path::Path};
+use tapid_lockfile::{Lockfile, LockfilePackageKey};
 use tapid_manifest::PackageManifest;
-
-const MAX_PATHS: usize = 50;
-const MAX_DEPTH: usize = 128;
-const MAX_VISITS: usize = 10_000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,41 +24,7 @@ pub(crate) struct WhyReport {
     pub(crate) truncated: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WhyPath {
-    pub(crate) steps: Vec<WhyStep>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WhyStep {
-    pub(crate) key: String,
-    pub(crate) via: Option<String>,
-    pub(crate) edge_kind: Option<String>,
-    pub(crate) source_kind: &'static str,
-}
-
-#[derive(Clone)]
-struct Edge {
-    name: String,
-    target: String,
-    kind: &'static str,
-}
-
-#[derive(Clone)]
-struct Root {
-    key: String,
-    name: String,
-    kind: String,
-}
-
-#[derive(Default)]
-struct SearchState {
-    paths: Vec<WhyPath>,
-    truncated: bool,
-    visits: usize,
-}
+use tapid_lockfile::{LockedGraphPath as WhyPath, LockedGraphRoot as Root};
 
 pub(crate) fn explain(
     project_dir: &Path,
@@ -112,33 +70,8 @@ pub(crate) fn explain(
             &selection.manifest_path,
         )?
     };
-    let graph = graph(&lock)?;
-    let mut state = SearchState::default();
-    for root in roots {
-        let Some(source_kind) = graph.nodes.get(&root.key).map(source_kind) else {
-            continue;
-        };
-        let first = WhyStep {
-            key: root.key.clone(),
-            via: Some(root.name.clone()),
-            edge_kind: Some(root.kind.clone()),
-            source_kind,
-        };
-        let mut path = vec![first];
-        let mut visited = BTreeSet::from([root.key.clone()]);
-        search_paths(
-            &root.key,
-            &requested,
-            &graph,
-            &mut visited,
-            &mut path,
-            &mut state,
-            0,
-        );
-        if state.truncated {
-            break;
-        }
-    }
+    let graph = lock.graph().map_err(OperationalError::from)?;
+    let state = graph.paths_to(&roots, &requested);
 
     let warnings = if state.paths.iter().any(|path| {
         path.steps
@@ -315,165 +248,16 @@ pub(super) fn requiring_edges(
     lock: &Lockfile,
 ) -> Result<BTreeMap<String, Vec<String>>, OperationalError> {
     let mut reasons = BTreeMap::<String, Vec<String>>::new();
-    for (parent, edges) in graph(lock)?.edges {
+    for (parent, edges) in lock.graph().map_err(OperationalError::from)?.edges() {
         let parent = parent.replace('|', " ");
         for edge in edges {
             reasons
-                .entry(edge.target)
+                .entry(edge.target.clone())
                 .or_default()
                 .push(format!("{parent} through {} '{}'", edge.kind, edge.name));
         }
     }
     Ok(reasons)
-}
-
-struct WhyGraph {
-    edges: BTreeMap<String, Vec<Edge>>,
-    nodes: BTreeMap<String, LockfilePackageKey>,
-}
-
-fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
-    let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
-    let mut nodes = BTreeMap::new();
-    for (key, package) in lock.packages_typed().map_err(OperationalError::from)? {
-        nodes.insert(key.to_string(), key.clone());
-        graph.insert(
-            key.to_string(),
-            package
-                .dependencies()
-                .iter()
-                .map(|(name, target)| Edge {
-                    name: name.clone(),
-                    target: target.clone(),
-                    kind: "dependency",
-                })
-                .collect(),
-        );
-    }
-    for (key, package) in lock
-        .workspace_packages_typed()
-        .map_err(OperationalError::from)?
-    {
-        nodes.insert(key.to_string(), key.clone());
-        graph.insert(
-            key.to_string(),
-            package
-                .dependencies()
-                .iter()
-                .map(|(name, target)| Edge {
-                    name: name.clone(),
-                    target: target.clone(),
-                    kind: "dependency",
-                })
-                .collect(),
-        );
-    }
-    let mut providers = BTreeMap::<_, Vec<&LockfilePackageKey>>::new();
-    for key in nodes.values() {
-        providers
-            .entry((&key.source, &key.name, &key.version))
-            .or_default()
-            .push(key);
-    }
-    for (encoded, source) in &nodes {
-        let peer_context = source.peer_context()?;
-        for (name, version) in peer_context.entries() {
-            for target in providers
-                .get(&(&source.source, name, version))
-                .into_iter()
-                .flatten()
-            {
-                graph
-                    .get_mut(encoded)
-                    .expect("indexed graph node")
-                    .push(Edge {
-                        name: name.to_string(),
-                        target: target.to_string(),
-                        kind: "peer",
-                    });
-            }
-        }
-    }
-    Ok(WhyGraph {
-        edges: graph,
-        nodes,
-    })
-}
-
-fn source_kind(key: &LockfilePackageKey) -> &'static str {
-    match &key.source {
-        LockfilePackageSource::Workspace(_) => "workspace",
-        LockfilePackageSource::Copied(_) => "copied",
-        _ => "registry",
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn search_paths(
-    current: &str,
-    requested: &tapid_core::PackageName,
-    graph: &WhyGraph,
-    visited: &mut BTreeSet<String>,
-    path: &mut Vec<WhyStep>,
-    state: &mut SearchState,
-    depth: usize,
-) {
-    if state.visits >= MAX_VISITS {
-        state.truncated = true;
-        return;
-    }
-    state.visits += 1;
-    let Some(current_key) = graph.nodes.get(current) else {
-        return;
-    };
-    if &current_key.name == requested {
-        if state.paths.len() == MAX_PATHS {
-            state.truncated = true;
-        } else {
-            state.paths.push(WhyPath {
-                steps: path.clone(),
-            });
-        }
-    }
-    if depth >= MAX_DEPTH {
-        if graph
-            .edges
-            .get(current)
-            .is_some_and(|edges| !edges.is_empty())
-        {
-            state.truncated = true;
-        }
-        return;
-    }
-    for edge in graph.edges.get(current).into_iter().flatten() {
-        if state.truncated {
-            return;
-        }
-        if !visited.insert(edge.target.clone()) {
-            continue;
-        }
-        let Some(source_kind) = graph.nodes.get(&edge.target).map(source_kind) else {
-            visited.remove(&edge.target);
-            continue;
-        };
-        path.push(WhyStep {
-            key: edge.target.clone(),
-            via: Some(edge.name.clone()),
-            edge_kind: Some(edge.kind.to_owned()),
-            source_kind,
-        });
-        search_paths(
-            &edge.target,
-            requested,
-            graph,
-            visited,
-            path,
-            state,
-            depth + 1,
-        );
-        path.pop();
-        visited.remove(&edge.target);
-    }
 }
 
 #[cfg(test)]
@@ -490,7 +274,7 @@ mod tests {
             PeerContext::default().with("provider".parse().unwrap(), "1.0.0".parse().unwrap());
         let generic = PlatformContext::new(None, None, None).unwrap();
         let linux = PlatformContext::new(Some("linux"), None, None).unwrap();
-        let mut providers = BTreeSet::new();
+        let mut providers = std::collections::BTreeSet::new();
         let mut consumer = String::new();
         for (name, peer, platform) in [
             ("provider", &empty, &generic),
@@ -514,155 +298,14 @@ mod tests {
             }
             lock.insert_package(package).unwrap();
         }
-        let graph = graph(&lock).unwrap();
-        let targets = graph.edges[&consumer]
+        lock.set_roots([consumer.clone()]).unwrap();
+        let graph = lock.graph().unwrap();
+        let targets = graph.edges()[&consumer]
             .iter()
             .filter(|edge| edge.kind == "peer")
             .map(|edge| edge.target.clone())
-            .collect::<BTreeSet<_>>();
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(targets, providers);
-    }
-
-    fn package_key(name: &str, version: &str) -> String {
-        tapid_lockfile::LockedPackage::new_with_provenance(
-            "https://registry.npmjs.org",
-            name,
-            version,
-            &format!("sha512-{}==", "A".repeat(86)),
-            &format!("sha256-{}", "a".repeat(64)),
-            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
-        )
-        .unwrap()
-        .key()
-    }
-
-    #[test]
-    fn traversal_is_cycle_safe_and_reports_duplicate_scoped_versions() {
-        let root = package_key("root", "1.0.0");
-        let middle = package_key("middle", "1.0.0");
-        let target_one = package_key("@scope/target", "1.0.0");
-        let target_two = package_key("@scope/target", "2.0.0");
-        let graph = BTreeMap::from([
-            (
-                root.clone(),
-                vec![
-                    Edge {
-                        name: "middle".into(),
-                        target: middle.clone(),
-                        kind: "dependency",
-                    },
-                    Edge {
-                        name: "target-v2".into(),
-                        target: target_two.clone(),
-                        kind: "dependency",
-                    },
-                ],
-            ),
-            (
-                middle.clone(),
-                vec![
-                    Edge {
-                        name: "root".into(),
-                        target: root.clone(),
-                        kind: "dependency",
-                    },
-                    Edge {
-                        name: "target-v1".into(),
-                        target: target_one.clone(),
-                        kind: "dependency",
-                    },
-                ],
-            ),
-            (
-                target_one.clone(),
-                vec![Edge {
-                    name: "target-v2".into(),
-                    target: target_two.clone(),
-                    kind: "dependency",
-                }],
-            ),
-            (target_two.clone(), Vec::new()),
-        ]);
-        let graph = WhyGraph {
-            nodes: graph
-                .keys()
-                .map(|key| (key.clone(), key.parse().unwrap()))
-                .collect(),
-            edges: graph,
-        };
-        let requested: tapid_core::PackageName = "@scope/target".parse().unwrap();
-        let mut state = SearchState::default();
-        let mut path = vec![WhyStep {
-            key: root.clone(),
-            via: Some("root".into()),
-            edge_kind: Some("dependencies".into()),
-            source_kind: "registry",
-        }];
-        search_paths(
-            &root,
-            &requested,
-            &graph,
-            &mut BTreeSet::from([root.clone()]),
-            &mut path,
-            &mut state,
-            0,
-        );
-        let final_keys = state
-            .paths
-            .iter()
-            .map(|path| path.steps.last().unwrap().key.as_str())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            final_keys,
-            BTreeSet::from([target_one.as_str(), target_two.as_str()])
-        );
-        assert_eq!(state.paths.len(), 3);
-        assert!(state.paths.iter().any(|path| {
-            path.steps.last().is_some_and(|step| step.key == target_two) && path.steps.len() == 4
-        }));
-        assert!(!state.truncated);
-    }
-
-    #[test]
-    fn traversal_caps_path_results_and_marks_the_report_truncated() {
-        let root = package_key("root", "1.0.0");
-        let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
-        let mut edges = Vec::new();
-        for version in 0..=MAX_PATHS {
-            let target = package_key("target", &format!("1.0.{version}"));
-            edges.push(Edge {
-                name: format!("target-{version}"),
-                target: target.clone(),
-                kind: "dependency",
-            });
-            graph.insert(target, Vec::new());
-        }
-        graph.insert(root.clone(), edges);
-        let graph = WhyGraph {
-            nodes: graph
-                .keys()
-                .map(|key| (key.clone(), key.parse().unwrap()))
-                .collect(),
-            edges: graph,
-        };
-        let requested: tapid_core::PackageName = "target".parse().unwrap();
-        let mut state = SearchState::default();
-        search_paths(
-            &root,
-            &requested,
-            &graph,
-            &mut BTreeSet::from([root.clone()]),
-            &mut vec![WhyStep {
-                key: root.clone(),
-                via: Some("root".into()),
-                edge_kind: Some("dependencies".into()),
-                source_kind: "registry",
-            }],
-            &mut state,
-            0,
-        );
-        assert_eq!(state.paths.len(), MAX_PATHS);
-        assert!(state.truncated);
     }
 
     #[test]
@@ -714,14 +357,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn workspace_lock_identity_is_reported_as_workspace_source() {
-        let source =
-            tapid_lockfile::LocalWorkspaceSource::new("packages/lib", "lib", "1.0.0").unwrap();
-        let key = tapid_lockfile::LockfilePackageKey::workspace(source).to_string();
-        assert_eq!(source_kind(&key.parse().unwrap()), "workspace");
     }
 
     #[test]

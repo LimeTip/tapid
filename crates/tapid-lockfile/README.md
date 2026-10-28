@@ -59,3 +59,19 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+`Lockfile::graph()` revalidates the native model through the owning reader and
+indexes exact source-qualified nodes, named dependency edges and recorded roots.
+It retains same-name roots, aliases, workspace identities, and all recorded
+platform/peer contexts without host filtering. Rootless legacy inputs have no
+recorded roots; callers must disclose that missing coverage rather than infer
+registry identities. Imported npm graphs continue to use
+`ImportedNpmLockfile::graph()`, preserving placements and multi-platform
+constraints rather than coercing them into native keys.
+
+`LockedGraph::paths_to()` shares the cycle-safe explanation traversal used by
+`tapid why`, with limits of 50 paths, 128 levels and 10,000 visits and an explicit
+truncation flag. Native peer edges retain all same-origin contextual candidates
+for explanation; they do not prove an exact security-evidence subject. Consumers
+must establish applicability separately. Graph inspection does not load store
+content, recover transactions, resolve versions, or mutate the lock.
