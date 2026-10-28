@@ -59,3 +59,22 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+Schema 11 is an ordinary-lock persistence building block for recorded selection
+facts. `LockedSelection` records the effective OS/CPU/libc, development or
+production profile, and canonically ordered optional-declaration cuts. Origins
+identify the root, an exact workspace key, or an exact package key; local names,
+requirements, exact registry origins, and known removed target keys retain aliases
+and instance context.
+The initial reason allowlist contains confirmed metadata absence, no usable
+candidate, and incompatible platform. Archive, integrity, authentication and
+containment failures cannot be represented as accepted reasons.
+
+`set_selection` validates before changing the lock. Readers and writers reject
+legacy-schema ledgers, missing schema 11 facts, duplicate declarations, dangling
+origins, selected-edge conflicts, and mismatched known target identities. Existing
+schemas remain readable without invented reasons. Imported schema 8 remains a
+separate placement contract and rejects these ordinary-lock fields. Schema 11
+replay currently fails explicitly until target/profile-aware replay is integrated;
+normal CLI selection does not yet emit this schema. This persistence API alone
+does not establish complete optional-dependency failure support.

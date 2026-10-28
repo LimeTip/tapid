@@ -1013,3 +1013,143 @@ fn lifecycle_outputs_reject_forged_or_unordered_records() {
         assert!(Lockfile::from_json(&value.to_string()).is_err());
     }
 }
+
+#[test]
+fn omission_ledger_round_trip_and_hostile_input() {
+    let lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value["lockfileVersion"] = 11.into();
+    value["selection"] = serde_json::json!({
+        "target": {"os": "linux", "cpu": "x86_64", "libc": "gnu"},
+        "profile": "development",
+        "omissions": [{"origin": {"kind": "root"}, "name": "native",
+            "requirement": "^1", "registry": "https://registry.example.test", "reason": "metadataAbsent"}]
+    });
+    let parsed = Lockfile::from_json(&value.to_string()).unwrap();
+    let canonical = parsed.to_json().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&canonical).unwrap()["selection"],
+        value["selection"]
+    );
+    assert_eq!(
+        Lockfile::from_json(&canonical).unwrap().to_json().unwrap(),
+        canonical
+    );
+    for version in [7, 8, 9, 10] {
+        let mut hostile = value.clone();
+        hostile["lockfileVersion"] = version.into();
+        assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    }
+    for reason in [
+        "integrityMismatch",
+        "malformedArchive",
+        "containmentFailure",
+        "unknown",
+    ] {
+        let mut hostile = value.clone();
+        hostile["selection"]["omissions"][0]["reason"] = reason.into();
+        assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    }
+    for registry in [
+        "https://user:secret@registry.example.test",
+        "https://REGISTRY.example.test",
+        "http://registry.example.test",
+    ] {
+        let mut hostile = value.clone();
+        hostile["selection"]["omissions"][0]["registry"] = registry.into();
+        assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    }
+    let mut hostile = value.clone();
+    hostile["selection"]["omissions"]
+        .as_array_mut()
+        .unwrap()
+        .push(value["selection"]["omissions"][0].clone());
+    assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    value.as_object_mut().unwrap().remove("selection");
+    assert!(Lockfile::from_json(&value.to_string()).is_err());
+}
+
+#[test]
+fn omission_ledger_rejects_identity_confusion_and_replay_without_target_checks() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    let selected = package_fixture();
+    let key = selected.key();
+    lock.insert_package(selected).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    wire["lockfileVersion"] = 11.into();
+    wire["selection"] = serde_json::json!({
+        "target": {"os": "linux", "cpu": "x86_64", "libc": "gnu"},
+        "profile": "development", "omissions": [{"origin": {"kind": "root"},
+            "name": "different", "requirement": "^1", "registry": "https://registry.example.test", "target": key,
+            "reason": "incompatiblePlatform"}]
+    });
+    assert!(Lockfile::from_json(&wire.to_string()).is_err());
+    // A canonical but absent target must still match the declaration's actual identity.
+    let absent = key.replace("1.0.0", "9.0.0");
+    wire["selection"]["omissions"][0]["target"] = absent.into();
+    assert!(Lockfile::from_json(&wire.to_string()).is_err());
+    wire["selection"]["omissions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("target");
+    let parsed = Lockfile::from_json(&wire.to_string()).unwrap();
+    assert!(matches!(
+        parsed.validate_replay(&digest),
+        Err(crate::LockfileError::SelectionReplayNotSupported)
+    ));
+    for field in ["os", "cpu", "libc"] {
+        let mut hostile = wire.clone();
+        hostile["selection"]["target"][field] = "../unsafe".into();
+        assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    }
+    for origin in [
+        serde_json::json!({"kind":"package", "key":key}),
+        serde_json::json!({"kind":"workspace", "key":key}),
+    ] {
+        let mut hostile = wire.clone();
+        hostile["selection"]["omissions"][0]["origin"] = origin;
+        if hostile["selection"]["omissions"][0]["origin"]["kind"] == "workspace" {
+            assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+        } else {
+            assert!(Lockfile::from_json(&hostile.to_string()).is_ok());
+        }
+    }
+}
+
+#[test]
+fn omission_ledger_updates_are_atomic_and_revalidate_on_serialization() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    let selection = crate::LockedSelection {
+        target: crate::SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: Some("gnu".into()),
+        },
+        profile: crate::SelectionProfile::Production,
+        omissions: vec![crate::AcceptedOmission {
+            origin: crate::OmissionOrigin::Root,
+            name: "tapid".into(),
+            requirement: "^1".into(),
+            registry: "https://registry.example.test".into(),
+            target: None,
+            reason: crate::OmissionReason::MetadataAbsent,
+        }],
+    };
+    lock.set_selection(selection.clone()).unwrap();
+    assert_eq!(lock.selection(), Some(&selection));
+    let before = lock.to_json().unwrap();
+    let mut invalid = selection;
+    invalid.omissions.push(invalid.omissions[0].clone());
+    assert!(lock.set_selection(invalid).is_err());
+    assert_eq!(lock.to_json().unwrap(), before);
+    let package = package_fixture();
+    let key = package.key();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    lock.set_root_bindings([("tapid".into(), key)].into())
+        .unwrap();
+    assert!(lock.to_json().is_err());
+}

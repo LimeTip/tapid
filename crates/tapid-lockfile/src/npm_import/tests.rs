@@ -508,3 +508,17 @@ fn graph_cache_is_reused_and_deserialization_still_validates_graph() {
     let unchecked: ImportedNpmLockfile = serde_json::from_value(invalid).unwrap();
     assert!(unchecked.graph().is_err());
 }
+
+#[test]
+fn imported_placements_reject_ordinary_selection_contract() {
+    let lock = ImportedNpmLockfile::import(INPUT, MANIFEST, DIGEST).unwrap();
+    let mut wire: Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    wire["selection"] = serde_json::json!({
+        "target":{"os":"linux","cpu":"x86_64","libc":"gnu"},
+        "profile":"development","omissions":[]
+    });
+    assert!(ImportedNpmLockfile::from_json(&wire.to_string()).is_err());
+    wire.as_object_mut().unwrap().remove("selection");
+    wire["lockfileVersion"] = crate::SELECTION_LOCKFILE_VERSION.into();
+    assert!(ImportedNpmLockfile::from_json(&wire.to_string()).is_err());
+}
