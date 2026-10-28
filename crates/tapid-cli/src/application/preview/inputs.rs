@@ -41,8 +41,14 @@ fn routing(config: &crate::registry::RegistryConfig) -> Value {
         .as_object_mut()
         .expect("registry projection")
         .remove("credentials");
+    for route in value["routes"].as_array_mut().expect("registry routes") {
+        let route = route.as_object_mut().expect("registry route");
+        route.remove("layer");
+        route.remove("source");
+    }
     value
 }
+
 impl Inputs {
     pub fn capture(project: &Path, target: &Path) -> Result<Self, OperationalError> {
         let root = fs::canonicalize(project)
@@ -202,5 +208,21 @@ impl Inputs {
             "target":format!("{}/{}/{}",std::env::consts::OS,std::env::consts::ARCH,online::current_libc().unwrap_or("unspecified")),
             "consistency":"rechecked_non_atomic_observation",
             "exclusions":["credential values","mutable registry metadata","artifact availability and bytes","installed and store state","hook outputs","runtime assurance"]})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_semantic_identity_excludes_source_locations_and_layers() {
+        let project = tapid_test_support::TempProject::new("preview-registry-provenance").unwrap();
+        let input = b"[registries.default]\nurl='https://mirror.example'\n";
+        let user = project.write("user.toml", input).unwrap();
+        let explicit = project.write("explicit.toml", input).unwrap();
+        let a = crate::registry::RegistryConfig::load_layers(Some(&user), None, None).unwrap();
+        let b = crate::registry::RegistryConfig::load_layers(None, None, Some(&explicit)).unwrap();
+        assert_eq!(routing(&a), routing(&b));
     }
 }

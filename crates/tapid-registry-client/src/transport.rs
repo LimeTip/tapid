@@ -70,7 +70,7 @@ pub(crate) fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, T
     reader
         .take(take_limit)
         .read_to_end(&mut body)
-        .map_err(|error| TransportError::Http(error.to_string()))?;
+        .map_err(|_| TransportError::Http("response body read failed".into()))?;
     if body.len() > limit {
         return Err(TransportError::TooLarge { limit });
     }
@@ -140,12 +140,105 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-/// HTTPS transport with an allow-list and bounded response body. It sends no credentials.
+/// HTTPS transport with exact-origin credentials, an allow-list and bounded responses.
 pub struct HttpsTransport {
     client: reqwest::blocking::Client,
     allowed_origins: Vec<Origin>,
     credentials: Vec<(Origin, reqwest::header::HeaderValue)>,
     max_response_bytes: usize,
+}
+
+/// Explicit registry network settings. No ambient proxy configuration is consulted.
+#[derive(Clone, Default)]
+pub struct NetworkOptions {
+    roots: Vec<reqwest::Certificate>,
+    proxy: Option<reqwest::Proxy>,
+}
+
+impl NetworkOptions {
+    /// Snapshots an optional unauthenticated HTTP CONNECT proxy and additional PEM roots.
+    /// Accepts at most 16 bundles, 1 MiB each, 4 MiB total and 128 certificates.
+    /// Bundle syntax is checked here; X.509 validity is checked when building transport.
+    /// This performs no filesystem, environment, or network access.
+    pub fn new(proxy: Option<&str>, ca_bundles: &[Vec<u8>]) -> Result<Self, TransportError> {
+        const MAX_CA_FILE_BYTES: usize = 1024 * 1024;
+        if ca_bundles.len() > 16
+            || ca_bundles
+                .iter()
+                .any(|bundle| bundle.len() > MAX_CA_FILE_BYTES)
+            || ca_bundles.iter().map(Vec::len).sum::<usize>() > 4 * MAX_CA_FILE_BYTES
+        {
+            return Err(TransportError::InvalidResponse(
+                "registry CA input limit exceeded".into(),
+            ));
+        }
+        let mut roots = Vec::new();
+        for bundle in ca_bundles {
+            validate_pem_bundle(bundle)?;
+            roots.extend(reqwest::Certificate::from_pem_bundle(bundle).map_err(|_| {
+                TransportError::InvalidResponse("invalid registry CA bundle".into())
+            })?);
+            if roots.len() > 128 {
+                return Err(TransportError::InvalidResponse(
+                    "registry CA certificate limit exceeded".into(),
+                ));
+            }
+        }
+        let proxy = proxy.map(parse_proxy).transpose()?;
+        Ok(Self { roots, proxy })
+    }
+}
+
+fn parse_proxy(raw: &str) -> Result<reqwest::Proxy, TransportError> {
+    let invalid = || TransportError::InvalidResponse("invalid registry HTTP CONNECT proxy".into());
+    let url = Url::parse(raw).map_err(|_| invalid())?;
+    let port = raw
+        .strip_prefix("http://")
+        .and_then(|authority| authority.trim_end_matches('/').rsplit_once(':'))
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .filter(|port| *port != 0);
+    if url.scheme() != "http"
+        || url.host_str().is_none()
+        || port.is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || raw
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || raw.contains('\\')
+        || raw.contains('@')
+    {
+        return Err(invalid());
+    }
+    reqwest::Proxy::https(url.as_str()).map_err(|_| invalid())
+}
+
+fn validate_pem_bundle(bundle: &[u8]) -> Result<(), TransportError> {
+    let invalid = || TransportError::InvalidResponse("invalid registry CA bundle".into());
+    let mut remaining = std::str::from_utf8(bundle).map_err(|_| invalid())?.trim();
+    if remaining.is_empty() {
+        return Err(invalid());
+    }
+    while !remaining.is_empty() {
+        remaining = remaining
+            .strip_prefix("-----BEGIN CERTIFICATE-----")
+            .ok_or_else(invalid)?;
+        let (body, rest) = remaining
+            .split_once("-----END CERTIFICATE-----")
+            .ok_or_else(invalid)?;
+        if body.trim().is_empty()
+            || !body
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"+/=\r\n \t".contains(&byte))
+        {
+            return Err(invalid());
+        }
+        remaining = rest.trim();
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Origin {
@@ -155,7 +248,8 @@ struct Origin {
 }
 impl Origin {
     fn parse(s: &str) -> Result<Self, TransportError> {
-        let url = Url::parse(s).map_err(|_| TransportError::InvalidUrl(s.into()))?;
+        let url =
+            Url::parse(s).map_err(|_| TransportError::InvalidUrl("registry origin".into()))?;
         if url.scheme() != "https"
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -164,7 +258,7 @@ impl Origin {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err(TransportError::OriginNotAllowed(s.into()));
+            return Err(TransportError::OriginNotAllowed("registry origin".into()));
         }
         Ok(Self {
             scheme: url.scheme().into(),
@@ -244,6 +338,30 @@ impl HttpsTransport {
         C: IntoIterator<Item = (O, String)>,
         O: AsRef<str>,
     {
+        Self::new_authenticated_with_network(
+            allowed_origins,
+            credentials,
+            timeout,
+            max_response_bytes,
+            &NetworkOptions::default(),
+        )
+    }
+
+    /// Creates an authenticated transport using an explicit proxy and additional roots.
+    /// Ambient proxy and bypass variables are ignored, including for direct transport.
+    pub fn new_authenticated_with_network<I, S, C, O>(
+        allowed_origins: I,
+        credentials: C,
+        timeout: Duration,
+        max_response_bytes: usize,
+        network: &NetworkOptions,
+    ) -> Result<Self, TransportError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        C: IntoIterator<Item = (O, String)>,
+        O: AsRef<str>,
+    {
         let allowed_origins = allowed_origins
             .into_iter()
             .map(|s| Origin::parse(s.as_ref()))
@@ -258,7 +376,7 @@ impl HttpsTransport {
             .map(|(origin, token)| {
                 let origin = Origin::parse(origin.as_ref())?;
                 if !allowed_origins.contains(&origin) || token.is_empty() {
-                    return Err(TransportError::OriginNotAllowed(origin.host));
+                    return Err(TransportError::OriginNotAllowed("credential origin".into()));
                 }
                 let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
                     .map_err(|_| {
@@ -268,12 +386,20 @@ impl HttpsTransport {
             })
             .collect::<Result<Vec<_>, TransportError>>()?;
         let policy = exact_origin_redirect_policy(allowed_origins.clone());
-        let client = reqwest::blocking::Client::builder()
+        let mut builder = reqwest::blocking::Client::builder()
+            .no_proxy()
             .user_agent("tapid/0.0.2")
             .timeout(timeout)
-            .redirect(policy)
+            .redirect(policy);
+        for root in &network.roots {
+            builder = builder.add_root_certificate(root.clone());
+        }
+        if let Some(proxy) = &network.proxy {
+            builder = builder.proxy(proxy.clone());
+        }
+        let client = builder
             .build()
-            .map_err(|error| TransportError::Http(error.to_string()))?;
+            .map_err(|_| TransportError::Http("cannot initialize registry TLS transport".into()))?;
         Ok(Self {
             client,
             allowed_origins,
@@ -348,14 +474,15 @@ impl HttpsTransport {
         url: &str,
         accept: Option<&str>,
     ) -> Result<HttpResponse, TransportError> {
-        let parsed = Url::parse(url).map_err(|_| TransportError::InvalidUrl(url.into()))?;
+        let parsed =
+            Url::parse(url).map_err(|_| TransportError::InvalidUrl("registry request".into()))?;
         if !request_url_is_safe(url, &parsed)
             || !self
                 .allowed_origins
                 .iter()
                 .any(|origin| *origin == Origin::of(&parsed))
         {
-            return Err(TransportError::OriginNotAllowed(url.into()));
+            return Err(TransportError::OriginNotAllowed("registry request".into()));
         }
         let accept = accept
             .map(reqwest::header::HeaderValue::from_str)
@@ -377,12 +504,12 @@ impl HttpsTransport {
                             && (error.is_timeout() || error.is_connect() || error.is_request()) =>
                     {
                         let class = request_error_class(&error);
-                        return AttemptOutcome::Retry(format!("{class} failure: {error}"), None);
+                        return AttemptOutcome::Retry(format!("{class} failure"), None);
                     }
                     Err(error) => {
                         let class = request_error_class(&error);
                         return AttemptOutcome::Fatal(TransportError::Http(format!(
-                            "{class} failure: {error}"
+                            "{class} failure"
                         )));
                     }
                 };
@@ -440,6 +567,269 @@ mod tests {
         sync::Arc,
         thread,
     };
+
+    #[test]
+    fn custom_ca_works_through_production_transport_construction() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("https://{}", listener.local_addr().unwrap());
+        let server = serve_one_tls_response(
+            listener,
+            local_tls_server_config(),
+            "200 OK",
+            String::new(),
+            b"trusted".to_vec(),
+        );
+        let network = NetworkOptions::new(
+            None,
+            &[include_bytes!("../tests/fixtures/local-test-ca.pem").to_vec()],
+        )
+        .unwrap();
+        let transport = HttpsTransport::new_authenticated_with_network(
+            [origin.clone()],
+            [(origin.clone(), "fixture-secret".into())],
+            Duration::from_secs(2),
+            4096,
+            &network,
+        )
+        .unwrap();
+        assert_eq!(
+            transport.get(&format!("{origin}/package")).unwrap().body,
+            b"trusted"
+        );
+        assert_eq!(
+            server.join().unwrap().authorization.as_deref(),
+            Some("Bearer fixture-secret")
+        );
+    }
+
+    #[test]
+    fn ca_inputs_are_strict_bounded_and_errors_are_redacted() {
+        let ca = include_bytes!("../tests/fixtures/local-test-ca.pem").to_vec();
+        let mut trailing = ca.clone();
+        trailing.extend_from_slice(b"secret-sentinel");
+        for bundles in [
+            vec![vec![]],
+            vec![b"secret-sentinel".to_vec()],
+            vec![trailing],
+            vec![ca.clone(); 17],
+            vec![vec![b' '; 1024 * 1024 + 1]],
+            vec![ca.repeat(129)],
+        ] {
+            let error = NetworkOptions::new(None, &bundles)
+                .err()
+                .expect("invalid bundle must fail");
+            assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        }
+        assert!(NetworkOptions::new(None, &[]).is_ok());
+        assert!(NetworkOptions::new(None, &vec![ca.clone(); 16]).is_ok());
+        assert!(NetworkOptions::new(None, &[ca.repeat(128)]).is_ok());
+        let mut padded = ca;
+        padded.resize(1024 * 1024, b' ');
+        assert!(NetworkOptions::new(None, &vec![padded.clone(); 4]).is_ok());
+        assert!(NetworkOptions::new(None, &vec![padded; 5]).is_err());
+    }
+
+    #[test]
+    fn proxy_configuration_rejects_unsupported_or_credentialed_urls() {
+        for proxy in [
+            "https://proxy.example:8080",
+            "socks5://proxy.example:1080",
+            "http://proxy.example",
+            "http://proxy.example:0",
+            "http://secret-sentinel@proxy.example:8080",
+            "http://proxy.example:8080/path",
+            "http://proxy.example:8080?secret-sentinel",
+            "http://proxy.example:8080#secret-sentinel",
+            "http://proxy.example:8080\n",
+        ] {
+            let error = NetworkOptions::new(Some(proxy), &[])
+                .err()
+                .expect("unsupported proxy must fail");
+            assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        }
+        for proxy in [
+            "http://proxy.example:8080",
+            "http://proxy.example:80",
+            "http://[::1]:8080/",
+        ] {
+            assert!(NetworkOptions::new(Some(proxy), &[]).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejected_urls_and_transport_failures_do_not_echo_supplied_secrets() {
+        let error = HttpsTransport::new(
+            ["https://secret-sentinel@example.test"],
+            Duration::from_millis(50),
+            1024,
+        )
+        .err()
+        .unwrap();
+        assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        let transport =
+            HttpsTransport::new(["https://127.0.0.1:9"], Duration::from_millis(50), 1024).unwrap();
+        for url in [
+            "https://secret-sentinel@127.0.0.1:9/",
+            "https://127.0.0.1:9/secret-sentinel",
+            "secret-sentinel",
+        ] {
+            let error = transport.get(url).unwrap_err();
+            assert!(!format!("{error:?} {error}").contains("secret-sentinel"));
+        }
+    }
+
+    #[test]
+    fn connect_proxy_keeps_registry_authorization_inside_tls() {
+        let registry = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = registry.local_addr().unwrap();
+        let origin = format!("https://{address}");
+        let server = serve_one_tls_response(
+            registry,
+            local_tls_server_config(),
+            "200 OK",
+            String::new(),
+            b"tunneled".to_vec(),
+        );
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let proxy_server = thread::spawn(move || {
+            proxy.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let (mut client, _) = loop {
+                match proxy.accept() {
+                    Ok(socket) => break socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("proxy accept failed: {error}"),
+                }
+            };
+            client.set_nonblocking(false).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                assert!(headers.len() < 8192);
+                let mut byte = [0];
+                client.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let mut upstream =
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+            upstream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            upstream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .unwrap();
+            let mut client_read = client.try_clone().unwrap();
+            let mut upstream_write = upstream.try_clone().unwrap();
+            let outgoing = thread::spawn(move || {
+                let _ = std::io::copy(&mut client_read, &mut upstream_write);
+                let _ = upstream_write.shutdown(std::net::Shutdown::Write);
+            });
+            let _ = std::io::copy(&mut upstream, &mut client);
+            let _ = client.shutdown(std::net::Shutdown::Both);
+            outgoing.join().unwrap();
+            String::from_utf8(headers).unwrap()
+        });
+        let network = NetworkOptions::new(
+            Some(&proxy_url),
+            &[include_bytes!("../tests/fixtures/local-test-ca.pem").to_vec()],
+        )
+        .unwrap();
+        let transport = HttpsTransport::new_authenticated_with_network(
+            [origin.clone()],
+            [(origin.clone(), "fixture-secret".into())],
+            Duration::from_secs(2),
+            4096,
+            &network,
+        )
+        .unwrap();
+        assert_eq!(
+            transport.get(&format!("{origin}/package")).unwrap().body,
+            b"tunneled"
+        );
+        drop(transport);
+        let connect = proxy_server.join().unwrap();
+        assert!(connect.starts_with(&format!("CONNECT {address} HTTP/1.1\r\n")));
+        assert!(!connect.to_ascii_lowercase().contains("authorization"));
+        assert!(!connect.contains("fixture-secret"));
+        assert_eq!(
+            server.join().unwrap().authorization.as_deref(),
+            Some("Bearer fixture-secret")
+        );
+    }
+
+    #[test]
+    fn proxy_authentication_failure_is_bounded_and_redacted() {
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            proxy.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut attempts = 0;
+            while attempts < 3 {
+                let (mut socket, _) = match proxy.accept() {
+                    Ok(socket) => socket,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("proxy failure fixture accept failed: {error}"),
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 8192);
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(!request.to_ascii_lowercase().contains("authorization"));
+                assert!(!request.contains("fixture-secret"));
+                socket.write_all(b"HTTP/1.1 407 secret-sentinel\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                attempts += 1;
+            }
+            attempts
+        });
+        let network = NetworkOptions::new(Some(&proxy_url), &[]).unwrap();
+        let origin = "https://registry.example.test";
+        let transport = HttpsTransport::new_authenticated_with_network(
+            [origin],
+            [(origin, "fixture-secret".into())],
+            Duration::from_secs(1),
+            1024,
+            &network,
+        )
+        .unwrap();
+        let error = transport.get(&format!("{origin}/package")).unwrap_err();
+        let rendered = format!("{error:?} {error}");
+        assert!(rendered.contains("3 attempts"));
+        assert!(!rendered.contains("secret-sentinel"));
+        assert!(!rendered.contains("fixture-secret"));
+        assert_eq!(server.join().unwrap(), 3);
+    }
 
     fn local_tls_server_config() -> Arc<rustls::ServerConfig> {
         // Public certificate/key fixture for local TLS tests only.
@@ -538,23 +928,126 @@ mod tests {
         origins: &[String],
         credentials: Vec<(String, String)>,
     ) -> HttpsTransport {
-        let timeout = Duration::from_secs(2);
-        let mut transport =
-            HttpsTransport::new_authenticated(origins, credentials, timeout, 4096).unwrap();
-        let allowed_origins = transport.allowed_origins.clone();
-        let policy = exact_origin_redirect_policy(allowed_origins);
-        // Trust this test CA explicitly; normal certificate validation stays enabled.
-        let certificate =
-            reqwest::Certificate::from_der(include_bytes!("../tests/fixtures/local-test-ca.der"))
-                .unwrap();
-        transport.client = reqwest::blocking::Client::builder()
-            .user_agent("tapid/0.0.2")
-            .timeout(timeout)
-            .redirect(policy)
-            .add_root_certificate(certificate)
-            .build()
+        let network = NetworkOptions::new(
+            None,
+            &[include_bytes!("../tests/fixtures/local-test-ca.pem").to_vec()],
+        )
+        .unwrap();
+        HttpsTransport::new_authenticated_with_network(
+            origins,
+            credentials,
+            Duration::from_secs(2),
+            4096,
+            &network,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ambient_proxy_and_bypass_variables_are_ignored_in_isolated_processes() {
+        for (test, bypass) in [
+            (
+                "custom_ca_works_through_production_transport_construction",
+                "",
+            ),
+            ("connect_proxy_keeps_registry_authorization_inside_tls", "*"),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                &format!("transport::tests::{test}"),
+                "--nocapture",
+            ]);
+            for variable in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                command.env(variable, "http://secret-sentinel@127.0.0.1:9");
+            }
+            command.env("NO_PROXY", bypass).env("no_proxy", bypass);
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-sentinel"));
+        }
+    }
+
+    #[test]
+    fn invalid_der_ca_fails_closed_without_echoing_input() {
+        let network = NetworkOptions::new(
+            None,
+            &[b"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n".to_vec()],
+        )
+        .unwrap();
+        let error = HttpsTransport::new_authenticated_with_network(
+            ["https://registry.example.test"],
+            std::iter::empty::<(String, String)>(),
+            Duration::from_secs(1),
+            1024,
+            &network,
+        )
+        .err()
+        .expect("invalid X.509 root must fail");
+        assert!(!format!("{error:?} {error}").contains("AQID"));
+    }
+
+    #[test]
+    fn untrusted_and_hostname_mismatched_certificates_fail_closed() {
+        for (bind, trust_ca) in [("127.0.0.1:0", false), ("[::1]:0", true)] {
+            let listener = TcpListener::bind(bind).unwrap();
+            let origin = format!("https://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(socket) => break socket,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(error) => panic!("TLS rejection fixture accept failed: {error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut connection =
+                    rustls::ServerConnection::new(local_tls_server_config()).unwrap();
+                // A TLS alert proves the request reached certificate verification.
+                connection.complete_io(&mut socket).unwrap_err().kind()
+            });
+            let bundles = if trust_ca {
+                vec![include_bytes!("../tests/fixtures/local-test-ca.pem").to_vec()]
+            } else {
+                vec![]
+            };
+            let network = NetworkOptions::new(None, &bundles).unwrap();
+            let transport = HttpsTransport::new_authenticated_with_network(
+                [origin.clone()],
+                [(origin.clone(), "fixture-secret".into())],
+                Duration::from_secs(1),
+                1024,
+                &network,
+            )
             .unwrap();
-        transport
+            let error = transport.get(&format!("{origin}/package")).unwrap_err();
+            assert!(!format!("{error:?} {error}").contains("fixture-secret"));
+            assert_eq!(server.join().unwrap(), std::io::ErrorKind::InvalidData);
+        }
     }
 
     #[test]

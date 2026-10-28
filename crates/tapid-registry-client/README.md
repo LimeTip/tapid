@@ -43,6 +43,34 @@ The crate-level `download_artifact` operation accepts canonical HTTPS URLs, uses
 
 The crate is read-only. It does not publish, mutate registry state, choose credential sources, or mirror. Unit tests use local fixtures and do not call live registries.
 
+All `HttpsTransport` constructors use direct connections by default and ignore
+ambient proxy and bypass variables. This changes the previous reqwest default:
+setting `HTTPS_PROXY` alone no longer changes registry transport.
+`NetworkOptions::new` and `new_authenticated_with_network` support one explicit,
+unauthenticated `http://host:port` CONNECT proxy and additional PEM CA bundles.
+Proxy URLs require an explicit nonzero port and cannot contain user information,
+paths other than `/`, queries or fragments. HTTPS proxies, SOCKS, PAC, proxy
+authentication, client certificates and TLS verification bypasses are unsupported.
+Registry Authorization stays inside the exact-origin HTTPS tunnel.
+
+Additional CA roots supplement public roots and preserve certificate and hostname
+verification. Input is limited to 16 bundles, 1 MiB each, 4 MiB combined and 128
+certificates. Empty bundles, noncertificate PEM content and malformed certificates
+fail closed. The caller owns bounded regular-file reads and supplies an immutable
+byte snapshot; this crate does not discover files or environment credentials.
+Adding a corporate root trusts its operator to issue registry certificates,
+including for TLS interception. The CLI configuration/caller integration remains
+under development; the transport interface alone does not enable CLI proxy flags.
+The [layered configuration decision](../../docs/adr/0012-layered-registry-configuration.md)
+records the authority and trust contract for that integration.
+
+Standard requests retain their 20-second timeout, at most ten same-origin redirect
+hops and three GET attempts. Ordinary retry delays are 100/200 ms; HTTP-429
+Retry-After is capped at 60 seconds. These are request and retry bounds, not an
+operation-wide 20-second deadline. Transport failures report safe categories rather
+than supplied URLs or remote diagnostic bodies. Git and release transports have
+separately owned contracts and do not inherit these options.
+
 ## HTTPS Git artifacts
 
 `GitDependency` parses credential-free `git+https` repositories with branch, tag,

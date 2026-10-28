@@ -11,6 +11,32 @@ const NPM: &str = "https://registry.npmjs.org";
 const JSR: &str = "https://jsr.io";
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
+fn user_config_path(
+    platform: &str,
+    mut read_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let candidates: &[(&str, &str)] = match platform {
+        "linux" => &[
+            ("XDG_CONFIG_HOME", "tapid/config.toml"),
+            ("HOME", ".config/tapid/config.toml"),
+        ],
+        "macos" => &[("HOME", "Library/Application Support/tapid/config.toml")],
+        "windows" => &[("APPDATA", "tapid/config.toml")],
+        _ => return Err("unsupported user configuration platform".into()),
+    };
+    for (variable, suffix) in candidates {
+        let Some(value) = read_env(variable).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let path = std::path::PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err("user configuration location must be absolute".into());
+        }
+        return Ok(Some(path.join(suffix)));
+    }
+    Ok(None)
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryDocument {
@@ -39,10 +65,31 @@ pub(crate) struct RegistryRoute {
 pub(crate) struct RegistryConfig {
     routes: BTreeMap<String, RegistryEntry>,
     route_layers: BTreeMap<String, &'static str>,
+    route_sources: BTreeMap<String, String>,
     credential_names: BTreeSet<String>,
 }
 
 impl RegistryConfig {
+    // Caller migration must enable this together with layered execution-secret denial.
+    #[allow(
+        dead_code,
+        reason = "staged resolver; production caller migration is pending"
+    )]
+    pub(crate) fn load_selected(
+        project: Option<&Path>,
+        explicit: Option<&Path>,
+        cwd: &Path,
+        platform: &str,
+        read_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Self, String> {
+        if !cwd.is_absolute() {
+            return Err("configuration working directory must be absolute".into());
+        }
+        let user = user_config_path(platform, read_env)?;
+        let explicit = explicit.map(|path| cwd.join(path));
+        let project = project.map(|path| path.join("tapid.toml"));
+        Self::load_layers(user.as_deref(), project.as_deref(), explicit.as_deref())
+    }
     /// Resolve selected filenames in increasing precedence, validating even shadowed
     /// documents. Location discovery belongs to the caller; this never reads tokens.
     pub(crate) fn load_layers(
@@ -71,6 +118,9 @@ impl RegistryConfig {
             effective.credential_names.extend(config.credential_names);
             for (scope, entry) in config.routes {
                 effective.route_layers.insert(scope.clone(), layer);
+                effective
+                    .route_sources
+                    .insert(scope.clone(), sanitized_path(path));
                 effective.routes.insert(scope, entry);
             }
         }
@@ -145,6 +195,7 @@ impl RegistryConfig {
             routes,
             credential_names,
             route_layers: BTreeMap::new(),
+            route_sources: BTreeMap::new(),
         })
     }
 
@@ -252,7 +303,8 @@ impl RegistryConfig {
     pub(crate) fn inspection(&self) -> serde_json::Value {
         let routes = self.routes.iter().map(|(scope, entry)| serde_json::json!({
             "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env,
-            "layer": self.route_layers.get(scope).copied().unwrap_or("project")
+            "layer": self.route_layers.get(scope).copied().unwrap_or("project"),
+            "source": self.route_sources.get(scope)
         })).collect::<Vec<_>>();
         serde_json::json!({
             "origins": self.configured_origins(),
@@ -343,6 +395,19 @@ fn valid_scope(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte))
 }
 
+fn sanitized_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .flat_map(|character| {
+            if character.is_control() {
+                character.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
+}
+
 fn valid_env_name(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes
@@ -359,6 +424,84 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
+
+    #[test]
+    fn user_locations_use_platform_contract_and_linux_fallback() {
+        let home = tapid_test_support::TempProject::new("registry-location").unwrap();
+        for (platform, variable, suffix) in [
+            ("linux", "XDG_CONFIG_HOME", "tapid/config.toml"),
+            ("linux", "HOME", ".config/tapid/config.toml"),
+            (
+                "macos",
+                "HOME",
+                "Library/Application Support/tapid/config.toml",
+            ),
+            ("windows", "APPDATA", "tapid/config.toml"),
+        ] {
+            let actual = user_config_path(platform, |name| {
+                if name == variable {
+                    Some(home.path().as_os_str().to_owned())
+                } else if name == "XDG_CONFIG_HOME" {
+                    Some("".into())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+            assert_eq!(actual, Some(home.path().join(suffix)));
+        }
+        assert_eq!(user_config_path("linux", |_| None).unwrap(), None);
+        let error =
+            user_config_path("linux", |_| Some("relative-secret-sentinel".into())).unwrap_err();
+        assert!(!error.contains("secret-sentinel"));
+    }
+
+    #[test]
+    fn selected_configuration_resolves_relative_explicit_and_sanitizes_provenance() {
+        let home = tapid_test_support::TempProject::new("registry-selected-location").unwrap();
+        home.write(
+            ".config/tapid/config.toml",
+            b"[registries.default]\nurl='https://user.example'\n",
+        )
+        .unwrap();
+        home.write(
+            "explicit.toml",
+            b"[registries.default]\nurl='https://explicit.example'\n",
+        )
+        .unwrap();
+        let config = RegistryConfig::load_selected(
+            None,
+            Some(Path::new("explicit.toml")),
+            home.path(),
+            "linux",
+            |name| (name == "HOME").then(|| home.path().as_os_str().to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            config.inspection()["routes"][0]["source"],
+            home.path().join("explicit.toml").to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            config.origin_for("widget").unwrap().to_string(),
+            "https://explicit.example"
+        );
+        #[cfg(unix)]
+        {
+            let path = home
+                .write(
+                    "control\u{1b}[31m.toml",
+                    b"[registries.default]\nurl='https://safe.example'\n",
+                )
+                .unwrap();
+            let config = RegistryConfig::load_layers(None, None, Some(&path)).unwrap();
+            let source = config.inspection()["routes"][0]["source"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(!source.chars().any(char::is_control));
+            assert!(source.contains("\\u{1b}"));
+        }
+    }
 
     #[test]
     fn layered_configuration_validates_shadowed_input_without_disclosing_it() {

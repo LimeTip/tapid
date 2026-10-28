@@ -314,7 +314,10 @@ The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
 A selected member does not limit full-workspace checks. Registry data includes
 origins, credential variable names, and `credentials: "not_read"`. Each configured
-route also identifies its configuration `layer` (`project` for project configuration).
+route also identifies its configuration `layer` (`project` for project configuration)
+and `source` (the declaring filename with terminal control characters escaped, or
+null for configuration parsed from an in-memory document). Provenance is inspection
+metadata and is excluded from preview's semantic registry routing identity.
 Root peer dependencies remain declarations rather than installable specs; member
 peer declarations still undergo compatibility checks. Recovery blocker locations
 identify the primary or backup journal whose metadata was inspected.
