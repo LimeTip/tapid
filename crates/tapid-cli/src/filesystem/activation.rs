@@ -9,6 +9,15 @@ const MANAGED_MARKER: &[u8] = b"tapid-managed-v1\n";
 const STAGE_OWNER_MARKER: &str = ".tapid-stage-owner";
 
 pub(crate) fn test_crash_at(point: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var("TAPID_TEST_PAUSE_POINT").as_deref() == Ok(point) {
+        let ready = std::env::var_os("TAPID_TEST_PAUSE_READY").expect("pause readiness path");
+        fs::write(ready, point).expect("publish pause readiness");
+        // The test signals the parent at this exact durable boundary. A watchdog
+        // also bounds the pause if its supervising test disappears.
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        std::process::abort();
+    }
     if cfg!(debug_assertions) && std::env::var("TAPID_TEST_CRASH_POINT").as_deref() == Ok(point) {
         std::process::abort();
     }
