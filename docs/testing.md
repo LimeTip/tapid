@@ -14,28 +14,30 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
-The runtime temporary directory must permit executing generated files. Unix
-installer, verified-tool, and package-bin tests directly execute fixture scripts
-after setting their executable bits. A `noexec` temporary mount causes
-`Permission denied` even when those bits are correct. In an isolated validation
-worker, provision a writable, execution-enabled scratch directory and export
-`TMPDIR` to it before starting Cargo. For example, when the build filesystem
-permits execution, run from the repository root:
+On Unix, the runtime temporary directory must permit executing fixture files.
+Installer, verified-tool, and package-bin tests deliberately launch freshly written scripts
+directly, so a `noexec` temporary mount produces `PermissionDenied` even with the
+correct executable mode. For an isolated worker with a non-executable default
+temporary mount, configure `TMPDIR` before starting Node/Cargo to an absolute,
+private directory on the worker's executable workspace filesystem. For example,
+from the repository root:
 
 ```sh
 mkdir -p target/test-tmp
-TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --all-features --locked
+chmod 700 target/test-tmp
+TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --lib --locked
 ```
 
-This changes fixture placement, not test behavior or containment policy. Do not
-invoke scripts through an interpreter to bypass direct-execution assertions or
-skip failed execution tests. A worker must permit executing its scratch files;
-changing `TMPDIR` cannot override a sandbox execution denial. Native containment
-tests still require the supported platform environment described below.
+This selects fixture storage through the existing runtime API; do not replace
+direct executable launches with shell invocations or skip execution assertions.
+If execution is still denied, inspect the worker mount/security policy before
+attributing the failure to executable permissions. This configuration does not
+supply native containment prerequisites or establish native platform support.
 
 ## Development prerequisites and build reuse
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
+Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,
+24, or 22), following the [repository support policy](../README.md#development).
 Rust owns package-manager behavior and security verification. TypeScript owns
 developer scripts, release orchestration, documentation checks, and website/consumer
 fixtures. Python and uv are not required to develop or test Tapid.
@@ -218,9 +220,22 @@ Every scenario reports zero unnecessary repeated failures and enforces the 8 KiB
 per-result budget. Retrying after observed lock release is necessary and excluded
 from unnecessary repetitions. The response-withholding harness first observes
 subprocess completion; it does not simulate a particular transport failure rate.
-The three abrupt interruptions use debug-only crash checkpoints, not graceful
-cancellation or process-tree termination guarantees. Existing lifecycle and CI
+The three abrupt interruptions use debug-only crash checkpoints. The same
+workflow also pauses the parent at each boundary on Unix, sends it SIGTERM,
+asserts signal termination, and checks read-only inspection and normal recovery.
+Readiness is synchronized through an isolated temporary file; parent exit has a
+ten-second watchdog, and the debug-only pause aborts after fifteen seconds if
+the supervisor disappears. This proves parent-signal cancellation settlement,
+not graceful cancellation or process-tree termination. Existing lifecycle and CI
 crash tests also cover store publication and activation boundaries.
+
+A fresh integrated macOS run passed all 11 workflow tests, including both guide
+additions and all six crash/signal boundary cases. Shared-store expiry measured
+5,068 ms; its three calls emitted 7,502 bytes. Project contention emitted 1,520
+bytes over two calls, and completed-response withholding emitted 11,745 bytes
+over four calls. All scenarios reported zero unnecessary retries and enforced
+the per-result budget. These are local fixture measurements with variable path
+lengths, not production frequency or timeout-tuning evidence.
 
 Store unit tests use a subprocess watchdog for the real five-second default,
 short private deadlines for shared/exclusive and recovery escalation, compatible
