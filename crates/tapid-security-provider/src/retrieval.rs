@@ -18,7 +18,33 @@ pub enum Disclosure<'a> {
 pub enum RetrievalError {
     NotAuthorized,
     Unavailable,
+    StateUnavailable,
     Evidence(SecurityReason),
+}
+
+/// Retrieve evidence and withhold it until its replay floor is committed.
+/// `record` must atomically compare and persist the sequence/digest for the
+/// issuer and entire request, rejecting rollback or equivocation against state
+/// advanced by another writer. It must return only after durable publication.
+/// Cache-body eviction must not remove this state. A failed commit never returns
+/// evidence for policy use, even when signature verification succeeded.
+pub fn retrieve_recorded<R: Read>(
+    request: &SecurityRequest,
+    disclosure: &Disclosure<'_>,
+    trust: &SecurityTrust<'_>,
+    freshness: &EvidenceFreshness<'_>,
+    transport: &mut impl FnMut(&SecurityRequest) -> Result<R, RetrievalError>,
+    record: &mut impl FnMut(&str, &SecurityRequest, u64, &str) -> Result<(), RetrievalError>,
+) -> Result<VerifiedSecurityEvidenceV2, RetrievalError> {
+    let evidence = retrieve(request, disclosure, trust, freshness, transport)?;
+    record(
+        trust.issuer,
+        request,
+        evidence.result().sequence,
+        evidence.envelope_digest(),
+    )
+    .map_err(|_| RetrievalError::StateUnavailable)?;
+    Ok(evidence)
 }
 
 /// Retrieve raw envelopes through an explicitly supplied adapter. No default

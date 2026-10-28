@@ -14,6 +14,14 @@ default keys, environment configuration, credential lookup or network adapter.
 Read failures return an unavailable state without exposing transport error text.
 Adapters must enforce read timeouts and credential authorization independently.
 
+`retrieve_recorded` additionally withholds verified evidence until the supplied
+replay-state writer succeeds. It passes the issuer, entire request, verified
+sequence and envelope digest to the writer. The writer must atomically compare
+against current state and durably publish the new floor, rejecting concurrent
+rollback or equivocation. Writer failures return `StateUnavailable`; denied
+disclosure and invalid evidence never invoke the writer. This interface does
+not itself provide a durable filesystem store or make an in-memory writer durable.
+
 This is the retrieval foundation, not a complete audit service. Durable replay
 persistence, credentials, cache, collection budgets and live transport remain
 unimplemented. Callers must supply trusted replay floors and persist accepted

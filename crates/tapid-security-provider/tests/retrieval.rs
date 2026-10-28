@@ -293,3 +293,102 @@ fn response_read_failures_never_return_partial_evidence() {
         Err(RetrievalError::Unavailable)
     ));
 }
+
+#[test]
+fn evidence_is_withheld_until_replay_state_is_recorded() {
+    use tapid_security_provider::retrieve_recorded;
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let mut recorded = Vec::new();
+    for writable in [false, true] {
+        let result = retrieve_recorded(
+            &request,
+            &Disclosure::Exact(&request),
+            &trust,
+            &freshness,
+            &mut |_| Ok(Cursor::new(ENVELOPE)),
+            &mut |issuer, subject, sequence, digest| {
+                assert_eq!(issuer, "fixture.example");
+                assert_eq!(subject, &request);
+                assert_eq!(sequence, 3);
+                assert!(digest.starts_with("sha256-"));
+                if writable {
+                    recorded.push((sequence, digest.to_owned()));
+                    Ok(())
+                } else {
+                    Err(RetrievalError::StateUnavailable)
+                }
+            },
+        );
+        if writable {
+            let evidence = result.unwrap();
+            assert_eq!(recorded[0].1, evidence.envelope_digest());
+            assert_eq!(evidence.result().findings[0].id, "REPORT-1");
+        } else {
+            assert!(matches!(result, Err(RetrievalError::StateUnavailable)));
+            assert!(recorded.is_empty());
+        }
+    }
+}
+
+#[test]
+fn denied_or_invalid_evidence_never_advances_replay_state() {
+    use tapid_security_provider::retrieve_recorded;
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let mut requests = 0;
+    let mut transport = |_: &SecurityRequest| {
+        requests += 1;
+        Ok(Cursor::new(b"invalid envelope"))
+    };
+    let mut record = |_: &str, _: &SecurityRequest, _: u64, _: &str| {
+        panic!("unverified evidence must not change replay state")
+    };
+    assert!(matches!(
+        retrieve_recorded(
+            &request,
+            &Disclosure::Denied,
+            &trust,
+            &freshness,
+            &mut transport,
+            &mut record,
+        ),
+        Err(RetrievalError::NotAuthorized)
+    ));
+    assert!(matches!(
+        retrieve_recorded(
+            &request,
+            &Disclosure::Exact(&request),
+            &trust,
+            &freshness,
+            &mut transport,
+            &mut record,
+        ),
+        Err(RetrievalError::Evidence(
+            tapid_protocol::SecurityReason::Malformed
+        ))
+    ));
+    assert_eq!(requests, 1);
+}
