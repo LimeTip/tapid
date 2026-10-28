@@ -5,6 +5,8 @@ use crate::application::outcome::{
 mod audit;
 mod cache;
 pub(crate) use audit::audit;
+#[cfg(test)]
+pub(crate) use audit::audit_value;
 mod dependency;
 mod explain;
 mod outdated;

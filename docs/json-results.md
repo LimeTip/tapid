@@ -509,3 +509,20 @@ that can be represented as exact v2 advisory/reported-malware requests, while
 applicability. Multiple aliases for one reachable identity count separately.
 These counts do not imply provider coverage, consent or completed checks. Both
 fields are `null` for imported locks.
+
+The internal signed-provider application seam retains exact graph keys with v2
+`evidence` results and per-occurrence `failures` (stable code and precise local
+verification reason), plus `not_checked` counts. Evidence includes the signed
+request, issuer, source revision, report revision, classification, fix versions,
+check time, expiry and explicit status. Incomplete evidence takes exit 3 precedence
+over known findings; complete findings at the threshold exit 1 and complete results
+below it exit 0. The CLI has no provider activation yet and still exits 3.
+JSON displays at most 100 evidence records, findings and failures each; scalar
+text uses the existing sanitization and 4096-byte bound. Display truncation sets
+`truncated_fields`, incomplete coverage and exit 3. Provider evidence does not
+establish whether transport was live (`live_requests: null` in that case).
+
+Native evidence also includes bounded exact-instance dependency `paths` from the
+shared lock graph traversal and `paths_truncated`. Path display limitations never
+remove an occurrence from security collection; truncated path output makes the
+delivered JSON result partial.

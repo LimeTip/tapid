@@ -14,6 +14,9 @@ name = "tapid"
 path = "src/main.rs"
 
 [dependencies]
+tapid-attestations = { version = "0.0.5", path = "../tapid-attestations" }
+tapid-security-provider = { version = "0.0.1", path = "../tapid-security-provider" }
+tapid-policy = { version = "0.0.4", path = "../tapid-policy" }
 clap = { version = "4", features = ["derive"] }
 tapid-lockfile = { version = "0.0.13", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
