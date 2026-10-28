@@ -3127,6 +3127,57 @@ fn native_write_grant_does_not_imply_read_authority() {
 }
 
 #[test]
+fn declared_executable_rejects_child_write_authority() {
+    let project = tapid_test_support::TempProject::new("writable-declared-tool").unwrap();
+    project.write("tools/tool", b"abc").unwrap();
+    project.write("output/result", b"").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let tool = root.join("tools/tool");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for write in ["tools/tool", "tools", ".", "output"] {
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![], vec![write.into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder(&tool)
+            .project_root(&root)
+            .policy(policy)
+            .verified_executable(
+                &tool,
+                "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            )
+            .build()
+            .unwrap();
+        let resolved = resolve_policy(&request, RuntimeFilesystemAdditions::default());
+        if write == "output" {
+            assert!(resolved.is_ok(), "disjoint output must remain writable");
+            let additions =
+                RuntimeFilesystemAdditions::checked(vec![], vec![tool.clone()]).unwrap();
+            assert_eq!(
+                resolve_policy(&request, additions).unwrap_err().category(),
+                ExecutionErrorCategory::PolicyViolation,
+                "backend write additions must obey the same exclusion"
+            );
+        } else {
+            assert_eq!(
+                resolved.unwrap_err().category(),
+                ExecutionErrorCategory::PolicyViolation,
+                "child must not be able to change its declared tool through {write}"
+            );
+        }
+    }
+}
+
+#[test]
 fn declared_executable_rejects_bytes_outside_the_approved_digest() {
     let project = tapid_test_support::TempProject::new("declared-executable-digest").unwrap();
     project.write("tool", b"abc").unwrap();

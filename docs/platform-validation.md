@@ -176,6 +176,13 @@ attempts while a request clone survives. These changes do not bind ordered loade
 resolution, registry inputs, DLLs or the complete executable search directories.
 Native Windows pin controls still require the existing Windows CI lane.
 
+Common contained preflight also rejects resolved write grants covering a declared
+executable path, including backend write additions, before backend preparation.
+Portable controls cover exact-file and ancestor-directory grants, plus a disjoint
+writable output directory. This closes direct policy-authorized mutation after
+prelaunch hashing; it does not close hard-link aliases, host races, dynamic inputs
+or the remaining authority inventory. It does not enable Windows authentication.
+
 Trusted Node requests now bind a streaming SHA-256 of the primary executable
 (bounded to 512 MiB) as well as its native file identity. Revalidation rejects
 in-place changes that preserve file identity and length. On Windows the request

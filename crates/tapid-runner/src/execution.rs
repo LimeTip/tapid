@@ -1494,6 +1494,7 @@ fn resolve_policy(
     read.extend(executable_search_paths);
     read.extend(additions.read);
     write.extend(additions.write);
+    request.validate_executable_write_authority(&write)?;
 
     Ok(ResolvedSandboxPolicy {
         assurance: request.policy().assurance(),

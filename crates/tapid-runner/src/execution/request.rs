@@ -300,6 +300,26 @@ impl ExecutionRequest {
         }
         Ok(())
     }
+
+    pub(super) fn validate_executable_write_authority(
+        &self,
+        write: &[ResolvedGrant],
+    ) -> Result<(), ExecutionError> {
+        for executable in &self.verified_executables {
+            if write.iter().any(|grant| {
+                executable
+                    .path
+                    .ancestors()
+                    .any(|ancestor| platform_paths_semantically_equal(ancestor, &grant.path))
+            }) {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::PolicyViolation,
+                    "declared executable must be outside child write authority",
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
