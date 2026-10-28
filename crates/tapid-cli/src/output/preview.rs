@@ -9,6 +9,13 @@ pub(crate) fn report(report: &PreviewReport, operation: &str, json: bool) -> Exi
     println!("Dry run: resolved dependency graph. Artifacts are not prepared.");
     let data = serde_json::to_value(report).expect("preview serialization");
     let value = |value: &serde_json::Value| value.as_str().unwrap_or("absent").to_owned();
+    println!("Starting state (source identities; rechecked, non-atomic observation):");
+    for line in serde_json::to_string_pretty(&data["starting_state"])
+        .expect("receipt serialization")
+        .lines()
+    {
+        println!("  {}", super::json::text(line).0);
+    }
     println!("Declaration changes:");
     for declaration in data["declarations"].as_array().expect("declarations") {
         println!(
