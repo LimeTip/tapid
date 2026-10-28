@@ -2,6 +2,9 @@
 
 #![deny(unsafe_code)]
 
+mod npm;
+pub use npm::{NpmArtifact, NpmFile, NpmPackLimits, NpmPackOptions, pack_npm};
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},

@@ -5,6 +5,7 @@
 mod error;
 mod lifecycle;
 mod model;
+mod packaging;
 mod parse;
 mod workspace;
 
@@ -14,6 +15,7 @@ pub use lifecycle::{
     dependency_lifecycle_plan,
 };
 pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
+pub use packaging::PackagingMetadata;
 pub use workspace::{Workspace, WorkspaceMember};
 
 /// Maximum bytes read from each root or member manifest during workspace discovery.

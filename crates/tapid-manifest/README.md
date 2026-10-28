@@ -42,3 +42,11 @@ UTF-8 source to a borrowed callback. Snapshot consumers can fingerprint those by
 before a later filesystem read. Discovery discards the source after each member;
 the shared workspace model retains only parsed manifests. Callback observations
 are partial if discovery fails.
+
+`PackageManifest::packaging` validates packaging declarations on demand and returns
+borrowed `files` strings and `main`. It distinguishes absent and empty `files`,
+reuses executable-target validation for `main`, rejects enabled/nonempty or malformed
+bundling declarations under either spelling, and rejects `directories.bin`.
+Ordinary parsing and serialization continue preserving these fields without applying
+packaging-only restrictions. Selection grammar, portable paths, and filesystem target
+existence belong to `tapid-publish`; this accessor does not execute scripts.

@@ -54,17 +54,30 @@ impl std::error::Error for WorkspaceError {
 #[derive(Debug)]
 pub enum ManifestError {
     InvalidJson(serde_json::Error),
+    InvalidPackaging {
+        field: &'static str,
+        expected: &'static str,
+    },
     RootMustBeObject,
     RequiredString(&'static str),
     ExpectedString(&'static str),
     ExpectedBoolean(&'static str),
     ExpectedMap(&'static str),
-    ExpectedMapValueString { field: &'static str, key: String },
+    ExpectedMapValueString {
+        field: &'static str,
+        key: String,
+    },
     InvalidPackageName(tapid_core::DomainError),
     InvalidPackageVersion(tapid_core::DomainError),
     InvalidDependencyName(tapid_core::DomainError),
-    DependencyNotDeclared { field: &'static str, name: String },
-    InvalidBin { command: String, target: String },
+    DependencyNotDeclared {
+        field: &'static str,
+        name: String,
+    },
+    InvalidBin {
+        command: String,
+        target: String,
+    },
     ExpectedBinString(String),
 }
 
@@ -75,6 +88,7 @@ impl ManifestError {
         use ManifestError::*;
         let value = serde_json::from_str::<serde_json::Value>(input).ok();
         let (field, key, expected) = match self {
+            InvalidPackaging { field, expected } => (Some(*field), None, *expected),
             InvalidJson(_) => (None, None, "valid_json"),
             RootMustBeObject => (None, None, "object"),
             RequiredString(field) | ExpectedString(field) => (Some(*field), None, "string"),
@@ -158,6 +172,9 @@ impl ManifestError {
 impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidPackaging { field, expected } => {
+                write!(f, "package.json field '{field}' requires {expected}")
+            }
             Self::InvalidJson(error) => write!(f, "invalid package.json: {error}"),
             Self::RootMustBeObject => write!(f, "package.json root must be an object"),
             Self::RequiredString(key) | Self::ExpectedString(key) => {

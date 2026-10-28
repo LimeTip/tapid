@@ -11,8 +11,12 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+flate2 = "1"
+tar = "0.4"
+tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
 sha2 = "0.10"
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 
 [dev-dependencies]
+serde_json = "1"
 tapid-test-support = { version = "0.0.3", path = "../tapid-test-support" }

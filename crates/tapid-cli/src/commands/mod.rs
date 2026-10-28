@@ -11,6 +11,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 mod npm_import;
+mod pack;
 mod release_verification;
 pub(crate) mod run;
 mod sandbox;
@@ -101,6 +102,8 @@ pub(crate) enum Command {
         long_about = "Import an npm lockfileVersion 3 lock into tapid.lock without network access or dependency resolution. Validates package.json in the current directory. Linked/workspace entries and unsupported metadata fail before writing. The first frozen install verifies the pinned tarballs; dependency scripts do not run."
     )]
     ImportPackageLock(npm_import::Args),
+    /// Produce an inspectable npm-compatible archive without executing lifecycle scripts.
+    Pack(pack::Args),
     /// Validate package.json manifests.
     Manifest(manifest::Args),
     /// Validate tapid.lock.
@@ -206,6 +209,7 @@ impl Command {
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
             Self::Init(_) => "init",
             Self::ImportPackageLock(_) => "import-package-lock",
+            Self::Pack(_) => "pack",
             Self::Manifest(_) => "manifest",
             Self::Lock(_) => "lock",
             Self::Run(_) => "run",
@@ -233,6 +237,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Manifest(_)
                     | Command::Lock(_)
                     | Command::ImportPackageLock(_)
+                    | Command::Pack(_)
                     | Command::Cache(_)
                     | Command::Tool(_)
                     | Command::Clean(_)
@@ -272,6 +277,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         }
         Some(Command::Init(args)) => init::run(args, json),
         Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
+        Some(Command::Pack(args)) => pack::run(args, json),
         Some(Command::Manifest(args)) => manifest::run(args, json),
         Some(Command::Lock(args)) => lock::run(args, json),
         Some(Command::Run(args)) => run::run(args),
