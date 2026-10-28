@@ -242,6 +242,22 @@ on Windows. A successful compile or a zero-test invocation on another platform
 cannot decide whether the capability is removable. Disposable registry-value
 controls, broker closure and complete runtime binding remain implementation work.
 
+The library capability comparison also creates a disposable DWORD input in
+`HKEY_USERS/<host-token-user-SID>/Software/TapidAuthority-<TempProject-name>`.
+The host helper must read the expected value before either contained launch.
+Both token variants query that same absolute host-hive path, avoiding ambiguous
+AppContainer `HKCU` redirection, and emit `registry:host-input:readable`,
+`access-denied`, or `unavailable`. Unexpected errors or incorrect values fail.
+The fixture refuses to modify a preexisting key, closes query handles, and
+requires deletion of its exact key and a host absence check after both Jobs
+are empty. A drop fallback attempts exact-key removal on assertion failure.
+It neither enumerates existing registry values nor reads credentials or changes
+parent ACLs. These are sampled observations under inherited key permissions;
+an unavailable result does not establish denial of all host registry inputs,
+and a readable result identifies an input that must be denied or bound. Native
+observations remain pending. This control does not justify capability removal,
+complete registry identity, broker closure, or authenticated Windows builds.
+
 ## Private Windows dependency write and key validation
 
 The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).

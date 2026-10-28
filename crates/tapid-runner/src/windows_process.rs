@@ -751,3 +751,7 @@ mod provider_probe;
 #[cfg(test)]
 #[path = "windows_process_tests.rs"]
 mod authority_tests;
+
+#[cfg(test)]
+#[path = "windows_registry_probe.rs"]
+mod registry_probe;

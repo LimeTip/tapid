@@ -4,6 +4,7 @@ use windows_sys::Win32::Security::TokenCapabilities;
 
 #[test]
 fn provider_helper() {
+    super::registry_probe::probe();
     super::provider_probe::probe(&std::env::var("TAPID_TEST_MARKER").unwrap_or_default());
 }
 
@@ -18,11 +19,14 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         module_path!().split_once("::").unwrap().1
     );
     let arguments = ["--exact", helper.as_str(), "--nocapture"];
+    let mut registry =
+        super::registry_probe::RegistryInput::new(root.file_name().unwrap().to_str().unwrap());
     let system_root = std::env::var_os("SystemRoot").unwrap();
     let host = std::process::Command::new(&program)
         .args(arguments)
         .env_clear()
         .env("SystemRoot", &system_root)
+        .env("TAPID_TEST_REGISTRY", &registry.path)
         .env("TAPID_TEST_MARKER", "provider-host")
         .output()
         .unwrap();
@@ -32,6 +36,7 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         String::from_utf8_lossy(&host.stderr)
     );
     assert!(String::from_utf8_lossy(&host.stdout).contains("provider:host:socket-created"));
+    assert!(String::from_utf8_lossy(&host.stdout).contains("registry:host-input:readable"));
     let program_units: Vec<_> = program.as_os_str().encode_wide().collect();
     let argument_units: Vec<Vec<u16>> = arguments
         .iter()
@@ -49,6 +54,10 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         let environment = super::super::super::windows_environment_block_units(
             &std::collections::BTreeMap::from([
                 (std::ffi::OsString::from("SystemRoot"), system_root.clone()),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_REGISTRY"),
+                    std::ffi::OsString::from(&registry.path),
+                ),
                 (
                     std::ffi::OsString::from("TAPID_TEST_MARKER"),
                     std::ffi::OsString::from(if registry_read {
@@ -124,10 +133,12 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         let stdout = String::from_utf8_lossy(&stdout);
         assert!(stdout.contains("provider:startup:ok"), "{stdout}");
         assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
+        assert!(stdout.contains("registry:host-input:"), "{stdout}");
         println!("registryRead={registry_read}: {stdout}");
         drop(child);
         job.wait_until_empty(5_000).unwrap();
         grants.restore().unwrap();
         container.cleanup().unwrap();
     }
+    registry.cleanup();
 }
