@@ -19,7 +19,7 @@ pub use models::{
     RegistryKind, RegistryPackageId, RegistrySnapshot,
 };
 pub use npm::{NpmPackageEvidence, NpmRegistry};
-pub use transport::{HttpResponse, HttpTransport, HttpsTransport};
+pub use transport::{HttpResponse, HttpTransport, HttpsTransport, NetworkOptions};
 
 mod git;
 pub use git::GitDependency;

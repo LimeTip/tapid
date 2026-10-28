@@ -1,6 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha512};
-use std::process::Command;
 use tapid_test_support::TempProject;
 
 fn project() -> TempProject {
@@ -29,8 +28,7 @@ fn project() -> TempProject {
 }
 
 fn run(project: &TempProject, extra: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    super::isolated_command(project.path(), &[], false)
         .args([
             "explain",
             "@example/pkg@1.2.3",
@@ -170,8 +168,7 @@ token-env = "TAPID_TEST_EXPLAIN_TOKEN"
 "#,
         )
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = super::isolated_command(project.path(), &[], false)
         .env_remove("TAPID_TEST_EXPLAIN_TOKEN")
         .args(["--json", "explain", "@example/pkg@1.2.3"])
         .output()
@@ -224,8 +221,7 @@ fn explain_rejects_ranges_missing_versions_and_malformed_evidence() {
         "foo@",
         "jsr:@example/pkg@1.2.3",
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        let output = super::isolated_command(project.path(), &[], false)
             .args(["explain", spec, "--json"])
             .output()
             .unwrap();
@@ -239,4 +235,24 @@ fn explain_rejects_ranges_missing_versions_and_malformed_evidence() {
     assert!(!output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["errors"][0]["code"], "REGISTRY_METADATA_INVALID");
+}
+
+#[test]
+fn explain_rejected_metadata_urls_never_render_credentials() {
+    let project = project();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.path().join("metadata.json")).unwrap())
+            .unwrap();
+    metadata["versions"]["1.2.3"]["dist"]["tarball"] =
+        serde_json::json!("https://user:remote-secret-sentinel@registry.npmjs.org/pkg.tgz");
+    project
+        .write("metadata.json", &serde_json::to_vec(&metadata).unwrap())
+        .unwrap();
+    for args in [vec![], vec!["--json"]] {
+        let output = run(&project, &args);
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("remote-secret-sentinel"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("remote-secret-sentinel"));
+        assert!(!project.path().join("tapid.lock").exists());
+    }
 }

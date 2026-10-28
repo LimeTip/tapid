@@ -120,7 +120,11 @@ pub(crate) struct CommonArgs {
     pub(crate) allow_unverified_registry_artifacts: bool,
 }
 
-pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
+pub(crate) fn add(
+    args: AddArgs,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     if args.packages.is_empty() {
         return crate::output::json::failure_or_human(
             &OperationFailure::unchanged(
@@ -155,13 +159,22 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
             }
         })
         .collect::<Vec<_>>();
-    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_add(manifest, &mutations)
-    });
+    let result = mutate_and_install(
+        &args.common,
+        json,
+        false,
+        args.dry_run,
+        configuration,
+        |manifest| crate::application::lifecycle::plan_add(manifest, &mutations),
+    );
     report(result, json, "add", "Added dependencies")
 }
 
-pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
+pub(crate) fn remove(
+    args: RemoveArgs,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     if args.packages.is_empty() {
         return crate::output::json::failure_or_human(
             &OperationFailure::unchanged(
@@ -175,13 +188,22 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
             json,
         );
     }
-    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_remove(manifest, &args.packages)
-    });
+    let result = mutate_and_install(
+        &args.common,
+        json,
+        false,
+        args.dry_run,
+        configuration,
+        |manifest| crate::application::lifecycle::plan_remove(manifest, &args.packages),
+    );
     report(result, json, "remove", "Removed dependencies")
 }
 
-pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
+pub(crate) fn update(
+    args: UpdateArgs,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     use crate::application::lifecycle::{SavePolicy, UpdateRequest};
     let result = (|| {
         let selection = crate::application::lifecycle::resolve_workspace(
@@ -220,10 +242,11 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
                 mode,
                 args.common.registry_fixture.as_deref(),
                 args.common.allow_unverified_registry_artifacts,
+                configuration,
             )
             .map(LifecycleReport::Preview);
         }
-        crate::application::install::run(
+        crate::application::install::run_with_execution(
             crate::application::install::InstallRequest {
                 project_dir: &selection.root_dir,
                 target_manifest_path: &selection.manifest_path,
@@ -240,6 +263,8 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
                     .common
                     .allow_unverified_registry_artifacts,
             },
+            crate::application::ExecutionOverrides::default(),
+            crate::application::install::RegistryConfiguration::Selected(configuration),
             |event| crate::output::report_progress(event, json),
         )
         .map(LifecycleReport::Installed)
@@ -247,12 +272,17 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
     report(result, json, "update", "Updated dependencies")
 }
 
-pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
+pub(crate) fn outdated(
+    args: OutdatedArgs,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     match crate::application::lifecycle::outdated_report(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
         args.common.registry_fixture.as_deref(),
         args.offline,
+        configuration,
     ) {
         Ok(report) => {
             if json {
@@ -287,7 +317,11 @@ pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
     }
 }
 
-pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
+pub(crate) fn prune(
+    args: ReadOnlyArgs,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     let selection = match crate::application::lifecycle::resolve_workspace(
         &args.common.project_dir,
         args.common.workspace.as_deref(),
@@ -301,7 +335,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             );
         }
     };
-    match crate::application::install::run(
+    match crate::application::install::run_with_execution(
         crate::application::install::InstallRequest {
             project_dir: &selection.root_dir,
             target_manifest_path: &selection.manifest_path,
@@ -311,6 +345,8 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             registry_fixture: None,
             allow_unverified_registry_artifacts: false,
         },
+        crate::application::ExecutionOverrides::default(),
+        crate::application::install::RegistryConfiguration::Selected(configuration),
         |event| crate::output::report_progress(event, json),
     ) {
         Ok(report) => {
@@ -330,6 +366,7 @@ fn mutate_and_install(
     json: bool,
     refresh: bool,
     dry_run: bool,
+    configuration: &crate::registry::ConfigSelection,
     planner: impl FnOnce(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
@@ -355,10 +392,11 @@ fn mutate_and_install(
             mode,
             common.registry_fixture.as_deref(),
             common.allow_unverified_registry_artifacts,
+            configuration,
         )
         .map(LifecycleReport::Preview);
     }
-    crate::application::install::run(
+    crate::application::install::run_with_execution(
         crate::application::install::InstallRequest {
             project_dir: &selection.root_dir,
             target_manifest_path: &selection.manifest_path,
@@ -373,6 +411,8 @@ fn mutate_and_install(
             registry_fixture: common.registry_fixture.as_deref(),
             allow_unverified_registry_artifacts: common.allow_unverified_registry_artifacts,
         },
+        crate::application::ExecutionOverrides::default(),
+        crate::application::install::RegistryConfiguration::Selected(configuration),
         |event| crate::output::report_progress(event, json),
     )
     .map(LifecycleReport::Installed)
@@ -450,6 +490,7 @@ mod tests {
                 },
             },
             false,
+            &Default::default(),
         );
 
         assert_eq!(result, ExitCode::SUCCESS);
@@ -504,18 +545,25 @@ mod stale_tests {
             registry_fixture: Some(fixture),
             allow_unverified_registry_artifacts: false,
         };
-        let result = mutate_and_install(&common, false, false, false, |manifest| {
-            let plan = crate::application::lifecycle::plan_add(
-                manifest,
-                &[crate::application::lifecycle::DependencyMutation {
-                    name: "react".into(),
-                    requirement: Some("^18.0.0".into()),
-                    kind: DependencyKind::PeerDependencies,
-                }],
-            )?;
-            project.write("package.json", newer).unwrap();
-            Ok(plan)
-        });
+        let result = mutate_and_install(
+            &common,
+            false,
+            false,
+            false,
+            &Default::default(),
+            |manifest| {
+                let plan = crate::application::lifecycle::plan_add(
+                    manifest,
+                    &[crate::application::lifecycle::DependencyMutation {
+                        name: "react".into(),
+                        requirement: Some("^18.0.0".into()),
+                        kind: DependencyKind::PeerDependencies,
+                    }],
+                )?;
+                project.write("package.json", newer).unwrap();
+                Ok(plan)
+            },
+        );
         assert_eq!(
             std::fs::read(project.path().join("package.json")).unwrap(),
             newer,

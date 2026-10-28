@@ -391,7 +391,7 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
             br#"{"name":"b","version":"1.0.0"}"#,
         )
         .unwrap();
-    project.write("tapid.toml", b"[registries.default]\nurl = \"https://registry.example\"\ntoken-env = \"TAPID_STATUS_TEST_SECRET\"\n").unwrap();
+    project.write("tapid.toml", b"[registries.default]\nurl = \"https://registry.example\"\ntoken-env = \"TAPID_STATUS_TEST_SECRET\"\n[network]\nproxy = 'direct'\nca-files = ['missing.pem']\n").unwrap();
     let (_, value) = status(project.path(), &["--workspace", "b"]);
     assert_eq!(value["data"]["workspace"]["selected"], "b");
     assert_eq!(value["data"]["workspace"]["linking"], "not_verified");
@@ -418,6 +418,16 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
         "TAPID_STATUS_TEST_SECRET"
     );
     assert_eq!(value["data"]["snapshot"]["consistency"], "not_atomic");
+    assert_eq!(value["data"]["registries"]["network"]["proxy"], "direct");
+    assert_eq!(
+        value["data"]["registries"]["network"]["ca_contents"],
+        "not_read"
+    );
+    assert_eq!(
+        value["data"]["registries"]["network"]["provenance"]["ca-files"]["layer"],
+        "project"
+    );
+    assert_eq!(value["data"]["registries"]["credentials"], "not_read");
 }
 
 #[test]
@@ -824,5 +834,56 @@ fn status_reports_root_bindings_without_requiring_workspace_discovery() {
                 .any(|b| b["code"] == code),
             "missing {code}: {value}"
         );
+    }
+}
+
+#[test]
+fn standalone_status_reports_provenance_without_project_or_credentials() {
+    let project = tapid_test_support::TempProject::new("standalone-status").unwrap();
+    project
+        .write("tapid.toml", b"hostile caller configuration = [")
+        .unwrap();
+    project.write("selected.toml", b"[registries.default]\nurl='https://standalone.example'\ntoken-env='STANDALONE_STATUS_SECRET'\n[network]\nca-files=['missing.pem']\n").unwrap();
+    let args = [
+        "--config",
+        "selected.toml",
+        "status",
+        "--standalone",
+        "--json",
+    ];
+    let output = isolated_command(project.path(), &args, true)
+        .env("STANDALONE_STATUS_SECRET", "standalone-secret-sentinel")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(
+        value["data"]["registries"]["default_origin"],
+        "https://standalone.example"
+    );
+    assert_eq!(
+        value["data"]["registries"]["routes"][0]["layer"],
+        "explicit"
+    );
+    assert_eq!(value["data"]["registries"]["credentials"], "not_read");
+    assert_eq!(
+        value["data"]["registries"]["network"]["ca_contents"],
+        "not_read"
+    );
+    assert_eq!(value["data"]["workspace"]["selected"], "standalone");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("standalone-secret-sentinel"));
+    assert!(output.stderr.is_empty());
+    assert!(!project.path().join("package.json").exists());
+    for extra in [["--project-dir", "."], ["--workspace", "web"]] {
+        let output = isolated_command(
+            project.path(),
+            &["status", "--standalone", extra[0], extra[1]],
+            true,
+        )
+        .output()
+        .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
     }
 }

@@ -21,6 +21,8 @@ fn command(project: &TempProject, home: &TempHome, args: &[&str]) -> Command {
         .env("USERPROFILE", home.path())
         .env("XDG_CACHE_HOME", home.path())
         .env("LOCALAPPDATA", home.path())
+        .env("APPDATA", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env_remove("TAPID_NPM_TOKEN")
         .env_remove("TAPID_TEST_LOCKFILE_RENAME_FAILURE")
         .current_dir(project.path())

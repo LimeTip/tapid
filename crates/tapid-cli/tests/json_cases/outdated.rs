@@ -1,6 +1,6 @@
-use super::invoke;
+use super::{command, invoke};
 use std::{fs, process::Command};
-use tapid_test_support::TempProject;
+use tapid_test_support::{TempHome, TempProject};
 
 #[test]
 fn outdated_schema_6_uses_direct_root_instead_of_newer_transitive_version() {
@@ -108,7 +108,8 @@ fn outdated_peer_declarations_do_not_claim_direct_lockfile_changes() {
         entry["available_impact"],
         serde_json::json!({"version_change":"unlocked", "lockfile":"unchanged", "manifest":"changed"})
     );
-    let human = Command::new(env!("CARGO_BIN_EXE_tapid"))
+    let home = TempHome::new("json-outdated-human").unwrap();
+    let human = command(&project, &home, &[])
         .current_dir(project.path())
         .args(["outdated", "--registry-fixture", "registry.json"])
         .output()

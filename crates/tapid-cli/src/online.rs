@@ -719,16 +719,16 @@ fn artifact_progress_checkpoint(completed: usize, total: usize) -> bool {
 pub(crate) fn validate_manifest_roots(
     project: &Path,
     manifest: &PackageManifest,
+    registry_config: &crate::registry::RegistryConfig,
 ) -> Result<(), OperationalError> {
     let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
-    let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
     copied::validate_declarations(project, manifest).map_err(invalid)?;
-    let workspace = workspace_materialization(project, &registry_config).map_err(|mut error| {
+    let workspace = workspace_materialization(project, registry_config).map_err(|mut error| {
         // Preserve the request-validation category while retaining typed evidence.
         error.kind = ErrorKind::InvalidRequest;
         error
     })?;
-    workspace_root_resolution(manifest, &workspace, &registry_config)
+    workspace_root_resolution(manifest, &workspace, registry_config)
         .map(|_| ())
         .map_err(invalid)
 }

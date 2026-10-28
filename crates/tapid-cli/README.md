@@ -299,7 +299,7 @@ for discovery, replay, selection, and compatibility limits.
 
 ## Private npm registry routing (development feature)
 
-Registry routing is configured in the project-root `tapid.toml`. With no `[registries]` entries, plain npm package names continue to resolve from `https://registry.npmjs.org`. A matching scope overrides `default`; otherwise `default` applies, then the public npm registry is the fallback. `npm:` aliases use the same scope routing. `jsr:` packages retain their JSR identity and are not routed through npm settings.
+Registry routing is configured in the layers described below, including the project-root `tapid.toml`. With no `[registries]` entries, plain npm package names continue to resolve from `https://registry.npmjs.org`. A matching scope overrides `default`; otherwise `default` applies, then the public npm registry is the fallback. `npm:` aliases use the same scope routing. `jsr:` packages retain their JSR identity and are not routed through npm settings.
 
 ```toml
 [registries.default]
@@ -315,6 +315,85 @@ token-env = "TAPID_ACME_NPM_TOKEN"
 The only supported credential provider is an environment variable selected by `token-env`. For local use, populate it through an operating-system secret manager or a protected shell environment; in CI, map the corresponding CI secret into the install job's environment. Do not put literal tokens in configuration, command arguments, scripts, or logs. Tapid does not implicitly read `.npmrc`, npm configuration variables, or home-directory credentials. Registry selection order is: exact package scope, then `[registries.default]`, then the public npm registry. Credential selection follows only the chosen entry and has no implicit cross-entry fallback. This initial feature does not implement credential helper or file providers.
 
 Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `tapid.lock`. Offline and warm replay use the registry identities already pinned in the lockfile without credentials or registry requests. Frozen hydration uses credentials only for the configured origin of a missing pinned artifact. Changed registry routing fails explicitly. Registry credentials are excluded from root-script environments even if a run policy tries to allowlist the corresponding variable. Private-registry support is under development and is not a production-support claim.
+
+### Effective configuration
+
+Registry/network precedence is built-in < user < selected project < explicit
+`--config PATH`. Routes replace atomically by scope, including their token reference;
+a replacement without `token-env` removes the lower reference. Every selected file
+is validated, including shadowed entries. Network fields inherit independently;
+`proxy = "direct"` clears a proxy, and `ca-files = []` clears extra roots.
+
+| Platform | Optional user file |
+| --- | --- |
+| Linux | Absolute `XDG_CONFIG_HOME/tapid/config.toml`, otherwise absolute `HOME/.config/tapid/config.toml` |
+| macOS | Absolute `HOME/Library/Application Support/tapid/config.toml` |
+| Windows | Absolute `APPDATA/tapid/config.toml` |
+
+Unset/empty location variables are unavailable; nonempty relative locations fail.
+An absent user file succeeds. Explicit files are required and resolve from the
+invocation directory. Each document is a regular file bounded to 64 KiB. No shell
+expansion or extra ancestor search occurs. User and explicit files accept only
+`registries` and `network`; execution policy remains project-authorized. Root scripts
+exclude credential names from every applicable layer, including shadowed routes.
+
+| Operation | Registry/network layers and behavior |
+| --- | --- |
+| Project install, add/remove/update, preview, outdated, why, explain, npm import | User, selected project, explicit; one resolved snapshot per operation |
+| Frozen/locked hydration | Same routing, checked against pinned identity; credentials only for missing selected artifacts |
+| Warm offline replay | Same routing; no token values, CA contents, registry or proxy requests |
+| Standalone tool install/update | User and explicit only; snapshot passed in memory, never written into generated projects |
+| Status | Project layers by default; `status --standalone` reads user/explicit without a manifest |
+| Root scripts | Project execution authority only; all layered credential references excluded |
+| Git and release downloads | Separate transport contracts; registry network settings do not apply |
+
+Status exposes sanitized provenance and fixed bounds through the existing human
+and schema-v1 JSON reports, without authentication or network probes. Standalone
+status rejects project/workspace selectors. See the [authority decision](../../docs/adr/0012-layered-registry-configuration.md).
+
+Registry metadata and artifact transports accept these network settings:
+
+```toml
+[network]
+proxy = "http://proxy.example.test:8080"
+ca-files = ["certs/corporate.pem"]
+```
+
+Only unauthenticated HTTP CONNECT proxies with an explicit port are supported.
+Use `proxy = "direct"` for direct connections, the default. Ambient proxy and bypass
+variables are ignored. CA filenames resolve against the declaring configuration
+file; no environment or shell expansion occurs. Additional roots supplement public
+trust and preserve certificate and hostname checks. Selecting a corporate root
+allows that operator's TLS interception. There is no insecure TLS bypass.
+
+Online routing snapshots at most 16 regular CA files, 1 MiB each, 4 MiB total,
+and 128 certificates. Empty or malformed bundles fail closed. Offline replay and
+status do not open CA files. Standard request timeouts remain 20 seconds, redirects
+are limited to ten same-origin hops, and GET requests use at most three attempts;
+these bounds do not impose a 20-second operation deadline. Metadata and artifact
+responses remain limited to 32 MiB and 512 MiB respectively. Proxy authentication,
+PAC, SOCKS, HTTPS proxies, and client certificates are unsupported. HTTP-429
+Retry-After is capped at 60 seconds; ordinary retry delays are 100/200 ms.
+
+### Manual npm migration and headless credentials
+
+Tapid ignores `.npmrc`, npm configuration environment variables, auth helpers and
+npm execution settings. It does not import arbitrary npm configuration.
+
+| npm configuration | Manual Tapid equivalent |
+| --- | --- |
+| `registry` / `@scope:registry` | Canonical HTTPS origin in `registries.default` / `registries.'@scope'` |
+| Origin-specific `_authToken` | A `token-env` variable name; provision its value outside configuration |
+| Unauthenticated HTTP `https-proxy` | Explicit `network.proxy` with host and port |
+| `cafile` | `network.ca-files` with declaring-file-relative PEM paths |
+| `strict-ssl=false`, helpers, execution settings | Unsupported; no insecure TLS bypass |
+
+Path-prefixed registry URLs remain unsupported. For CI, bind a secret to
+`TAPID_ACME_NPM_TOKEN` in the job environment and configure only
+`token-env = "TAPID_ACME_NPM_TOKEN"`. Locally, let a secret manager populate that
+process variable. Never place a literal token in a command argument or project
+file. This is headless environment-based authentication; Tapid Cloud browser
+login is separate [issue #314](https://github.com/LimeTip/tapid/issues/314).
 
 ## Legacy registry identities
 

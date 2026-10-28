@@ -16,8 +16,12 @@ pub(crate) struct Args {
 }
 
 /// Render npm import outcomes while keeping diagnostic prose out of JSON results.
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
-    match import(args) {
+pub(crate) fn run(
+    args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
+    match import(args, configuration) {
         Ok(outcome) => {
             if json {
                 return crate::output::json::completed(
@@ -36,7 +40,10 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
 }
 
 /// Validate npm selections before locking, then publish the single lockfile without a rollback gap.
-fn import(args: Args) -> Result<OperationOutcome, OperationFailure> {
+fn import(
+    args: Args,
+    configuration: &crate::registry::ConfigSelection,
+) -> Result<OperationOutcome, OperationFailure> {
     let project = std::env::current_dir().map_err(|e| {
         OperationFailure::unchanged(
             Path::new("."),
@@ -56,7 +63,8 @@ fn import(args: Args) -> Result<OperationOutcome, OperationFailure> {
         let digest = crate::filesystem::atomic::digest_bytes(manifest.as_bytes());
         let mut lock = ImportedNpmLockfile::import(&input, &manifest, &digest)
             .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
-        let config = crate::registry::RegistryConfig::load(&project)
+        let config = configuration
+            .load(Some(&project))
             .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
         let workspace = crate::online::workspace_materialization(&project, &config)?;
         lock.bind_workspace_manifests(&crate::online::imported_workspace_manifests(

@@ -35,6 +35,100 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
 const ARTIFACT: &str = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
 const INTEGRITY: &str = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
 
+#[test]
+fn invalid_network_configuration_preserves_installed_project() {
+    let (project, fixture) = project_with_fixture("invalid-network-state", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    let request = || InstallRequest {
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Online,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    run(request(), |_| {}).unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let marker = project
+        .write("node_modules/keep", b"original layout")
+        .unwrap();
+    project
+        .write(
+            "tapid.toml",
+            b"[network]\nproxy = 'http://secret-sentinel@proxy.example:8080'\n",
+        )
+        .unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::RegistryConfiguration);
+    assert!(!format!("{:?}", failure.error).contains("secret-sentinel"));
+    assert!(failure.outcome.changed_files.is_empty());
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    assert_eq!(fs::read(marker).unwrap(), b"original layout");
+}
+
+#[test]
+fn warm_offline_replay_does_not_open_selected_ca_files() {
+    let (project, fixture) = project_with_fixture("offline-network-ca", INTEGRITY);
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    project
+        .write(
+            "tapid.toml",
+            b"[network]\nproxy = 'http://127.0.0.1:1'\nca-files = ['missing.pem']\n",
+        )
+        .unwrap();
+    let report = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(report.replayed);
+    assert!(
+        project
+            .path()
+            .join("node_modules/plugin/package.json")
+            .is_file()
+    );
+}
+
 fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) {
     let project = TempProject::new(label).unwrap();
     project
@@ -118,6 +212,7 @@ fn install_reclassifies_the_lock_after_recovery() {
                 without_containment: overrides,
                 ..Default::default()
             },
+            RegistryConfiguration::Selected(&Default::default()),
             |_| {},
         );
         let outcome = if restore_imported && (ci || overrides) {
@@ -745,8 +840,14 @@ fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
             )
             .unwrap_err()
         } else {
-            crate::application::lifecycle::outdated_report(project.path(), None, None, false)
-                .unwrap_err()
+            crate::application::lifecycle::outdated_report(
+                project.path(),
+                None,
+                None,
+                false,
+                &Default::default(),
+            )
+            .unwrap_err()
         };
         assert_eq!(failure.error.kind, ErrorKind::Recovery);
         assert_eq!(failure.outcome.state, ChangeState::RecoveryRequired);

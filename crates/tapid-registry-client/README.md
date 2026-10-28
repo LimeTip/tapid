@@ -41,7 +41,40 @@ Live JSR installation and live integrity behavior are not verified. Local fixtur
 
 The crate-level `download_artifact` operation accepts canonical HTTPS URLs, uses an injected transport, and requires HTTP 200. The npm and JSR convenience methods delegate to it. `HttpsTransport` allows only configured exact origins, permits at most 10 same-origin redirect hops, rejects cross-origin and credentialed redirects, and bounds response bodies. `authenticated_metadata` and `authenticated_artifact` accept caller-supplied bearer credentials bound to exact configured origins; credentials are never forwarded to another origin. Standard metadata reads are limited to 32 MiB and archive reads are separately limited to 512 MiB. Idempotent GETs use at most three attempts with deterministic 100 ms and 200 ms delays for timeouts, connection or request failures, response-read failures, HTTP 429, and selected transient HTTP 5xx responses. Permanent status, origin, redirect-policy, and response-limit failures are not broadened into unbounded retries. The standard origins include npmjs.org, jsr.io, and npm.jsr.io. Malformed JSON, URLs, identities, dependencies, and integrity values are rejected.
 
+Metadata errors render only their category and numeric HTTP status in Debug and
+Display. Structured payload fields remain available to Rust callers, but are
+untrusted input and must not be interpolated into diagnostics: rejected URLs and
+response text can contain secrets.
+
 The crate is read-only. It does not publish, mutate registry state, choose credential sources, or mirror. Unit tests use local fixtures and do not call live registries.
+
+All `HttpsTransport` constructors use direct connections by default and ignore
+ambient proxy and bypass variables. This changes the previous reqwest default:
+setting `HTTPS_PROXY` alone no longer changes registry transport.
+`NetworkOptions::new` and `new_authenticated_with_network` support one explicit,
+unauthenticated `http://host:port` CONNECT proxy and additional PEM CA bundles.
+Proxy URLs require an explicit nonzero port and cannot contain user information,
+paths other than `/`, queries or fragments. HTTPS proxies, SOCKS, PAC, proxy
+authentication, client certificates and TLS verification bypasses are unsupported.
+Registry Authorization stays inside the exact-origin HTTPS tunnel.
+
+Additional CA roots supplement public roots and preserve certificate and hostname
+verification. Input is limited to 16 bundles, 1 MiB each, 4 MiB combined and 128
+certificates. Empty bundles, noncertificate PEM content and malformed certificates
+fail closed. The caller owns bounded regular-file reads and supplies an immutable
+byte snapshot; this crate does not discover files or environment credentials.
+Adding a corporate root trusts its operator to issue registry certificates,
+including for TLS interception. The CLI configuration/caller integration remains
+under development; the transport interface alone does not enable CLI proxy flags.
+The [layered configuration decision](../../docs/adr/0012-layered-registry-configuration.md)
+records the authority and trust contract for that integration.
+
+Standard requests retain their 20-second timeout, at most ten same-origin redirect
+hops and three GET attempts. Ordinary retry delays are 100/200 ms; HTTP-429
+Retry-After is capped at 60 seconds. These are request and retry bounds, not an
+operation-wide 20-second deadline. Transport failures report safe categories rather
+than supplied URLs or remote diagnostic bodies. Git and release transports have
+separately owned contracts and do not inherit these options.
 
 ## HTTPS Git artifacts
 

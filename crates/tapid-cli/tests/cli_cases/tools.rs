@@ -20,6 +20,8 @@ fn isolated_process(project: &TempProject, home: &TempHome, program: &str) -> Co
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env("LOCALAPPDATA", home.path())
+        .env("APPDATA", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_DATA_HOME", home.path())
         .env("XDG_CACHE_HOME", home.path());
     for key in ["PATH", "SystemRoot", "LLVM_PROFILE_FILE"] {
@@ -1879,4 +1881,210 @@ fn tool_recovery_failure_reports_tool_paths_instead_of_project_outputs() {
         fs::read(root.join("pending.json")).unwrap(),
         b"unrecognized journal"
     );
+}
+
+#[test]
+fn tools_use_standalone_explicit_snapshot_without_caller_project_authority() {
+    let project = TempProject::new("tool-layered-snapshot").unwrap();
+    let home = TempHome::new("tool-layered-snapshot").unwrap();
+    project
+        .write("tapid.toml", b"malformed caller policy and registry = [")
+        .unwrap();
+    project.write("selected.toml", b"[registries.default]\nurl='https://tools.example'\ntoken-env='TOOL_CONFIG_SECRET'\n[network]\nca-files=['missing.pem']\n").unwrap();
+    let fixture = fixture(&project);
+    let mut data: Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let public_package = data["packages"][0].clone();
+    data["packages"][0]["registry"] = json!("https://tools.example");
+    data["packages"]
+        .as_array_mut()
+        .unwrap()
+        .push(public_package);
+    fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+    let output = command(
+        &project,
+        &home,
+        &[
+            "--config",
+            "selected.toml",
+            "tool",
+            "install",
+            "hello-tool@1.0.0",
+        ],
+    )
+    .arg("--registry-fixture")
+    .arg(&fixture)
+    .arg("--store-dir")
+    .arg(home.path().join("store"))
+    .env("TOOL_CONFIG_SECRET", "tool-secret-sentinel")
+    .output()
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let environments = home.path().join("tools with spaces/environments");
+    let environment = fs::read_dir(environments)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        fs::read_to_string(environment.join("tapid.lock"))
+            .unwrap()
+            .contains("https://tools.example")
+    );
+    assert!(!environment.join("tapid.toml").exists());
+    for name in ["package.json", "tapid.lock"] {
+        let bytes = fs::read(environment.join(name)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("tool-secret-sentinel"));
+        assert!(!text.contains("TOOL_CONFIG_SECRET"));
+        assert!(!text.contains("missing.pem"));
+    }
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("tool-secret-sentinel"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("tool-secret-sentinel"));
+}
+
+#[test]
+fn project_commands_share_explicit_routing_and_offline_replay_avoids_secrets() {
+    let project = TempProject::new("project-config-snapshot").unwrap();
+    let home = TempHome::new("project-config-snapshot").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"consumer","version":"1.0.0","dependencies":{"hello-tool":"1.0.0"}}"#,
+        )
+        .unwrap();
+    project.write("tapid.toml", b"[registries.default]\nurl='https://project.example'\ntoken-env='SHADOWED_PROJECT_SECRET'\n").unwrap();
+    project.write("selected.toml", b"[registries.default]\nurl='https://selected.example'\ntoken-env='SELECTED_PROJECT_SECRET'\n[network]\nca-files=['unavailable.pem']\n").unwrap();
+    project
+        .write(
+            ".npmrc",
+            b"registry=http://hostile.invalid\nstrict-ssl=false\n_authToken=npm-secret-sentinel\n",
+        )
+        .unwrap();
+    let fixture = fixture(&project);
+    let mut data: Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    // Both potential origins have local fixtures, so a routing regression cannot contact a registry.
+    let mut lower = data["packages"][0].clone();
+    lower["registry"] = json!("https://project.example");
+    data["packages"][0]["registry"] = json!("https://selected.example");
+    data["packages"].as_array_mut().unwrap().push(lower);
+    fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+    let invoke = |args: &[&str]| {
+        let mut command =
+            super::command_support::command_in_home(project.path(), home.path(), args, true);
+        command
+            .env("npm_config_registry", "http://hostile.invalid")
+            .env("npm_config_userconfig", project.path().join(".npmrc"))
+            .arg("--config")
+            .arg("selected.toml")
+            .arg("--json");
+        command.output().unwrap()
+    };
+    let fixture_path = fixture.to_str().unwrap();
+    let store = home.path().join("store");
+    let store_path = store.to_str().unwrap();
+    let installed = invoke(&[
+        "install",
+        "--registry-fixture",
+        fixture_path,
+        "--store-dir",
+        store_path,
+    ]);
+    assert!(installed.status.success(), "{installed:?}");
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    assert!(String::from_utf8_lossy(&lock).contains("https://selected.example"));
+    for args in [
+        vec![
+            "ci",
+            "--offline",
+            "--store-dir",
+            store_path,
+            "--registry-fixture",
+            fixture_path,
+        ],
+        vec!["install", "--offline", "--store-dir", store_path],
+        vec!["install", "--dry-run", "--offline"],
+        vec!["outdated", "--offline"],
+        vec!["why", "hello-tool"],
+    ] {
+        let output = invoke(&args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("npm-secret-sentinel"));
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    }
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    project
+        .write(
+            "selected.toml",
+            b"[registries.default]\nurl='https://user:credential-sentinel@rejected.example'\n",
+        )
+        .unwrap();
+    for args in [
+        vec!["install"],
+        vec!["ci", "--offline"],
+        vec!["add", "hello-tool@1.0.0"],
+    ] {
+        let output = invoke(&args);
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("credential-sentinel"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credential-sentinel"));
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert!(
+            project
+                .path()
+                .join("node_modules/hello-tool/package.json")
+                .is_file()
+        );
+    }
+}
+
+#[test]
+fn tool_install_discovers_user_configuration_without_project_configuration() {
+    let project = TempProject::new("tool-user-configuration").unwrap();
+    let home = TempHome::new("tool-user-configuration").unwrap();
+    project
+        .write("tapid.toml", b"hostile caller configuration = [")
+        .unwrap();
+    for filename in [
+        ".config/tapid/config.toml",
+        "Library/Application Support/tapid/config.toml",
+        "tapid/config.toml",
+    ] {
+        home.write(
+            filename,
+            b"[registries.default]\nurl='https://user-tools.example'\n",
+        )
+        .unwrap();
+    }
+    let fixture = fixture(&project);
+    let mut data: Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let public = data["packages"][0].clone();
+    data["packages"][0]["registry"] = json!("https://user-tools.example");
+    data["packages"].as_array_mut().unwrap().push(public);
+    fs::write(&fixture, serde_json::to_vec(&data).unwrap()).unwrap();
+    let output = command(&project, &home, &["tool", "install", "hello-tool@1.0.0"])
+        .arg("--registry-fixture")
+        .arg(&fixture)
+        .arg("--store-dir")
+        .arg(home.path().join("store"))
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let environment = fs::read_dir(home.path().join("tools with spaces/environments"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        fs::read_to_string(environment.join("tapid.lock"))
+            .unwrap()
+            .contains("https://user-tools.example")
+    );
+    assert!(!environment.join("tapid.toml").exists());
 }
