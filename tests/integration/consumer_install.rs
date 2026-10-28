@@ -179,12 +179,15 @@ fn tar_fixture() -> Vec<u8> {
 fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     let archive = tar_fixture();
     let npm_meta = br#"{"name":"demo","versions":{"1.0.0":{"name":"demo","version":"1.0.0","dist":{"tarball":"https://registry.npmjs.org/demo/-/demo-1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}}"#.to_vec();
-    let jsr_meta = br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/~/std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#.to_vec();
+    let jsr_meta = br#"{"name":"@jsr/std__path","versions":{"1.0.0":{"name":"@jsr/std__path","version":"1.0.0","dist":{"tarball":"https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#.to_vec();
     let fixture = LocalHttpFixture::start(BTreeMap::from([
         ("/demo".into(), (200, npm_meta)),
-        ("/@std/path/meta.json".into(), (200, jsr_meta)),
+        ("/@jsr/std__path".into(), (200, jsr_meta)),
         ("/demo/-/demo-1.0.0.tgz".into(), (200, archive.clone())),
-        ("/~/std__path/1.0.0.tgz".into(), (200, archive.clone())),
+        (
+            "/~/11/@jsr/std__path/1.0.0.tgz".into(),
+            (200, archive.clone()),
+        ),
         ("/redirect".into(), (302, b"/demo".to_vec())),
         ("/large".into(), (200, vec![b'x'; 32])),
     ]));
@@ -204,7 +207,7 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     assert!(npm[0].integrity.is_some());
     assert_eq!(
         jsr[0].artifact_url,
-        "https://npm.jsr.io/~/std__path/1.0.0.tgz"
+        "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz"
     );
     assert!(matches!(
         transport.get("https://registry.npmjs.org/redirect"),

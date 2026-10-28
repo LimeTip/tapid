@@ -2474,6 +2474,49 @@ fn workspace_member_jsr_dependency_uses_stripped_local_name_and_replays() {
         );
         assert!(dir.join("node_modules/@s/foo/package.json").is_file());
     }
+    let manifest_before = fs::read(dir.join("package.json")).unwrap();
+    let member_before = fs::read(member_dir.join("package.json")).unwrap();
+    let lock_before = fs::read(dir.join("tapid.lock")).unwrap();
+    let active_before = fs::read(dir.join("node_modules/@s/foo/package.json")).unwrap();
+    fs::remove_dir_all(store.join("trees")).unwrap();
+    for (command, mode) in [
+        ("install", "--frozen"),
+        ("install", "--offline"),
+        ("ci", "--offline"),
+        ("ci", ""),
+    ] {
+        let mut args = vec![command];
+        if !mode.is_empty() {
+            args.push(mode);
+        }
+        args.extend([
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let replay = run(&dir, &args);
+        assert!(
+            !replay.status.success(),
+            "{command} {mode} hydrated a cold JSR lock"
+        );
+        assert!(
+            String::from_utf8_lossy(&replay.stderr).contains("tree"),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest_before);
+        assert_eq!(
+            fs::read(member_dir.join("package.json")).unwrap(),
+            member_before
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock_before);
+        assert_eq!(
+            fs::read(dir.join("node_modules/@s/foo/package.json")).unwrap(),
+            active_before
+        );
+        assert!(!store.join("trees").exists());
+    }
     cleanup(dir);
 }
 
@@ -9095,3 +9138,212 @@ fn sandbox_json_rejects_install_before_privileged_management() {
 }
 #[path = "cli_cases/preview.rs"]
 mod preview_tests;
+
+#[test]
+fn jsr_transitive_bindings_round_trip_and_replay_mixed_graph() {
+    let project = tapid_test_support::TempProject::new("jsr-mixed-graph").unwrap();
+    let dir = project.path();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{}}"#,
+        )
+        .unwrap();
+    // Synthetic archive: this test proves graph persistence, not live JSR identity.
+    let artifact = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
+    let integrity = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+    let packages = serde_json::json!({"packages":[
+        {"registry":"https://jsr.io","name":"@std/path","version":"1.0.0","artifact":artifact,"integrity":integrity,"dependencies":{"@jsr/std__internal":"1"}},
+        {"registry":"https://jsr.io","name":"@std/internal","version":"1.0.0","artifact":artifact,"integrity":integrity,"dependencies":{"ordinary":"1"}},
+        {"registry":"https://registry.npmjs.org","name":"ordinary","version":"1.0.0","artifact":artifact,"integrity":integrity}
+    ]});
+    let fixture = project
+        .write("registry.json", packages.to_string().as_bytes())
+        .unwrap();
+    let store = dir.join("store");
+    let output = run(
+        dir,
+        &[
+            "add",
+            "jsr:@std/path@1.0.0",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(saved["dependencies"]["jsr:@std/path"], "1.0.0");
+    let bytes = fs::read(dir.join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    let round_trip = lock.to_json().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&round_trip).unwrap();
+    let packages = value["packages"].as_object().unwrap();
+    assert_eq!(packages.len(), 3);
+    let parent = packages
+        .iter()
+        .find(|(key, _)| key.starts_with("https://jsr.io|@std/path@"))
+        .unwrap()
+        .1;
+    assert_eq!(
+        parent["dependencyAliases"]["@jsr/std__internal"],
+        "@std/internal"
+    );
+    assert!(
+        parent["dependencies"]["@jsr/std__internal"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://jsr.io|@std/internal@")
+    );
+    for mode in ["--offline", "--frozen"] {
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let output = run(
+            dir,
+            &["install", mode, "--store-dir", store.to_str().unwrap()],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), bytes);
+        assert!(
+            dir.join("node_modules/@jsr/std__internal/package.json")
+                .is_file()
+        );
+        assert!(dir.join("node_modules/ordinary/package.json").is_file());
+    }
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"jsr:@std/path":"1.0.0","ordinary":"1.0.0"}}"#).unwrap();
+    let output = run(
+        dir,
+        &[
+            "install",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn jsr_later_dependency_failures_preserve_project_and_verified_store() {
+    for failure in ["integrity", "archive", "unavailable", "metadata"] {
+        let project = tapid_test_support::TempProject::new("jsr-later-failure").unwrap();
+        let dir = project.path();
+        let manifest =
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"jsr:@aaa/parent":"1.0.0"}}"#;
+        project.write("package.json", manifest).unwrap();
+        let previous_lock = prior_empty_lock();
+        project
+            .write("tapid.lock", previous_lock.as_bytes())
+            .unwrap();
+        project
+            .write(".tapid-managed", b"tapid-managed-v1\n")
+            .unwrap();
+        project
+            .write("node_modules/KEEP", b"active content")
+            .unwrap();
+        let active_before =
+            tapid_archive::canonical_tree_digest(&dir.join("node_modules")).unwrap();
+        project
+            .write("unrelated/index.js", b"unrelated verified content")
+            .unwrap();
+        let store = tapid_store::Store::new(dir.join("store"));
+        let digest: tapid_core::ArtifactDigest =
+            tapid_archive::canonical_tree_digest(&dir.join("unrelated"))
+                .unwrap()
+                .parse()
+                .unwrap();
+        store
+            .activate_verified_tree(&digest, &dir.join("unrelated"))
+            .unwrap();
+        let trees_before =
+            tapid_archive::canonical_tree_digest(&store.root().join("trees")).unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/jsr-generated-manifest.json")).unwrap();
+        let bytes = STANDARD
+            .decode(fixture["artifact"].as_str().unwrap())
+            .unwrap();
+        let valid_sri = format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes)));
+        let (artifact, sri, range) = match failure {
+            "integrity" => (
+                format!("base64:{}", STANDARD.encode(&bytes)),
+                format!("sha512-{}", STANDARD.encode([0; 64])),
+                "1",
+            ),
+            "archive" => (
+                format!("base64:{}", STANDARD.encode(b"bad archive")),
+                format!("sha512-{}", STANDARD.encode(Sha512::digest(b"bad archive"))),
+                "1",
+            ),
+            "unavailable" => (
+                dir.join("absent.tgz").to_str().unwrap().to_owned(),
+                valid_sri.clone(),
+                "1",
+            ),
+            _ => (
+                format!("base64:{}", STANDARD.encode(&bytes)),
+                valid_sri.clone(),
+                "",
+            ),
+        };
+        let packages = serde_json::json!({"packages":[
+            {"registry":"https://jsr.io","name":"@aaa/parent","version":"1.0.0","artifact":format!("base64:{}", STANDARD.encode(&bytes)),"integrity":valid_sri,"dependencies":{"@jsr/zzz__child":range}},
+            {"registry":"https://jsr.io","name":"@zzz/child","version":"1.0.0","artifact":artifact,"integrity":sri}
+        ]});
+        let fixture = project
+            .write("registry.json", packages.to_string().as_bytes())
+            .unwrap();
+        let output = run(
+            dir,
+            &[
+                "install",
+                "--registry-fixture",
+                fixture.to_str().unwrap(),
+                "--store-dir",
+                store.root().to_str().unwrap(),
+            ],
+        );
+        assert!(!output.status.success(), "{failure} unexpectedly installed");
+        let error = String::from_utf8_lossy(&output.stderr);
+        let expected = match failure {
+            "integrity" => "integrity mismatch",
+            "archive" => "gzip",
+            "unavailable" => "cannot read artifact",
+            _ => "1.0.0 (empty_dependency_requirement)",
+        };
+        assert!(error.contains(expected), "{failure}: {error}");
+        assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+        assert_eq!(
+            fs::read(dir.join("tapid.lock")).unwrap(),
+            previous_lock.as_bytes()
+        );
+        assert_eq!(
+            tapid_archive::canonical_tree_digest(&dir.join("node_modules")).unwrap(),
+            active_before
+        );
+        assert_eq!(
+            tapid_archive::canonical_tree_digest(&store.root().join("trees")).unwrap(),
+            trees_before
+        );
+        assert!(store.verified_tree_path(&digest).is_ok());
+        if store.root().join(".staging").exists() {
+            assert_eq!(
+                fs::read_dir(store.root().join(".staging")).unwrap().count(),
+                0
+            );
+        }
+    }
+}

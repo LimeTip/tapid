@@ -35,3 +35,8 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+`resolve_graph_with_targets` extends the route selector to return an explicit
+source and package name while retaining the declared edge binding. The CLI uses
+this for generated JSR compatibility names. Existing route-only entry points
+retain their source-selection contract and do not rename targets.

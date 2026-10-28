@@ -675,6 +675,27 @@ pub fn resolve_graph_with_preferences<F>(
 where
     F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
 {
+    resolve_graph_with_targets(
+        ds,
+        metadata,
+        options,
+        |parent, name| registry_for_dependency(parent, name).map(|source| (source, name.clone())),
+        preferred,
+    )
+}
+
+/// Resolves source-qualified targets while preserving each declared runtime binding.
+/// Adapters may map generated transport names to logical package identities.
+pub fn resolve_graph_with_targets<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
+    mut target_for_dependency: F,
+    preferred: &ResolutionPreferences,
+) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<(PackageSource, PackageName), String>,
+{
     if options.frozen {
         return Err(ResolveError::UnsupportedMode(
             "frozen resolution requires a lockfile replay input",
@@ -788,7 +809,7 @@ where
             .clone();
         for (dependency, requirement) in package_dependencies {
             let actual_name = requirement.package_name(&dependency).clone();
-            let registry = registry_for_dependency(&parent.registry, &actual_name)
+            let (registry, actual_name) = target_for_dependency(&parent.registry, &actual_name)
                 .map_err(ResolveError::RegistryRouting)?;
             let requirements = BTreeSet::from([requirement]);
             let child_package = match select_package(
@@ -850,17 +871,19 @@ where
         for (peer, requirement) in &package.peer_dependencies {
             let candidates = root_providers.get(peer);
             let mut provider = None;
+            let mut provider_target = None;
             for candidate in candidates.into_iter().flatten() {
                 let actual_name = if requirement.is_alias() {
                     requirement.package_name(peer)
                 } else {
                     &candidate.name
                 };
-                let peer_registry = registry_for_dependency(&id.registry, actual_name)
+                let (peer_registry, peer_name) = target_for_dependency(&id.registry, actual_name)
                     .map_err(ResolveError::RegistryRouting)?;
                 if candidate.registry != peer_registry {
                     continue;
                 }
+                provider_target = Some(peer_name);
                 if provider.replace(*candidate).is_some() {
                     return Err(ResolveError::RegistryRouting(format!(
                         "ambiguous root peer binding for {peer}"
@@ -869,7 +892,7 @@ where
             }
             if candidates.is_none() {
                 // Preserve route validation even when no local provider exists.
-                registry_for_dependency(&id.registry, requirement.package_name(peer))
+                target_for_dependency(&id.registry, requirement.package_name(peer))
                     .map_err(ResolveError::RegistryRouting)?;
             }
             if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
@@ -879,7 +902,7 @@ where
             if !provider.is_some_and(|provider| {
                 selected_packages.get(provider).is_some_and(|metadata| {
                     requirement.matches_tagged_version(&provider.version, &metadata.dist_tags)
-                }) && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
+                }) && provider_target.as_ref() == Some(&provider.name)
             }) {
                 return Err(ResolveError::PeerDependency {
                     package: Box::new(id.clone()),

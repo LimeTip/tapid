@@ -1,11 +1,10 @@
 use crate::{
     HttpResponse, HttpTransport, MetadataError, RegistryArtifact, RegistryClientError,
-    RegistryKind, RegistryPackageId,
+    RegistryKind,
     artifact::download_artifact,
     response::{json_object, json_response},
     transport::request_url_is_safe,
 };
-use std::collections::BTreeMap;
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use url::Url;
 
@@ -18,20 +17,73 @@ impl<T: HttpTransport> JsrRegistry<T> {
         Self { transport, origin }
     }
     pub fn fetch(&self, package: &str) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
-        let name: PackageName = package.parse().map_err(|_| {
-            RegistryClientError::Metadata(MetadataError::InvalidPackageName(package.into()))
-        })?;
-        if !package.starts_with('@') || package.matches('/').count() != 1 {
+        let name: PackageName = package
+            .parse()
+            .map_err(|_| MetadataError::InvalidPackageName(package.into()))
+            .map_err(RegistryClientError::Metadata)?;
+        let compatibility = compatibility_name(package)?;
+        if self.origin.as_str() != "https://jsr.io" {
             return Err(RegistryClientError::Metadata(
-                MetadataError::InvalidPackageName(package.into()),
+                MetadataError::InvalidRegistry(self.origin.to_string()),
             ));
         }
-        let url = jsr_metadata_url(&self.origin, package)?;
         let response = self
             .transport
-            .get(&url)
+            .get_with_accept(
+                &format!("https://npm.jsr.io/{compatibility}"),
+                "application/vnd.npm.install-v1+json",
+            )
             .map_err(RegistryClientError::Transport)?;
-        parse_jsr(&self.origin, &name, json_response(&response)?)
+        let root = json_object(json_response(&response)?).map_err(RegistryClientError::Metadata)?;
+        if root.get("name").and_then(serde_json::Value::as_str) != Some(compatibility.as_str()) {
+            return Err(RegistryClientError::Metadata(
+                MetadataError::ConflictingField("name".into()),
+            ));
+        }
+        let versions = root
+            .get("versions")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                RegistryClientError::Metadata(MetadataError::MissingField("versions".into()))
+            })?;
+        for (version, entry) in versions {
+            if version.parse::<PackageVersion>().is_err() {
+                continue;
+            }
+            if entry.get("name").and_then(serde_json::Value::as_str) != Some(compatibility.as_str())
+                || entry.get("version").and_then(serde_json::Value::as_str)
+                    != Some(version.as_str())
+            {
+                return Err(RegistryClientError::Metadata(
+                    MetadataError::ConflictingField("version identity".into()),
+                ));
+            }
+            if entry.pointer("/dist/integrity").is_none() {
+                return Err(RegistryClientError::Metadata(
+                    MetadataError::UnsupportedIntegrity(version.clone()),
+                ));
+            }
+            let artifact = entry
+                .pointer("/dist/tarball")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    RegistryClientError::Metadata(MetadataError::MissingField(
+                        "dist.tarball".into(),
+                    ))
+                })?;
+            validate_artifact_url(artifact, &compatibility, version)?;
+        }
+        let mut artifacts = crate::npm::parse_npm_object(
+            &self.origin,
+            &compatibility.parse().expect("validated compatibility name"),
+            root,
+            false,
+        )?;
+        for artifact in &mut artifacts {
+            artifact.identity.name = name.clone();
+            artifact.registry_kind = RegistryKind::Jsr;
+        }
+        Ok(artifacts)
     }
     pub fn download_artifact(
         &self,
@@ -41,401 +93,330 @@ impl<T: HttpTransport> JsrRegistry<T> {
     }
 }
 
-fn jsr_metadata_url(origin: &RegistryOrigin, package: &str) -> Result<String, RegistryClientError> {
-    let mut parts = package.split('/');
-    let scope = parts.next().unwrap_or_default();
-    let name = parts.next().unwrap_or_default();
-    if !scope.starts_with('@') || name.is_empty() || parts.next().is_some() {
-        return Err(RegistryClientError::Metadata(
-            MetadataError::InvalidPackageName(package.into()),
-        ));
-    }
-    let mut url = Url::parse(&format!("{origin}/")).map_err(|_| {
-        RegistryClientError::Metadata(MetadataError::InvalidRegistry(origin.to_string()))
-    })?;
-    {
-        let mut segments = url.path_segments_mut().map_err(|_| {
-            RegistryClientError::Metadata(MetadataError::InvalidRegistry(origin.to_string()))
-        })?;
-        segments.pop_if_empty();
-        segments.push(scope).push(name).push("meta.json");
-    }
-    Ok(url.to_string())
-}
-
-fn parse_jsr(
-    origin: &RegistryOrigin,
-    name: &PackageName,
-    body: &[u8],
-) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
-    let root = json_object(body).map_err(RegistryClientError::Metadata)?;
-    if root.get("scope").and_then(|value| value.as_str())
-        != name
-            .to_string()
-            .split('/')
-            .next()
-            .map(|scope| scope.trim_start_matches('@'))
-        || root.get("name").and_then(|value| value.as_str()) != name.to_string().split('/').nth(1)
+/// Validates a safely extracted generated manifest against its selected JSR artifact.
+/// Callers must verify the archive's declared integrity before invoking this check.
+pub fn validate_jsr_artifact_manifest(
+    package: &str,
+    version: &str,
+    artifact_url: &str,
+    manifest: &[u8],
+) -> Result<(), RegistryClientError> {
+    let compatibility = compatibility_name(package)?;
+    let revision = validate_artifact_url(artifact_url, &compatibility, version)?;
+    let manifest = json_object(manifest).map_err(RegistryClientError::Metadata)?;
+    if manifest.get("name").and_then(serde_json::Value::as_str) != Some(compatibility.as_str())
+        || manifest.get("version").and_then(serde_json::Value::as_str) != Some(version)
+        || manifest
+            .get("_jsr_revision")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(revision))
     {
         return Err(RegistryClientError::Metadata(
-            MetadataError::ConflictingField("package identity".into()),
+            MetadataError::ConflictingField("JSR archive identity or revision".into()),
         ));
     }
-    let versions = root
-        .get("versions")
-        .and_then(|value| value.as_object())
-        .ok_or_else(|| {
-            RegistryClientError::Metadata(MetadataError::MissingField("versions".into()))
-        })?;
-    let mut artifacts = Vec::new();
-    for (key, value) in versions {
-        let Ok(version) = key.parse::<PackageVersion>() else {
-            continue;
-        };
-        if value.as_object().is_none() {
-            return Err(RegistryClientError::Metadata(MetadataError::InvalidJson(
-                "version entry must be an object".into(),
-            )));
-        }
-        let version_object = value.as_object().expect("checked above");
-        let npm = version_object
-            .get("npm")
-            .and_then(|value| value.as_object());
-        let artifact_url = npm
-            .and_then(|value| value.get("tarball"))
-            .and_then(|value| value.as_str());
-        let integrity_value = npm.and_then(|value| value.get("integrity"));
-        let (artifact_url, integrity) = match (artifact_url, integrity_value) {
-            (Some(url), Some(value)) => {
-                let integrity = value
-                    .as_str()
-                    .ok_or_else(|| {
-                        RegistryClientError::Metadata(MetadataError::InvalidIntegrity(key.clone()))
-                    })?
-                    .parse()
-                    .map_err(|_| {
-                        RegistryClientError::Metadata(MetadataError::InvalidIntegrity(key.clone()))
-                    })?;
-                let artifact_url = Url::parse(url).map_err(|_| {
-                    RegistryClientError::Metadata(MetadataError::InvalidArtifact(url.into()))
-                })?;
-                if !request_url_is_safe(url, &artifact_url) {
-                    return Err(RegistryClientError::Metadata(
-                        MetadataError::InvalidArtifact(url.into()),
-                    ));
-                }
-                (url.to_owned(), integrity)
-            }
-            _ => {
-                return Err(RegistryClientError::Metadata(
-                    MetadataError::UnsupportedIntegrity(key.clone()),
-                ));
-            }
-        };
-        let (dependencies, peer_dependencies) = parse_jsr_dependencies(version_object)?;
-        artifacts.push(RegistryArtifact {
-            dist_tags: Default::default(),
-            identity: RegistryPackageId::from_source(origin.clone().into(), name.clone(), version),
-            artifact_url,
-            integrity: Some(integrity),
-            dependencies,
-            peer_dependencies,
-            optional_peer_dependencies: std::collections::BTreeSet::new(),
-            optional_dependencies: BTreeMap::new(),
-            platform: crate::PackagePlatform::unrestricted(),
-            registry_kind: RegistryKind::Jsr,
-        });
+    Ok(())
+}
+
+/// Maps a generated JSR dependency binding to its validated logical identity.
+/// Ordinary npm names return `None`; malformed reserved JSR names are rejected.
+pub fn jsr_dependency_name(binding: &str) -> Result<Option<PackageName>, RegistryClientError> {
+    let Some(generated) = binding.strip_prefix("@jsr/") else {
+        return Ok(None);
+    };
+    let invalid =
+        || RegistryClientError::Metadata(MetadataError::InvalidPackageName(binding.into()));
+    let (scope, name) = generated.split_once("__").ok_or_else(invalid)?;
+    let logical = format!("@{scope}/{name}");
+    if compatibility_name(&logical)? != binding {
+        return Err(invalid());
     }
-    artifacts.sort_by(|a, b| b.identity.version.cmp(&a.identity.version));
-    Ok(artifacts)
+    logical.parse().map(Some).map_err(|_| invalid())
 }
 
-type JsrDependencyMaps = (BTreeMap<PackageName, String>, BTreeMap<PackageName, String>);
-
-fn parse_jsr_dependencies(
-    version: &serde_json::Map<String, serde_json::Value>,
-) -> Result<JsrDependencyMaps, RegistryClientError> {
-    let Some(manifest) = version.get("manifest") else {
-        return Ok((BTreeMap::new(), BTreeMap::new()));
-    };
-    let manifest = manifest.as_object().ok_or_else(|| {
-        RegistryClientError::Metadata(MetadataError::InvalidJson(
-            "manifest must be an object".into(),
-        ))
-    })?;
-    let dependencies = parse_dependencies(manifest.get("dependencies"))?;
-    let peer_dependencies = parse_dependencies(manifest.get("peerDependencies"))?;
-    Ok((dependencies, peer_dependencies))
-}
-
-fn parse_dependencies(
-    value: Option<&serde_json::Value>,
-) -> Result<BTreeMap<PackageName, String>, RegistryClientError> {
-    let Some(value) = value else {
-        return Ok(BTreeMap::new());
-    };
-    let object = value.as_object().ok_or_else(|| {
-        RegistryClientError::Metadata(MetadataError::InvalidDependency("dependencies".into()))
-    })?;
-    object
-        .iter()
-        .map(|(name, requirement)| {
-            let package = name.parse().map_err(|_| {
-                RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
-            })?;
-            let requirement = requirement
-                .as_str()
-                .filter(|requirement| !requirement.trim().is_empty())
-                .ok_or_else(|| {
-                    RegistryClientError::Metadata(MetadataError::InvalidDependency(name.clone()))
-                })?;
-            Ok((package, requirement.to_owned()))
+fn compatibility_name(package: &str) -> Result<String, RegistryClientError> {
+    let invalid =
+        || RegistryClientError::Metadata(MetadataError::InvalidPackageName(package.into()));
+    let (scope, name) = package
+        .strip_prefix('@')
+        .and_then(|name| name.split_once('/'))
+        .ok_or_else(invalid)?;
+    // JSR names cannot contain underscores: accepting them makes the generated mapping ambiguous.
+    if scope.len() > 20
+        || name.len() > 58
+        || [scope, name].iter().any(|part| {
+            part.len() < 2
+                || part.starts_with('-')
+                || part.ends_with('-')
+                || part.contains("--")
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         })
-        .collect()
+    {
+        return Err(invalid());
+    }
+    Ok(format!("@jsr/{scope}__{name}"))
+}
+
+fn validate_artifact_url(
+    artifact: &str,
+    compatibility: &str,
+    version: &str,
+) -> Result<u32, RegistryClientError> {
+    let invalid = || RegistryClientError::Metadata(MetadataError::InvalidArtifact(artifact.into()));
+    let url = Url::parse(artifact).map_err(|_| invalid())?;
+    let parts: Vec<_> = url.path().split('/').collect();
+    if !request_url_is_safe(artifact, &url)
+        || url.origin().ascii_serialization() != "https://npm.jsr.io"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || parts.len() != 6
+        || parts[1] != "~"
+        || parts[2].is_empty()
+        || !parts[2].bytes().all(|byte| byte.is_ascii_digit())
+        || parts[2].parse::<u32>().is_err()
+        || format!("{}/{}", parts[3], parts[4]) != compatibility
+        || parts[5] != format!("{version}.tgz")
+    {
+        return Err(invalid());
+    }
+    parts[2].parse().map_err(|_| invalid())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TransportError;
-
-    struct Fake {
-        body: Vec<u8>,
-        url: String,
-    }
+    use serde_json::{Value, json};
+    struct Fake(Value);
     impl HttpTransport for Fake {
         fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
-            assert_eq!(url, self.url);
+            assert_eq!(url, "https://npm.jsr.io/@jsr/std__path");
             Ok(HttpResponse {
                 status: 200,
-                content_type: Some("application/json; charset=utf-8".into()),
-                body: self.body.clone(),
+                content_type: Some("application/json".into()),
+                body: self.0.to_string().into_bytes(),
             })
         }
     }
-    fn fake(body: &[u8], url: &str) -> Fake {
-        Fake {
-            body: body.to_vec(),
-            url: url.into(),
-        }
+    fn metadata() -> Value {
+        json!({"name":"@jsr/std__path","versions":{"1.0.0":{
+            "name":"@jsr/std__path", "version":"1.0.0",
+            "dist":{"tarball":"https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz", "integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},
+            "dependencies":{"@jsr/std__assert":"^1.0.0", "foo":"^1.0.0"},
+            "peerDependencies":{"bar":"^2.0.0"}, "peerDependenciesMeta":{"bar":{"optional":true}},
+            "optionalDependencies":{"foo":"^2.0.0"}, "os":["linux"]
+        }}})
     }
-
+    fn fetch(body: Value) -> Result<Vec<RegistryArtifact>, RegistryClientError> {
+        JsrRegistry::new(Fake(body), "https://jsr.io".parse().unwrap()).fetch("@std/path")
+    }
     #[test]
-    fn jsr_without_sha512_integrity_fails_closed() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let error = JsrRegistry::new(
-            fake(
-                br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"createdAt":"2025-01-01T00:00:00Z"}}}"#,
-                "https://jsr.io/@std/path/meta.json",
-            ),
-            origin,
-        )
-        .fetch("@std/path");
+    fn jsr_archive_manifest_is_bound_to_selected_artifact() {
+        let url = "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz";
+        let valid = json!({"name":"@jsr/std__path", "version":"1.0.0", "_jsr_revision":11});
+        assert!(
+            validate_jsr_artifact_manifest("@std/path", "1.0.0", url, valid.to_string().as_bytes())
+                .is_ok()
+        );
+        for field in ["name", "version", "_jsr_revision"] {
+            let mut invalid = valid.clone();
+            invalid[field] = json!("wrong");
+            assert!(
+                validate_jsr_artifact_manifest(
+                    "@std/path",
+                    "1.0.0",
+                    url,
+                    invalid.to_string().as_bytes()
+                )
+                .is_err()
+            );
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_jsr_artifact_manifest(
+                    "@std/path",
+                    "1.0.0",
+                    url,
+                    invalid.to_string().as_bytes()
+                )
+                .is_err()
+            );
+        }
+        assert!(validate_jsr_artifact_manifest("@std/path", "1.0.0", url, b"[]").is_err());
+    }
+    #[test]
+    fn jsr_fetches_compatibility_metadata_with_logical_identity() {
+        let artifacts = fetch(metadata()).unwrap();
+        let artifact = &artifacts[0];
+        assert_eq!(artifact.identity.name.to_string(), "@std/path");
+        assert_eq!(artifact.identity.registry.to_string(), "https://jsr.io");
+        assert_eq!(artifact.registry_kind, RegistryKind::Jsr);
+        assert_eq!(
+            artifact.artifact_url,
+            "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz"
+        );
+        assert_eq!(artifact.dependencies.len(), 1);
+        assert!(
+            artifact
+                .dependencies
+                .contains_key(&"@jsr/std__assert".parse().unwrap())
+        );
+        assert_eq!(
+            artifact.optional_dependencies[&"foo".parse().unwrap()],
+            "^2.0.0"
+        );
+        assert_eq!(
+            artifact.peer_dependencies[&"bar".parse().unwrap()],
+            "^2.0.0"
+        );
+        assert!(
+            artifact
+                .optional_peer_dependencies
+                .contains(&"bar".parse().unwrap())
+        );
+        assert_eq!(artifact.platform.os, ["linux"]);
+    }
+    #[test]
+    fn jsr_rejects_missing_and_malformed_integrity() {
+        for value in [
+            Value::Null,
+            json!("sha256-deadbeef"),
+            json!("sha512-bad"),
+            json!(12),
+        ] {
+            let mut body = metadata();
+            body["versions"]["1.0.0"]["dist"]["integrity"] = value;
+            assert!(fetch(body).is_err());
+        }
+        let mut body = metadata();
+        body["versions"]["1.0.0"]["dist"]
+            .as_object_mut()
+            .unwrap()
+            .remove("integrity");
         assert!(matches!(
-            error,
+            fetch(body),
             Err(RegistryClientError::Metadata(
                 MetadataError::UnsupportedIntegrity(_)
             ))
         ));
     }
-
     #[test]
-    fn jsr_maps_supported_scope() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let artifacts = JsrRegistry::new(
-            fake(
-                br#"{"scope":"std","name":"path","latest":"1.0.0","versions":{"1.0.0":{"createdAt":"2025-01-01T00:00:00Z","npm":{"tarball":"https://npm.jsr.io/~/@std__path/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},"manifest":{"dependencies":{"@std/assert":"^1.0.0"}}}}}"#,
-                "https://jsr.io/@std/path/meta.json",
-            ),
-            origin,
-        )
-        .fetch("@std/path")
-        .unwrap();
-        assert_eq!(
-            artifacts[0].artifact_url,
-            "https://npm.jsr.io/~/@std__path/1.0.0.tgz"
-        );
-        assert_eq!(artifacts[0].dependencies.len(), 1);
+    fn jsr_rejects_conflicting_metadata_identity() {
+        for pointer in ["/name", "/versions/1.0.0/name", "/versions/1.0.0/version"] {
+            let mut body = metadata();
+            *body.pointer_mut(pointer).unwrap() = json!("unrelated");
+            assert!(fetch(body).is_err(), "accepted {pointer}");
+        }
     }
-
     #[test]
-    fn jsr_skips_malformed_version_keys_without_hiding_usable_versions() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let body = br#"{"scope":"std","name":"path","versions":{"not-a-version":{"npm":{"tarball":"https://npm.jsr.io/bad.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}},"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/good.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
-
-        let artifacts = JsrRegistry::new(fake(body, "https://jsr.io/@std/path/meta.json"), origin)
-            .fetch("@std/path")
-            .unwrap();
-
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].identity.version.to_string(), "1.0.0");
-        assert_eq!(artifacts[0].artifact_url, "https://npm.jsr.io/good.tgz");
-    }
-
-    #[test]
-    fn malformed_jsr_manifest_dependency_is_rejected() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let body = br#"{"scope":"std","name":"path","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/a.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},"manifest":{"dependencies":[]}}}}"#;
-        assert!(
-            JsrRegistry::new(fake(body, "https://jsr.io/@std/path/meta.json"), origin)
-                .fetch("@std/path")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn keeps_jsr_peer_dependencies_separate_from_regular_dependencies() {
-        let version = serde_json::json!({
-            "manifest": {
-                "dependencies": {"foo": "^1.0.0"},
-                "peerDependencies": {"foo": "^2.0.0", "bar": "^3.0.0"}
-            }
-        });
-
-        let (dependencies, peers) = parse_jsr_dependencies(version.as_object().unwrap()).unwrap();
-
-        assert_eq!(
-            dependencies.get(&"foo".parse().unwrap()),
-            Some(&"^1.0.0".to_owned())
-        );
-        assert!(!dependencies.contains_key(&"bar".parse().unwrap()));
-        assert_eq!(
-            peers.get(&"foo".parse().unwrap()),
-            Some(&"^2.0.0".to_owned())
-        );
-        assert_eq!(
-            peers.get(&"bar".parse().unwrap()),
-            Some(&"^3.0.0".to_owned())
-        );
-    }
-
-    #[test]
-    fn fetched_jsr_artifact_keeps_peer_dependencies_out_of_regular_dependencies() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let artifacts = JsrRegistry::new(
-            fake(
-                br#"{"scope":"arvid","name":"is-char","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/@arvid__is-char/1.0.0.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="},"manifest":{"dependencies":{"foo":"^1.0.0"},"peerDependencies":{"foo":"^2.0.0","bar":"^3.0.0"}}}}}"#,
-                "https://jsr.io/@arvid/is-char/meta.json",
-            ),
-            origin,
-        )
-        .fetch("@arvid/is-char")
-        .unwrap();
-        assert_eq!(artifacts.len(), 1);
-        let artifact = &artifacts[0];
-        assert_eq!(
-            artifact.dependencies.get(&"foo".parse().unwrap()),
-            Some(&"^1.0.0".to_owned())
-        );
-        assert_eq!(artifact.dependencies.len(), 1);
-        assert_eq!(
-            artifact.peer_dependencies.get(&"foo".parse().unwrap()),
-            Some(&"^2.0.0".to_owned())
-        );
-        assert_eq!(
-            artifact.peer_dependencies.get(&"bar".parse().unwrap()),
-            Some(&"^3.0.0".to_owned())
-        );
-    }
-
-    #[test]
-    fn jsr_unsupported_integrity_is_rejected() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let body = br#"{"scope":"std","name":"path","versions":{"1.0.0":{"npm":{"tarball":"https://npm.jsr.io/a.tgz","integrity":"sha256-deadbeef"}}}}"#;
-        assert!(matches!(
-            JsrRegistry::new(fake(body, "https://jsr.io/@std/path/meta.json"), origin)
-                .fetch("@std/path"),
-            Err(RegistryClientError::Metadata(
-                MetadataError::InvalidIntegrity(_)
-            ))
-        ));
-    }
-
-    #[test]
-    fn jsr_rejects_noncanonical_artifact_urls() {
-        for (case, artifact_url) in [
-            ("leading space", " https://npm.jsr.io/archive.tgz"),
-            ("path space", "https://npm.jsr.io/archive .tgz"),
-            ("trailing newline", "https://npm.jsr.io/archive.tgz\n"),
-            ("uppercase scheme", "HTTPS://npm.jsr.io/archive.tgz"),
-            ("uppercase host", "https://NPM.JSR.IO/archive.tgz"),
-            ("backslash", "https://npm.jsr.io\\archive.tgz"),
-            ("empty userinfo", "https://@npm.jsr.io/archive.tgz"),
-            (
-                "Unicode IDNA separator",
-                "https://npm\u{3002}jsr.io/archive.tgz",
-            ),
-            (
-                "explicit default port",
-                "https://npm.jsr.io:443/archive.tgz",
-            ),
-            ("percent-encoded host", "https://%6epm.jsr.io/archive.tgz"),
-            (
-                "encoded dot path",
-                "https://npm.jsr.io/a/%2e%2e/archive.tgz",
-            ),
-            ("encoded control path", "https://npm.jsr.io/%0Aarchive.tgz"),
-            (
-                "encoded unreserved path",
-                "https://npm.jsr.io/%61rchive.tgz",
-            ),
+    fn jsr_rejects_artifact_origin_path_and_canonicalization_attacks() {
+        for url in [
+            "https://registry.npmjs.org/~/11/@jsr/std__path/1.0.0.tgz",
+            "https://npm.jsr.io/~/11/@jsr/std__assert/1.0.0.tgz",
+            "https://npm.jsr.io/~/11/@jsr/std__path/2.0.0.tgz",
+            "https://npm.jsr.io/~/x/@jsr/std__path/1.0.0.tgz",
+            "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz?other",
+            "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz#other",
+            "https://npm.jsr.io:443/~/11/@jsr/std__path/1.0.0.tgz",
+            "https://NPM.JSR.IO/~/11/@jsr/std__path/1.0.0.tgz",
+            "https://npm.jsr.io/~/11/@jsr/%73td__path/1.0.0.tgz",
+            "http://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz",
+            "https://npm.jsr.io/archive.tgz",
         ] {
-            let body = serde_json::json!({
-                "scope": "std",
-                "name": "path",
-                "versions": {
-                    "1.0.0": {
-                        "npm": {
-                            "tarball": artifact_url,
-                            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-                        }
-                    }
-                }
-            })
-            .to_string();
-            let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-
-            let result = JsrRegistry::new(
-                fake(body.as_bytes(), "https://jsr.io/@std/path/meta.json"),
-                origin,
-            )
-            .fetch("@std/path");
-
+            let mut body = metadata();
+            body["versions"]["1.0.0"]["dist"]["tarball"] = json!(url);
             assert!(
                 matches!(
-                    result,
-                    Err(RegistryClientError::Metadata(MetadataError::InvalidArtifact(url)))
-                        if url == artifact_url
+                    fetch(body),
+                    Err(RegistryClientError::Metadata(
+                        MetadataError::InvalidArtifact(_)
+                    ))
                 ),
-                "JSR accepted {case}: {artifact_url:?}"
+                "accepted {url}"
             );
         }
     }
-
     #[test]
-    fn jsr_versions_are_sorted_semver_descending() {
-        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
-        let npm = |version: &str| {
-            format!(
-                r#"{{"createdAt":"2025-01-01T00:00:00Z","npm":{{"tarball":"https://npm.jsr.io/~/@std__path/{version}.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#
-            )
-        };
-        let body = serde_json::json!({
-            "scope": "std", "name": "path", "latest": "2.0.0",
-            "versions": {"1.0.0": serde_json::from_str::<serde_json::Value>(&npm("1.0.0")).unwrap(), "2.0.0": serde_json::from_str::<serde_json::Value>(&npm("2.0.0")).unwrap()}
-        }).to_string();
-        let result = JsrRegistry::new(
-            fake(body.as_bytes(), "https://jsr.io/@std/path/meta.json"),
-            origin,
-        )
-        .fetch("@std/path")
-        .unwrap();
+    fn jsr_rejects_ambiguous_names_before_transport() {
+        for name in [
+            "foo",
+            "@std/a__b",
+            "@a__b/c",
+            "@Std/path",
+            "@std/path/extra",
+            "@-std/path",
+            "@std/a--b",
+            "@s/foo",
+        ] {
+            assert!(
+                JsrRegistry::new(Fake(metadata()), "https://jsr.io".parse().unwrap())
+                    .fetch(name)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn jsr_rejects_malformed_metadata_and_dependencies() {
+        for pointer in [
+            "/versions",
+            "/versions/1.0.0",
+            "/versions/1.0.0/dependencies",
+            "/versions/1.0.0/peerDependencies",
+            "/versions/1.0.0/optionalDependencies",
+        ] {
+            let mut body = metadata();
+            *body.pointer_mut(pointer).unwrap() = json!([]);
+            assert!(fetch(body).is_err(), "accepted {pointer}");
+        }
+    }
+    #[test]
+    fn jsr_sorts_versions_and_ignores_invalid_version_keys() {
+        let mut body = metadata();
+        let mut newer = body["versions"]["1.0.0"].clone();
+        newer["version"] = json!("2.0.0");
+        newer["dist"]["tarball"] = json!("https://npm.jsr.io/~/12/@jsr/std__path/2.0.0.tgz");
+        body["versions"]["2.0.0"] = newer;
+        body["versions"]["not-semver"] = Value::Null;
+        let artifacts = fetch(body).unwrap();
         assert_eq!(
-            result
+            artifacts
                 .iter()
-                .map(|artifact| artifact.identity.version.to_string())
+                .map(|a| a.identity.version.to_string())
                 .collect::<Vec<_>>(),
             ["2.0.0", "1.0.0"]
         );
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn jsr_generated_dependency_mapping_is_unambiguous() {
+        assert_eq!(
+            jsr_dependency_name("@jsr/std__internal")
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "@std/internal"
+        );
+        for ordinary in ["ordinary", "@std/internal", "@other/package"] {
+            assert_eq!(jsr_dependency_name(ordinary).unwrap(), None);
+        }
+        for malformed in [
+            "@jsr/std_internal",
+            "@jsr/std__a__b",
+            "@jsr/a__path",
+            "@jsr/std__Path",
+            "@jsr/std__",
+            "@jsr/std__a--b",
+        ] {
+            assert!(
+                jsr_dependency_name(malformed).is_err(),
+                "accepted {malformed}"
+            );
+        }
     }
 }

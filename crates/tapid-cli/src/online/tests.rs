@@ -1267,6 +1267,214 @@ fn imported_workspace_manifest_failure_kinds() {
 }
 
 #[test]
+fn jsr_valid_integrity_cannot_authenticate_an_unrelated_archive_identity() {
+    let project = tapid_test_support::TempProject::new("jsr-artifact-identity").unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/npm-import/registry.json"
+    ))
+    .unwrap();
+    let bytes = STANDARD
+        .decode(
+            fixture["packages"][0]["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    let mut record = named_record("@std/path", "1.0.0", &[]);
+    record.registry = JSR.parse().unwrap();
+    record.artifact = "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz".into();
+    record.integrity = Some(integrity(&bytes));
+    record.copied_archive = Some(bytes.into());
+    let id = tapid_registry_client::RegistryPackageId::from_source(
+        record.registry.clone(),
+        record.name.clone(),
+        record.version.clone(),
+    );
+    let store = Store::new(project.path().join("store"));
+    fs::create_dir_all(store.root()).unwrap();
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let mut transaction = store.transaction();
+    let mut fetcher = artifact::ArtifactFetcher {
+        store: &store,
+        config: &config,
+        transports: BTreeMap::new(),
+        allowed_origins: config.configured_origins(),
+    };
+    let generated: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/jsr-generated-manifest.json"
+    ))
+    .unwrap();
+    let valid_bytes = STANDARD
+        .decode(generated["artifact"].as_str().unwrap())
+        .unwrap();
+    let mut valid = record.clone();
+    valid.integrity = Some(integrity(&valid_bytes));
+    valid.copied_archive = Some(valid_bytes.into());
+    let (_, staged_digest, _) = fetcher
+        .prepare(&id, &valid, None, &mut transaction)
+        .unwrap();
+    assert!(store.verified_tree_path(&staged_digest).is_err());
+    let error = fetcher
+        .prepare(&id, &record, None, &mut transaction)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("JSR archive does not match selected artifact"),
+        "{error}"
+    );
+    drop(transaction);
+    assert!(!store.root().join("trees").exists());
+}
+
+#[test]
+fn jsr_generated_archive_is_verified_before_store_publication() {
+    let project = tapid_test_support::TempProject::new("jsr-valid-artifact").unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/jsr-generated-manifest.json"
+    ))
+    .unwrap();
+    let bytes = STANDARD
+        .decode(fixture["artifact"].as_str().unwrap())
+        .unwrap();
+    let mut record = named_record("@std/path", "1.0.0", &[]);
+    record.registry = JSR.parse().unwrap();
+    record.artifact = "https://npm.jsr.io/~/11/@jsr/std__path/1.0.0.tgz".into();
+    record.integrity = Some(integrity(&bytes));
+    record.copied_archive = Some(bytes.into());
+    let id = tapid_registry_client::RegistryPackageId::from_source(
+        record.registry.clone(),
+        record.name.clone(),
+        record.version.clone(),
+    );
+    let store = Store::new(project.path().join("store"));
+    fs::create_dir_all(store.root()).unwrap();
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let mut transaction = store.transaction();
+    let mut fetcher = artifact::ArtifactFetcher {
+        store: &store,
+        config: &config,
+        transports: BTreeMap::new(),
+        allowed_origins: config.configured_origins(),
+    };
+    let (_, digest, tree) = fetcher
+        .prepare(&id, &record, None, &mut transaction)
+        .unwrap();
+    assert!(tree.join("package/package.json").is_file());
+    assert!(store.verified_tree_path(&digest).is_err());
+    transaction.publish().unwrap().commit().unwrap();
+    let stored = store.verified_tree_path(&digest).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(stored.join("package/package.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "@jsr/std__path");
+    assert_eq!(manifest["_jsr_revision"], 11);
+}
+#[test]
+fn jsr_generated_edges_preserve_bindings_and_route_logical_targets() {
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let roots = vec![Dependency::new(
+        JSR.parse().unwrap(),
+        "@std/path".parse().unwrap(),
+        "1".parse().unwrap(),
+    )];
+    let mut fetched = Vec::new();
+    let (resolution, _, _) = resolve_with_fetch_routed(
+        &roots,
+        |parent, name| config.registry_for_dependency(parent, name),
+        |source, name| {
+            fetched.push((source.to_string(), name.to_string()));
+            let mut record = match (source.as_str(), name.as_str()) {
+                (JSR, "@std/path") => {
+                    named_record("@std/path", "1.0.0", &[("@jsr/std__internal", "1")])
+                }
+                (JSR, "@std/internal") => {
+                    named_record("@std/internal", "1.0.0", &[("ordinary", "1")])
+                }
+                (NPM, "ordinary") => named_record("ordinary", "1.0.0", &[]),
+                _ => return Err(format!("unexpected target {source}:{name}")),
+            };
+            record.registry = source.clone();
+            Ok(vec![record])
+        },
+    )
+    .unwrap();
+    assert!(fetched.contains(&(JSR.into(), "@std/internal".into())));
+    assert!(fetched.contains(&(NPM.into(), "ordinary".into())));
+    let edge = resolution
+        .dependencies
+        .iter()
+        .find(|edge| edge.dependency.as_str() == "@jsr/std__internal")
+        .unwrap();
+    assert_eq!(edge.child.name.as_str(), "@std/internal");
+    assert_eq!(edge.child.registry.as_str(), JSR);
+}
+
+#[test]
+fn jsr_optional_generated_targets_and_ordinary_npm_targets_keep_their_sources() {
+    let roots = vec![Dependency::new(
+        JSR.parse().unwrap(),
+        "@std/path".parse().unwrap(),
+        "1".parse().unwrap(),
+    )];
+    let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+    let (resolution, _, _) = resolve_with_fetch_routed(
+        &roots,
+        |parent, name| config.registry_for_dependency(parent, name),
+        |source, name| {
+            let mut record = named_record(name.as_str(), "1.0.0", &[]);
+            record.registry = source.clone();
+            if name.as_str() == "@std/path" {
+                record.optional_dependencies = BTreeMap::from([
+                    ("@jsr/std__internal".into(), "1".into()),
+                    ("ordinary".into(), "1".into()),
+                ]);
+            } else if name.as_str() == "@std/internal" {
+                assert_eq!(source.as_str(), JSR);
+            } else {
+                assert_eq!(name.as_str(), "ordinary");
+                assert_eq!(source.as_str(), NPM);
+            }
+            Ok(vec![record])
+        },
+    )
+    .unwrap();
+    assert_eq!(resolution.selected.len(), 3);
+    assert_eq!(resolution.dependencies.len(), 2);
+}
+
+#[test]
+fn optional_alias_peer_rejects_a_present_provider_with_the_wrong_identity() {
+    let roots = vec![
+        Dependency::new(
+            NPM.parse().unwrap(),
+            "parent".parse().unwrap(),
+            "1".parse().unwrap(),
+        ),
+        Dependency::new(
+            NPM.parse().unwrap(),
+            "local".parse().unwrap(),
+            "npm:wrong@1".parse().unwrap(),
+        ),
+    ];
+    let result = resolve_with_fetch(&roots, |_, name| {
+        let mut record = named_record(name.as_str(), "1.0.0", &[]);
+        if name.as_str() == "parent" {
+            record
+                .peer_dependencies
+                .insert("local".into(), "npm:right@1".into());
+            record.optional_peer_dependencies.insert("local".into());
+        }
+        Ok(vec![record])
+    });
+    assert!(
+        result.is_err(),
+        "optional peers may be absent, but installed providers must match"
+    );
+}
+
+#[test]
 fn terminal_candidate_exclusions_are_bounded_and_safe() {
     let roots = vec![Dependency::new(
         NPM.parse().unwrap(),
