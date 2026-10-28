@@ -32,6 +32,7 @@ Automation clients can use the compact [agent guide v1](../../docs/agent-guide.m
 ```text
 tapid init [PATH]
 tapid license
+tapid completions <bash|zsh|fish|powershell>
 tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
@@ -90,6 +91,60 @@ byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
 
 Dependency hooks remain denied without exact checked-in approval. Online installs offer separate invocation-only `--allow-unapproved-dependency-scripts` and `--unsafe-no-dependency-sandbox` overrides. The first retains required containment; the second explicitly permits host access but does not authorize unapproved hooks by itself. Override outputs never enter the authenticated build cache. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) for limits, warnings, and platform requirements. These flags do not change `tapid run`.
+
+## Shell completions
+
+`tapid completions <SHELL>` supports `bash`, `zsh`, `fish`, and `powershell`.
+It generates a deterministic static UTF-8 script from the installed CLI's Clap
+definitions, offline, without reading project/configuration/store/credential
+data, recovering transactions, or executing project code. Regenerate after CLI
+upgrades. Tapid only writes the script to stdout; installation and loading are
+manual, and Tapid does not edit profiles. `--json` rejects generation with
+`JSON_UNSUPPORTED_COMMAND` (exit 1); JSON help and argument errors retain their
+usual protocol.
+
+For Bash, save and load the script in your current shell:
+
+```bash
+tapid completions bash > tapid.bash && source ./tapid.bash
+```
+
+For Zsh, save `_tapid` in a directory you choose for completion functions, then
+add that directory to `fpath` before initializing completion:
+
+```zsh
+mkdir -p ~/.zsh/completions
+tapid completions zsh > ~/.zsh/completions/_tapid
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit
+compinit
+```
+
+For Fish, save the script in its user completion directory (use your custom
+configuration directory instead if configured):
+
+```fish
+mkdir -p ~/.config/fish/completions
+tapid completions fish > ~/.config/fish/completions/tapid.fish
+```
+
+For PowerShell 7+, explicitly save UTF-8 and load only after generation succeeds:
+
+```powershell
+$script = & tapid completions powershell
+if ($LASTEXITCODE -ne 0) { throw 'Completion generation failed' }
+$script | Set-Content -Encoding utf8 ./tapid-completions.ps1
+. ./tapid-completions.ps1
+```
+
+Loading is subject to your shell's execution policy. To persist loading across
+sessions, manually add the corresponding loading/setup commands to your shell
+configuration. These instructions do not change the executable PATH.
+
+Output write or flush failures, including a closed pipe, exit 1 with a diagnostic
+on stderr. Any partial output is unusable; regenerate it before loading. Invalid
+UTF-8 is rejected before any script is emitted. Shell redirection can create or
+truncate a destination before Tapid starts, including when generation fails.
 
 ## Standalone CLI tools
 
