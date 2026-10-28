@@ -2041,6 +2041,17 @@ fn selected_member_add_links_sibling_without_registry_fallback() {
 
 #[test]
 fn lifecycle_workspace_selector_mutates_only_selected_member() {
+    lifecycle_workspace_selection_case("web");
+}
+
+#[test]
+fn lifecycle_workspace_directory_selectors_mutate_only_selected_member() {
+    for selector in ["packages/web", "./packages/web/"] {
+        lifecycle_workspace_selection_case(selector);
+    }
+}
+
+fn lifecycle_workspace_selection_case(selector: &str) {
     let dir = temp_dir("workspace-member-selection");
     let root_manifest = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
     let web_manifest = r#"{"name":"web","version":"1.0.0"}"#;
@@ -2069,7 +2080,7 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
             "add",
             "is-char@1.0.0",
             "--workspace",
-            "web",
+            selector,
             "--store-dir",
             store.to_str().unwrap(),
             "--registry-fixture",
@@ -2109,7 +2120,7 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
             "update",
             "is-char",
             "--workspace",
-            "web",
+            selector,
             "--store-dir",
             store.to_str().unwrap(),
             "--registry-fixture",
@@ -2131,7 +2142,7 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
                 "install",
                 mode,
                 "--workspace",
-                "web",
+                selector,
                 "--store-dir",
                 store.to_str().unwrap(),
             ],
@@ -2149,7 +2160,7 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
         &[
             "prune",
             "--workspace",
-            "web",
+            selector,
             "--store-dir",
             store.to_str().unwrap(),
         ],
@@ -2169,7 +2180,7 @@ fn lifecycle_workspace_selector_mutates_only_selected_member() {
             "remove",
             "is-char",
             "--workspace",
-            "web",
+            selector,
             "--store-dir",
             store.to_str().unwrap(),
             "--registry-fixture",

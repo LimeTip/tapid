@@ -243,6 +243,58 @@ fn version_three_coordinator_recovery_removes_prepared_transaction_tree() {
 }
 
 #[test]
+fn version_four_coordinator_preserves_the_durable_store_decision() {
+    for committed in [false, true] {
+        let project = tapid_test_support::TempProject::new("v4-coordinator").unwrap();
+        let store_root = project.path().join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        let digest = make_marked_tree(&store_root, "version four transaction");
+        let coordinator = coordinator(project.path(), "Prepared");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&coordinator).unwrap()).unwrap();
+        record["version"] = serde_json::json!(4);
+        record["manifests"] = serde_json::json!([{"path":"apps/a/package.json","bytes":"e30="},{"path":"apps/b/package.json","bytes":"e30="}]);
+        record["version"] = serde_json::json!(5);
+        fs::write(&coordinator, record.to_string()).unwrap();
+        assert!(
+            write_store_journal(
+                &store_root,
+                &coordinator,
+                &[digest.as_str().to_owned()],
+                false
+            )
+            .is_err()
+        );
+        record["version"] = serde_json::json!(4);
+        fs::write(&coordinator, record.to_string()).unwrap();
+        // This exercises the publication reader as well as the recovery reader.
+        write_store_journal(
+            &store_root,
+            &coordinator,
+            &[digest.as_str().to_owned()],
+            false,
+        )
+        .unwrap();
+        record["version"] = serde_json::json!(5);
+        fs::write(&coordinator, record.to_string()).unwrap();
+        assert!(Store::new(&store_root).recover_transactions().is_err());
+        assert!(store_root.join("trees").join(digest.as_str()).exists());
+        assert!(store_root.join(STORE_JOURNAL).exists());
+        record["version"] = serde_json::json!(4);
+        if committed {
+            record["state"] = serde_json::json!("Committed");
+        }
+        fs::write(&coordinator, record.to_string()).unwrap();
+        Store::new(&store_root).recover_transactions().unwrap();
+        assert_eq!(
+            store_root.join("trees").join(digest.as_str()).exists(),
+            committed
+        );
+        assert!(!store_root.join(STORE_JOURNAL).exists());
+    }
+}
+
+#[test]
 fn missing_project_directory_rolls_back_orphaned_transaction() {
     let root = root();
     let project = root.with_extension("orphaned-project");
