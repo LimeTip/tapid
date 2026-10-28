@@ -25,9 +25,9 @@ pub(crate) struct Args {
     /// UNSAFE: run dependency hooks without containment. Does not grant hook approval or create reusable verified build outputs.
     #[arg(long, conflicts_with_all = ["offline", "frozen", "allow_unverified_registry_artifacts"])]
     pub(crate) unsafe_no_dependency_sandbox: bool,
-    /// Project directory containing package.json and tapid.lock.
-    #[arg(long, default_value = ".")]
-    pub(crate) project_dir: PathBuf,
+    /// Exact project root; omission discovers ancestors and infers the containing member.
+    #[arg(long)]
+    pub(crate) project_dir: Option<PathBuf>,
     /// Select a workspace member while installing the root workspace graph.
     #[arg(long, value_name = "NAME")]
     pub(crate) workspace: Option<String>,
@@ -55,7 +55,7 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 }
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
-pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
+pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     if args.dry_run {
         return preview(&args, json);
     }
@@ -65,30 +65,32 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
         without_containment: args.unsafe_no_dependency_sandbox,
     };
     reporter.warnings_before_execution(overrides.warnings());
-    let target_manifest_path = if let Some(name) = args.workspace.as_deref() {
-        match crate::application::lifecycle::resolve_workspace(&args.project_dir, Some(name)) {
-            Ok(selection) => {
-                args.project_dir = selection.root_dir;
-                selection.manifest_path
-            }
-            Err(error) => {
-                let mut failure = OperationFailure::unchanged(&args.project_dir, error);
-                failure.outcome.warnings.extend(overrides.warnings());
-                if json {
-                    return crate::output::json::failure_or_human(&failure, "install", true);
-                }
-                reporter.failure(failure);
-                return ExitCode::from(1);
-            }
-        }
-    } else {
-        PathBuf::from("package.json")
-    };
     if !json && args.allow_unverified_registry_artifacts && !args.offline && !args.frozen {
         eprintln!(
             "warning: npm artifacts without registry integrity are not authenticated against a registry-declared digest"
         );
     }
+    let selection = match crate::application::lifecycle::resolve_invocation(
+        args.project_dir.as_deref(),
+        args.workspace.as_deref(),
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let mut failure = OperationFailure::unchanged(
+                args.project_dir
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".")),
+                error,
+            );
+            failure.outcome.warnings.extend(overrides.warnings());
+            if json {
+                return crate::output::json::failure_or_human(&failure, "install", true);
+            }
+            reporter.failure(failure);
+            return ExitCode::from(1);
+        }
+    };
+    let target_manifest_path = selection.manifest_path;
     let mode = if args.offline {
         crate::application::install::InstallMode::Offline
     } else if args.frozen {
@@ -98,7 +100,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     };
     let result = crate::application::install::run_with_execution(
         crate::application::install::InstallRequest {
-            project_dir: &args.project_dir,
+            project_dir: &selection.root_dir,
             target_manifest_path: &target_manifest_path,
             mutation: args.package.as_deref().map_or(
                 crate::application::install::ManifestMutation::None,
@@ -130,11 +132,18 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
 
 fn preview(args: &Args, json: bool) -> ExitCode {
     let result = (|| {
-        let selection = crate::application::lifecycle::resolve_workspace(
-            &args.project_dir,
+        let selection = crate::application::lifecycle::resolve_invocation(
+            args.project_dir.as_deref(),
             args.workspace.as_deref(),
         )
-        .map_err(|e| OperationFailure::unchanged(&args.project_dir, e))?;
+        .map_err(|e| {
+            OperationFailure::unchanged(
+                args.project_dir
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".")),
+                e,
+            )
+        })?;
         if args.package.is_some() && (args.offline || args.frozen) {
             return Err(OperationFailure::unchanged(
                 &selection.root_dir,

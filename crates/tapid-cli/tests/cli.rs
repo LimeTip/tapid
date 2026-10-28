@@ -5864,7 +5864,10 @@ fn install_accepts_explicit_specs_for_ambiguous_package_names() {
             let output = run(&dir, &[command, package]);
             assert_eq!(output.status.code(), Some(1));
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains("cannot read manifest"), "{stderr}");
+            assert!(
+                stderr.contains("no enclosing package.json") && stderr.contains("--project-dir"),
+                "{stderr}"
+            );
         }
     }
     assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);

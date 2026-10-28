@@ -1,3 +1,5 @@
+mod ancestor;
+
 use crate::{MAX_MANIFEST_BYTES, PackageManifest};
 use serde_json::Value;
 use std::{
@@ -111,6 +113,7 @@ impl Workspace {
         let root_text = read_file(&root_path)?;
         let root = PackageManifest::parse(&root_text).map_err(|error| {
             crate::WorkspaceError::Manifest {
+                member: false,
                 path: root_path.clone(),
                 diagnostic: Box::new(error.diagnostic(&root_text)),
                 error: Box::new(error),
@@ -192,6 +195,7 @@ impl Workspace {
             let text = read_file(&canonical)?;
             let manifest =
                 PackageManifest::parse(&text).map_err(|error| crate::WorkspaceError::Manifest {
+                    member: true,
                     path: canonical.clone(),
                     diagnostic: Box::new(error.diagnostic(&text)),
                     error: Box::new(error),
@@ -956,5 +960,36 @@ mod read_limit_tests {
             .unwrap();
         let error = Workspace::discover(project.path()).unwrap_err();
         assert!(error.contains("32 MiB"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod ancestor_tests {
+    use super::*;
+    use tapid_test_support::TempProject;
+
+    #[test]
+    fn ancestor_discovery_selects_member_and_retains_root() {
+        let project = TempProject::new("ancestor-selection").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["apps/*"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "apps/news/package.json",
+                br#"{"name":"news","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        fs::create_dir_all(project.path().join("apps/news/src")).unwrap();
+        let (workspace, selector) =
+            Workspace::discover_ancestor(&project.path().join("apps/news/src"), None).unwrap();
+        assert_eq!(selector.as_deref(), Some("news"));
+        assert_eq!(
+            workspace.root_path(),
+            fs::canonicalize(project.path().join("package.json")).unwrap()
+        );
     }
 }

@@ -62,10 +62,6 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     }
 }
 
-pub(crate) fn read_manifest(path: &std::path::Path) -> Result<PackageManifest, String> {
-    read_manifest_typed(path).map_err(|error| error.to_string())
-}
-
 pub(crate) fn read_manifest_typed(
     path: &std::path::Path,
 ) -> Result<PackageManifest, OperationalError> {

@@ -290,12 +290,23 @@ tapid install --frozen --workspace news
 tapid run dev --workspace news
 ```
 
-Selection uses the exact member package name. Without `--workspace`, mutations
-and scripts select the root. Install and prune activate the full graph using the
-root lock and root `node_modules`; member scripts run from their directory using
-root policy. Pass `--project-dir <root>` when running elsewhere. See the
+Without an explicit project directory, these commands discover the nearest
+workspace from cwd and infer its containing member. For example, after
+`cd apps/news/src`, `tapid add external@1.0.0` changes only the news manifest
+and `tapid run probe` runs from `apps/news` under root policy. Install and
+prune still activate the full graph with the root lock and root `node_modules`.
+
+`--workspace @example/ui` overrides inference by exact package name.
+`--project-dir PATH` disables discovery and targets that exact directory,
+including explicit `--project-dir .`; targeting a member explicitly treats it
+as independent. Unknown selectors and invalid explicit roots never fall back.
+Nearest nested workspaces are independent; standalone descendants select their
+nearest package. Ordinary nonmember directories select the workspace root;
+undeclared nested packages and ambiguous containment require explicit selection.
+Manifest symlinks, external member targets, and invalid ancestor manifests fail
+before mutation. See the
 [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces)
-for discovery, replay, selection, and compatibility limits.
+for exact precedence, canonical path safety, and inspection-command limits.
 
 ## Private npm registry routing (development feature)
 
