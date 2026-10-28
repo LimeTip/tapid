@@ -4,8 +4,13 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
-    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    /// Reject incompatible, unsupported, unknown or unchecked compatibility requirements. Does not implicitly execute Node.
     #[arg(long)]
+    strict_compat: bool,
+    #[command(flatten)]
+    pub(crate) runtime: crate::compatibility::RuntimeOptions,
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long, conflicts_with_all = ["identify_node", "node_runtime", "strict_compat"])]
     pub(crate) dry_run: bool,
     /// Package to add to dependencies, such as react@^19.0.0. Defaults to * without a requirement. Online only.
     #[arg(value_parser = parse_package_argument)]
@@ -96,7 +101,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     } else {
         crate::application::install::InstallMode::Online
     };
-    let result = crate::application::install::run_with_execution(
+    let result = crate::application::install::run_with_compatibility(
         crate::application::install::InstallRequest {
             project_dir: &args.project_dir,
             target_manifest_path: &target_manifest_path,
@@ -110,6 +115,9 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
             allow_unverified_registry_artifacts: args.allow_unverified_registry_artifacts,
         },
         overrides,
+        args.runtime
+            .identify(&args.project_dir, args.store_dir.as_deref()),
+        args.strict_compat,
         |event| reporter.progress(event),
     );
     match result {

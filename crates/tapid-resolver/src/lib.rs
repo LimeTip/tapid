@@ -216,6 +216,16 @@ impl FromStr for Requirement {
 }
 
 impl Requirement {
+    /// Parses only an npm version range, excluding dist-tags and aliases.
+    /// Empty input retains npm wildcard and prerelease eligibility semantics.
+    pub fn parse_range(raw: &str) -> Result<Self, ResolveError> {
+        let requirement: Self = raw.parse()?;
+        if requirement.is_alias() || requirement.dist_tag().is_some() {
+            return Err(ResolveError::UnsupportedRange(raw.trim().into()));
+        }
+        Ok(requirement)
+    }
+
     // Account for the representation retained for matching and cloning, even
     // when a caller edits the public diagnostic text independently.
     fn retained_bytes(&self) -> usize {

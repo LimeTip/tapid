@@ -9,6 +9,7 @@ pub enum LockfileError {
     InvalidUrl(String),
     InvalidSha512(String),
     InvalidCopiedArtifactEvidence,
+    InvalidNodeEngineEvidence,
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
     AliasMetadataInLegacySchema(u32),
@@ -50,6 +51,10 @@ impl fmt::Display for LockfileError {
                 write!(f, "lockfile URL is not an approved HTTPS origin: {value}")
             }
             Self::InvalidSha512(value) => write!(f, "invalid SHA-512 integrity: {value}"),
+            Self::InvalidNodeEngineEvidence => write!(
+                f,
+                "Node declaration evidence requires schema 11 and explicit evidence for every package"
+            ),
             Self::InvalidCopiedArtifactEvidence => write!(
                 f,
                 "copied artifacts cannot carry registry authentication, download URLs, or derived hooks"

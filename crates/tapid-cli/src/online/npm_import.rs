@@ -89,6 +89,7 @@ pub(crate) fn fetch_imported(
     let mut instances = BTreeMap::new();
     let mut trees = BTreeMap::new();
     let mut receipts = BTreeMap::new();
+    let mut node_engines = BTreeMap::new();
     for path in &selected {
         let package = &graph.packages[path];
         let peer = graph.peer_context(path);
@@ -226,7 +227,11 @@ pub(crate) fn fetch_imported(
             }
         };
         let artifact_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.path().join("package/package.json")).map_err(|e| e.to_string())?,
+            &crate::filesystem::read::read_bounded_file(
+                &temp.path().join("package/package.json"),
+                1024 * 1024,
+            )
+            .map_err(|_| "imported package requires a regular package.json no larger than 1 MiB")?,
         )
         .map_err(|e| e.to_string())?;
         if artifact_manifest["name"].as_str() != Some(package.name.as_str())
@@ -272,6 +277,20 @@ pub(crate) fn fetch_imported(
             .set_artifact_url(&package.resolved)
             .map_err(OperationalError::from)?;
         let key = locked.key();
+        let evidence = if package.node_engine == tapid_lockfile::LockedNodeEngine::Unknown {
+            (
+                tapid_registry_client::NodeEngineRequirement::from_engines(
+                    artifact_manifest.get("engines"),
+                ),
+                "verified_source_manifest",
+            )
+        } else {
+            (
+                crate::compatibility::registry_node_engine(&package.node_engine),
+                "imported_lock",
+            )
+        };
+        node_engines.insert(key.clone(), evidence);
         let instance = PackageInstance {
             id: tapid_core::PackageInstanceId::new(
                 package.registry.clone(),
@@ -451,6 +470,7 @@ pub(crate) fn fetch_imported(
             .contains_key(&format!("node_modules/{}", link.name))
     });
     Ok(PreparedInstall {
+        node_engines,
         candidate_exclusions: Default::default(),
         lock,
         layout: PreparedLayout {

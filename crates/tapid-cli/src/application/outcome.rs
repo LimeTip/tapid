@@ -18,6 +18,7 @@ pub(crate) use lifecycle::LifecycleReport;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
     InvalidRequest,
+    CompatibilityRejected,
     Project,
     ProjectChanged,
     Manifest,
@@ -46,6 +47,7 @@ pub(crate) enum ErrorKind {
 impl ErrorKind {
     pub(crate) fn code(self) -> &'static str {
         match self {
+            Self::CompatibilityRejected => "COMPATIBILITY_REJECTED",
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::Project => "PROJECT_UNAVAILABLE",
             Self::ProjectChanged => "PROJECT_CHANGED",
@@ -403,6 +405,7 @@ impl fmt::Display for Warning {
 
 #[derive(Debug)]
 pub(crate) struct OperationOutcome {
+    pub(crate) compatibility: Option<crate::compatibility::Report>,
     pub(crate) project_dir: PathBuf,
     pub(crate) state: ChangeState,
     /// Project outputs actually changed, or requiring inspection after failed recovery.
@@ -426,6 +429,7 @@ impl OperationOutcome {
     pub(crate) fn unchanged(project: &Path) -> Self {
         Self {
             project_dir: project.to_owned(),
+            compatibility: None,
             state: ChangeState::Unchanged,
             changed_files: Vec::new(),
             warnings: Vec::new(),

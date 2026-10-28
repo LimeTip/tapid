@@ -67,6 +67,7 @@ pub(crate) fn explain(
     });
     truncated.sort();
     result["truncated_fields"] = json!(truncated);
+    super::compatibility::attach(&mut result, Some(&report.compatibility));
     if mismatch {
         let context = crate::application::outcome::DiagnosticContext::comparison(
             "artifact_integrity",

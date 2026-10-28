@@ -93,6 +93,38 @@ and replaces managed node_modules. Imported locks use install with --frozen.
 
 Ordinary install and mutating lifecycle results contain `data.package_count` and `data.replayed`. They exclude graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages.
 
+Successful installation results additionally contain `data.compatibility` with
+`facts`, `runtime.state`, `evidence_complete`, and `strict_satisfied`. Each fact
+records `location`, `identity`, `provenance`, `classification`, `status`, `reason`,
+and an optional string `requirement`. These are advisory observations; the
+strict assessment does not mean an enforcement option was requested. Runtime
+identification defaults to `not_requested`; valid Node ranges are
+`unchecked_runtime` without explicitly identified evidence. Known absence is `not_declared`, malformed declarations
+are `unsupported`, and unavailable selected-package evidence is
+`unknown_evidence`. Exact Tapid manager versions can be `satisfied` or
+`incompatible` independently of Node evidence.
+
+Native schema-11 replay reports persisted declarations with `native_lock`
+provenance. Imported schema-8 declarations use `imported_lock`; omitted imported
+`engines` and historical native omission initially mean unknown evidence.
+Installation can recover these facts from verified original manifests before
+hooks, with a 1 MiB read bound and matching package identity, using
+`verified_source_manifest` provenance. Unavailable or unreadable evidence remains
+`unknown_evidence`. Recovery never rewrites a lock solely to supply compatibility
+evidence. Copied-source declarations also come from the verified original
+manifest, independently of registry metadata. Derived hook outputs do not redefine
+original declarations.
+
+Compatibility strings use the envelope's sanitization and text bounds. The
+presentation includes at most 1,024 facts, `omitted_facts`, and
+`details_complete`; any omission or shortened string is also named in
+`truncated_fields`. `strict_satisfied` evaluates all internal facts before
+presentation bounds. Evidence completeness describes declaration availability,
+not runtime identification or display completeness. Replay uses available lock
+evidence without fetching metadata or enriching frozen locks; unavailable evidence
+remains unknown. See the [current CLI scope](../crates/tapid-cli/README.md#node-and-package-manager-compatibility)
+and [complete observation contract](#requirement-compatibility-observations).
+
 `tapid --json install --dry-run`, `add --dry-run`, `remove --dry-run`, and `update --dry-run` instead return a resolved graph preview under the version 1 envelope. The operation retains its canonical command name. Successful previews use `outcome: "success"`, `changes.state: "unchanged"`, empty affected-file lists, null retry advice, and exit 0. This payload is an observation, not an executable plan or a prepared installation.
 
 | Preview data field | Meaning |
@@ -491,7 +523,49 @@ were committed (other identity and report fields are omitted here):
 ```
 
 A frozen replay with an exact approval but unavailable authenticated output instead
-has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
+has `outcome: "failure"`, compatibility data when available, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Requirement compatibility observations
+
+Install, ci and graph-activating lifecycle results, status, and exact-package
+explain expose additive `data.compatibility` in the existing version-1 envelope.
+Compatibility rejection exits 1 with `COMPATIBILITY_REJECTED` and populated
+facts. Other failures retain collected compatibility facts when available.
+Advisory mismatch does not itself make an operation fail. Status assessment
+continues to describe its existing local blockers, independently of compatibility.
+
+Each fact records `location`, `identity`, `provenance`, `classification`,
+`requirement`, `status`, `reason` and `runtime_reference`. Node range facts
+reference `/runtime` relative to this report. Instance identities preserve
+registry, peer and platform context. Provenance is `project_manifest`,
+`registry_metadata`, `native_lock`, `imported_lock`,
+`verified_source_manifest`, or `unavailable`; metadata/lock claims are not
+archive authentication. Dependency manager declarations are not consumer policy.
+
+Statuses are `not_declared`, `satisfied`, `incompatible`, `unsupported`,
+`unknown_evidence` and `unchecked_runtime`. Inspected absence does not claim
+support for every runtime. Malformed values and unsupported Node range syntax
+remain unevaluable. `evidence_complete` concerns available declaration evidence;
+`strict_satisfied` evaluates every fact, independently of display limits and
+whether strict mode was requested. Neither establishes application readiness.
+
+Runtime states are `not_requested`, `not_found`, `failed` and `identified`.
+They retain a stable reason, canonical `executable` display path, lossless
+`executable_path` using the existing native-path encoding, and parsed `version`
+when observed. Reasons distinguish invalid identity, setup/launch failure,
+unsuccessful termination, timeout, excessive output and malformed version output.
+No probe output or ambient environment is serialized. A runtime observation is
+not an observation of the executable selected by `tapid run`.
+
+JSON retains up to 1,024 facts and reports exact `omitted_facts`,
+`details_complete` and envelope `truncated_fields`. Human output displays up to
+100 declared/unknown facts with an omitted count. Scalar sanitization uses the
+existing result rules. Full internal evaluation precedes presentation bounds;
+truncated displays never authorize strict success from a partial evaluation.
+Native schema 11 stores declaration evidence; historical omission remains
+unknown. Imported schema 8 remains separate. Verified original-manifest recovery
+uses bounded reads before hooks and enriches only the operation report, preserving
+frozen/replay lock bytes. Status does not perform store recovery or enrichment.

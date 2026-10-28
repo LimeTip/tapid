@@ -1428,7 +1428,7 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
         serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
     metadata["packages"][0]["name"] = "other".into();
     fs::write(&fixture, metadata.to_string()).unwrap();
-    run(
+    let report = run(
         InstallRequest {
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
@@ -1441,6 +1441,15 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
         |_| {},
     )
     .unwrap();
+    let compatibility = report.outcome.compatibility.as_ref().unwrap();
+    assert!(
+        compatibility
+            .facts
+            .iter()
+            .any(|fact| fact.identity.contains("|plugin@1.0.0|")
+                && fact.provenance == "native_lock"
+                && fact.status == "not_declared")
+    );
     let lock = read_lock(&project.path().join("tapid.lock")).unwrap();
     assert_eq!(lock.packages().len(), 2);
     assert!(

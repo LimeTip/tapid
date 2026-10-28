@@ -13,7 +13,7 @@ pub use lifecycle::{
     DependencyLifecyclePlan, dependency_lifecycle_commands, dependency_lifecycle_hooks,
     dependency_lifecycle_plan,
 };
-pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
+pub use model::{BinTarget, DependencyKind, NodeEngineDeclaration, PackageBin, PackageManifest};
 pub use workspace::{Workspace, WorkspaceMember};
 
 /// Maximum bytes read from each root or member manifest during workspace discovery.
@@ -26,6 +26,50 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn compatibility_declarations_preserve_absent_valid_and_malformed_values() {
+        for (fields, expected) in [
+            (serde_json::json!({}), NodeEngineDeclaration::NotDeclared),
+            (
+                serde_json::json!({"engines": {"npm": "*"}}),
+                NodeEngineDeclaration::NotDeclared,
+            ),
+            (
+                serde_json::json!({"engines": {"node": ">=22"}}),
+                NodeEngineDeclaration::Range(">=22"),
+            ),
+            (
+                serde_json::json!({"engines": {"node": 22}}),
+                NodeEngineDeclaration::MalformedNode,
+            ),
+            (
+                serde_json::json!({"engines": null}),
+                NodeEngineDeclaration::MalformedEngines,
+            ),
+        ] {
+            let mut document = fields;
+            document["name"] = serde_json::json!("example-app");
+            document["version"] = serde_json::json!("1.0.0");
+            document["packageManager"] = serde_json::json!("tapid@1.0.0");
+            document["devEngines"] = serde_json::Value::Null;
+            let manifest = PackageManifest::parse(&document.to_string()).unwrap();
+            assert_eq!(manifest.node_engine(), expected);
+            assert_eq!(
+                manifest.package_manager(),
+                Some(&document["packageManager"])
+            );
+            assert_eq!(manifest.dev_engines(), Some(&serde_json::Value::Null));
+            let updated = manifest.with_dependency("example", "^1").unwrap();
+            let roundtrip: serde_json::Value = serde_json::from_str(&updated.to_json()).unwrap();
+            assert_eq!(roundtrip.get("engines"), document.get("engines"));
+            assert_eq!(roundtrip["packageManager"], document["packageManager"]);
+            assert_eq!(roundtrip["devEngines"], document["devEngines"]);
+        }
+        let absent = PackageManifest::new("example-app", "1.0.0", false).unwrap();
+        assert_eq!(absent.package_manager(), None);
+        assert_eq!(absent.dev_engines(), None);
+    }
 
     #[test]
     fn parses_supported_metadata() {

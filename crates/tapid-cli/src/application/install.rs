@@ -74,6 +74,8 @@ impl PackageChanges {
 }
 
 struct InstallSession {
+    runtime: crate::compatibility::Runtime,
+    strict_compat: bool,
     candidate_exclusions: super::outcome::CandidateExclusions,
     hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
@@ -88,6 +90,8 @@ struct InstallSession {
 impl InstallSession {
     fn new(project: &Path) -> Self {
         Self {
+            runtime: Default::default(),
+            strict_compat: false,
             hook_stages: Vec::new(),
             journal: None,
             lock_backup: None,
@@ -255,6 +259,22 @@ pub(crate) fn run_with_execution(
     overrides: super::dependency_scripts::ExecutionOverrides,
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
+    run_with_compatibility(
+        request,
+        overrides,
+        Default::default(),
+        false,
+        report_replay_progress,
+    )
+}
+
+pub(crate) fn run_with_compatibility(
+    request: InstallRequest<'_>,
+    overrides: super::dependency_scripts::ExecutionOverrides,
+    runtime: crate::compatibility::Runtime,
+    strict_compat: bool,
+    report_replay_progress: impl FnMut(Progress),
+) -> Result<InstallReport, OperationFailure> {
     let InstallRequest {
         project_dir,
         mode,
@@ -262,6 +282,8 @@ pub(crate) fn run_with_execution(
         ..
     } = request;
     let mut session = InstallSession::new(project_dir);
+    session.runtime = runtime;
+    session.strict_compat = strict_compat;
     session.outcome.warnings.extend(overrides.warnings());
     if allow_unverified_registry_artifacts
         && matches!(
@@ -501,6 +523,10 @@ fn perform_install(
     } else {
         read_manifest(&root_manifest_path)?
     };
+    let mut compatibility = crate::compatibility::Report::project(&root_manifest);
+    compatibility.runtime(std::mem::take(&mut session.runtime));
+    session.outcome.compatibility = Some(compatibility);
+    check_compatibility(&session.outcome, session.strict_compat)?;
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => {
@@ -557,6 +583,7 @@ fn perform_install(
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {
+            node_engines,
             candidate_exclusions,
             mut lock,
             layout:
@@ -593,6 +620,20 @@ fn perform_install(
             )?
         };
         session.candidate_exclusions = candidate_exclusions;
+        record_compatibility(
+            &mut session.outcome,
+            &project_dir,
+            &workspace_plan.links,
+            &lock,
+            &node_engines,
+        )?;
+        session
+            .outcome
+            .compatibility
+            .as_mut()
+            .expect("compatibility initialized")
+            .recover_original_manifests(&lock, &trees);
+        check_compatibility(&session.outcome, session.strict_compat)?;
 
         session
             .outcome
@@ -769,6 +810,13 @@ fn perform_install(
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+    record_compatibility(
+        &mut session.outcome,
+        &project_dir,
+        &workspace.links,
+        &lock,
+        &BTreeMap::new(),
+    )?;
     if !online::workspace_matches_lock(&workspace, &lock) {
         return Err(
             "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
@@ -830,6 +878,7 @@ fn perform_install(
     }
     if !offline
         && (ci
+            || session.strict_compat
             || lock
                 .packages()
                 .values()
@@ -854,6 +903,13 @@ fn perform_install(
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         )?;
         let mut lifecycle_snapshots = Vec::new();
+        session
+            .outcome
+            .compatibility
+            .as_mut()
+            .expect("compatibility initialized")
+            .recover_original_manifests(&lock, &trees);
+        check_compatibility(&session.outcome, session.strict_compat)?;
         super::dependency_scripts::apply(
             &project_dir,
             &lifecycle_policy,
@@ -940,6 +996,13 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
+    session
+        .outcome
+        .compatibility
+        .as_mut()
+        .expect("compatibility initialized")
+        .recover_original_manifests(&lock, &trees);
+    check_compatibility(&session.outcome, session.strict_compat)?;
     super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,
@@ -1239,3 +1302,50 @@ mod tests {
 #[cfg(test)]
 #[path = "install_outcome_tests.rs"]
 mod outcome_tests;
+
+fn record_compatibility(
+    outcome: &mut OperationOutcome,
+    project: &Path,
+    links: &tapid_linker::WorkspaceLinkPlan,
+    lock: &Lockfile,
+    node_engines: &BTreeMap<String, (tapid_registry_client::NodeEngineRequirement, &'static str)>,
+) -> Result<(), OperationalError> {
+    let report = outcome
+        .compatibility
+        .as_mut()
+        .expect("root compatibility initialized");
+    for link in &links.links {
+        let path = link.source.join("package.json");
+        let manifest = read_manifest(&path)?;
+        let location = path
+            .strip_prefix(project)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        report.manifest(&manifest, &location);
+    }
+    for (key, package) in lock.packages() {
+        match node_engines.get(key) {
+            Some((requirement, provenance)) => {
+                report.selected_package(key, requirement, provenance)
+            }
+            None => report.locked_package(key, package),
+        }
+    }
+    Ok(())
+}
+
+fn check_compatibility(outcome: &OperationOutcome, strict: bool) -> Result<(), OperationalError> {
+    if strict
+        && outcome
+            .compatibility
+            .as_ref()
+            .is_none_or(|r| !r.strict_satisfied)
+    {
+        return Err(OperationalError::new(
+            ErrorKind::CompatibilityRejected,
+            "compatibility requirements are incompatible or lack sufficient evidence",
+        ));
+    }
+    Ok(())
+}

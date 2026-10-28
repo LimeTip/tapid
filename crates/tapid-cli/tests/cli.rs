@@ -799,6 +799,9 @@ fn legacy_replay_rejects_same_local_name_from_different_registries() {
     )
     .into();
     lock["lockfileVersion"] = 6.into();
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package.as_object_mut().unwrap().remove("nodeEngine");
+    }
     lock.as_object_mut().unwrap().remove("rootBindings");
     let lock_bytes = lock.to_string();
     fs::write(dir.join("tapid.lock"), &lock_bytes).unwrap();
@@ -2277,7 +2280,7 @@ fn root_install_links_ordinary_workspace_dependencies_without_registry_resolutio
 
     let lock: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
-    assert_eq!(lock["lockfileVersion"], 7);
+    assert_eq!(lock["lockfileVersion"], 11);
     assert!(
         lock["workspacePackages"]
             .as_object()
@@ -6071,7 +6074,11 @@ fn dependency_lifecycle_required_native_build_fails_without_approval() {
         .unwrap();
     assert!(!output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["data"], serde_json::Value::Null);
+    assert_eq!(result["data"]["compatibility"]["evidence_complete"], true);
+    assert_eq!(
+        result["data"]["compatibility"]["runtime"]["state"],
+        "not_requested"
+    );
     let hook = &result["lifecycle"]["packages"][0]["hooks"][0];
     assert_eq!(hook["authorization"], "exact_policy");
     assert_eq!(hook["disposition"], "blocked");
@@ -6971,7 +6978,11 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
         .unwrap();
     assert!(!output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["data"], serde_json::Value::Null);
+    assert_eq!(result["data"]["compatibility"]["evidence_complete"], true);
+    assert_eq!(
+        result["data"]["compatibility"]["runtime"]["state"],
+        "not_requested"
+    );
     assert_eq!(result["lifecycle"]["coverage"], "incomplete");
     assert_eq!(result["lifecycle"]["hooks_skipped"], 1);
     assert_eq!(result["warning_details"][0]["hook"], "preinstall");
@@ -7225,6 +7236,9 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
 
     let mut legacy = canonical;
     legacy["lockfileVersion"] = 4.into();
+    for package in legacy["packages"].as_object_mut().unwrap().values_mut() {
+        package.as_object_mut().unwrap().remove("nodeEngine");
+    }
     legacy.as_object_mut().unwrap().remove("roots");
     legacy.as_object_mut().unwrap().remove("rootBindings");
     fs::write(
@@ -8047,6 +8061,10 @@ fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay(
     let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
     assert_eq!(lock.packages().len(), 2);
     assert!(lock.root_bindings()["copied"].starts_with("file:vendor/pkg.tgz#sha256-"));
+    assert_eq!(
+        lock.packages()[&lock.root_bindings()["copied"]].node_engine(),
+        &tapid_lockfile::LockedNodeEngine::NotDeclared
+    );
     let why = run(dir, &["--json", "why", "h3"]);
     assert!(
         why.status.success(),

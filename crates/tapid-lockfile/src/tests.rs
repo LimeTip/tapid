@@ -1013,3 +1013,108 @@ fn lifecycle_outputs_reject_forged_or_unordered_records() {
         assert!(Lockfile::from_json(&value.to_string()).is_err());
     }
 }
+
+#[test]
+fn node_engine_schema_11_roundtrip_and_historical_unknown() {
+    use super::LockedNodeEngine;
+    for requirement in [
+        LockedNodeEngine::Unknown,
+        LockedNodeEngine::NotDeclared,
+        LockedNodeEngine::Range(">=22 <25".into()),
+        LockedNodeEngine::MalformedEngines,
+        LockedNodeEngine::MalformedNode,
+    ] {
+        let mut package = package_fixture();
+        package.set_node_engine(requirement.clone());
+        let key = package.key();
+        let digest = format!("sha256-{}", "a".repeat(64));
+        let mut lock = Lockfile::new(&digest).unwrap();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([key.clone()]).unwrap();
+        let json = lock.to_json().unwrap();
+        let mut wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(wire["lockfileVersion"], 11);
+        let parsed = Lockfile::from_json(&json).unwrap();
+        assert_eq!(parsed.packages()[&key].node_engine(), &requirement);
+        parsed.validate_replay(&digest).unwrap();
+        assert_eq!(parsed.to_json().unwrap(), json);
+        wire["lockfileVersion"] = 7.into();
+        assert!(Lockfile::from_json(&wire.to_string()).is_err());
+        wire["packages"][&key]
+            .as_object_mut()
+            .unwrap()
+            .remove("nodeEngine");
+        let historical = Lockfile::from_json(&wire.to_string()).unwrap();
+        assert_eq!(
+            historical.packages()[&key].node_engine(),
+            &LockedNodeEngine::Unknown
+        );
+        wire["lockfileVersion"] = 11.into();
+        assert!(Lockfile::from_json(&wire.to_string()).is_err());
+    }
+}
+
+#[test]
+fn node_engine_schema_11_preserves_lifecycle_and_copied_source_guarantees() {
+    use super::{DerivedHookOutput, LockedNodeEngine, RegistryIntegrityProvenance};
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let mut first = package_fixture();
+    first.set_node_engine(LockedNodeEngine::NotDeclared);
+    let first_key = first.key();
+    let mut lock = Lockfile::new(&digest).unwrap();
+    lock.insert_package(first).unwrap();
+    lock.set_roots([first_key.clone()]).unwrap();
+    let output = DerivedHookOutput::new(
+        "postinstall",
+        &format!("sha256-{}", "c".repeat(64)),
+        &format!("sha256-{}", "d".repeat(64)),
+        &format!("hmac-sha256-{}", "e".repeat(64)),
+    )
+    .unwrap();
+    lock.set_derived_hooks(&first_key, vec![output]).unwrap();
+    let copied = LockedPackage::new_with_provenance(
+        &format!("file:vendor/tool.tgz#{digest}"),
+        "tool",
+        "1.0.0",
+        package_fixture().artifact_integrity(),
+        &digest,
+        RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    let copied_key = copied.key();
+    lock.insert_package(copied).unwrap();
+    let json = lock.to_json().unwrap();
+    let parsed = Lockfile::from_json(&json).unwrap();
+    assert_eq!(
+        parsed.packages()[&copied_key].node_engine(),
+        &LockedNodeEngine::Unknown
+    );
+    assert_eq!(parsed.packages()[&first_key].derived_hooks().len(), 1);
+    assert!(
+        parsed.source_graph().packages()[&first_key]
+            .derived_hooks()
+            .is_empty()
+    );
+    assert_eq!(
+        parsed.source_graph().packages()[&first_key].node_engine(),
+        &LockedNodeEngine::NotDeclared
+    );
+    let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(wire["lockfileVersion"], 11);
+    for invalid in [
+        serde_json::json!({"state":"range"}),
+        serde_json::json!({"state":"not_declared","extra":true}),
+        serde_json::json!({"state":"compatible"}),
+        serde_json::Value::Null,
+    ] {
+        let mut invalid_wire = wire.clone();
+        invalid_wire["packages"][&first_key]["nodeEngine"] = invalid;
+        assert!(Lockfile::from_json(&invalid_wire.to_string()).is_err());
+    }
+    let mut invalid_hooks = wire.clone();
+    invalid_hooks["packages"][&first_key]["derivedHooks"][0]["attestation"] = "invalid".into();
+    assert!(Lockfile::from_json(&invalid_hooks.to_string()).is_err());
+    let mut invalid_copied = wire;
+    invalid_copied["packages"][&copied_key]["registryIntegrityDeclared"] = true.into();
+    assert!(Lockfile::from_json(&invalid_copied.to_string()).is_err());
+}

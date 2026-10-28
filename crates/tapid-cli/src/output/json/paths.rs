@@ -8,7 +8,7 @@ fn unavailable(encoding: &str) -> Value {
     json!({"encoding": encoding, "value": null, "unavailable": "capacity_exceeded"})
 }
 
-pub(super) fn encode(path: &Path) -> Value {
+pub(crate) fn encode(path: &Path) -> Value {
     if let Some(path) = path.to_str() {
         return if path.len() <= MAX_PATH_BYTES {
             json!({"encoding": "utf8", "value": path})

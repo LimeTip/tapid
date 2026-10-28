@@ -29,6 +29,11 @@ fn requirement_satisfaction_matches_pinned_node_semver_corpus() {
             expected_valid,
             "case {index}: range validity for {range:?}"
         );
+        assert_eq!(
+            Requirement::parse_range(range).is_ok(),
+            expected_valid,
+            "case {index}: range-only validity for {range:?}"
+        );
         if !expected_valid {
             continue;
         }
@@ -44,6 +49,11 @@ fn requirement_satisfaction_matches_pinned_node_semver_corpus() {
             parsed.expect("validated range").matches(&version),
             expected_match,
             "case {index}: {version_text:?} against {range:?}"
+        );
+        assert_eq!(
+            Requirement::parse_range(range).unwrap().matches(&version),
+            expected_match,
+            "case {index}: range-only satisfaction for {range:?}"
         );
     }
 }

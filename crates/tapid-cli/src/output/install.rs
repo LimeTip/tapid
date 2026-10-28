@@ -81,6 +81,7 @@ impl Reporter {
 
     pub(crate) fn summary(&self, report: &InstallReport) {
         super::report_warnings(&self.remaining_warnings(&report.outcome.warnings));
+        super::report_compatibility(report.outcome.compatibility.as_ref());
         if report.replayed {
             println!(
                 "Replayed lockfile: {} package(s) in {:.2}s",
@@ -152,6 +153,7 @@ impl Reporter {
 
     pub(crate) fn failure(&self, mut failure: OperationFailure) {
         let phase = match failure.error.kind {
+            ErrorKind::CompatibilityRejected => "compatibility validation",
             ErrorKind::InvalidRequest
             | ErrorKind::Project
             | ErrorKind::ProjectChanged

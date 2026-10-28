@@ -12,8 +12,9 @@ mod tests;
 
 pub use error::LockfileError;
 pub use model::{
-    DerivedHookOutput, LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile,
-    LockfilePackageKey, LockfilePackageSource, RegistryIntegrityProvenance,
+    DerivedHookOutput, LocalWorkspaceSource, LockedNodeEngine, LockedPackage,
+    LockedWorkspacePackage, Lockfile, LockfilePackageKey, LockfilePackageSource,
+    RegistryIntegrityProvenance,
 };
 
 /// Returns the current crate version.
@@ -24,6 +25,8 @@ pub const LOCKFILE_VERSION: u32 = 7;
 pub const LIFECYCLE_LOCKFILE_VERSION: u32 = 9;
 /// Locks with immutable copied file and Git sources.
 pub const COPIED_SOURCE_LOCKFILE_VERSION: u32 = 10;
+/// Native locks preserving explicit Node declaration evidence.
+pub const COMPATIBILITY_LOCKFILE_VERSION: u32 = 11;
 const ROOTS_LEGACY_LOCKFILE_VERSION: u32 = 6;
 const REGISTRY_ONLY_LOCKFILE_VERSION: u32 = ROOTS_LEGACY_LOCKFILE_VERSION;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;

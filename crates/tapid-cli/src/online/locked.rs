@@ -256,9 +256,11 @@ pub(super) fn locked_records(
                 key.version.to_string(),
             );
             Ok(PackageRecord {
+                node_engine_provenance: "native_lock",
+                node_engine: crate::compatibility::registry_node_engine(package.node_engine()),
                 git_reference: None,
                 copied_archive: None,
-        dist_tags: BTreeSet::new(),
+                dist_tags: BTreeSet::new(),
                 registry,
                 name: key.name,
                 version: key.version,

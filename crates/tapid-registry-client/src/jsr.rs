@@ -134,6 +134,7 @@ fn parse_jsr(
         };
         let (dependencies, peer_dependencies) = parse_jsr_dependencies(version_object)?;
         artifacts.push(RegistryArtifact {
+            node_engine: crate::NodeEngineRequirement::Unknown,
             dist_tags: Default::default(),
             identity: RegistryPackageId::from_source(origin.clone().into(), name.clone(), version),
             artifact_url,

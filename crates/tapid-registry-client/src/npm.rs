@@ -387,6 +387,7 @@ fn parse_npm_object(
             _ => continue,
         };
         artifacts.push(RegistryArtifact {
+            node_engine: crate::NodeEngineRequirement::from_engines(version_entry.get("engines")),
             dist_tags: tags
                 .iter()
                 .filter(|(_, target)| *target == &version)

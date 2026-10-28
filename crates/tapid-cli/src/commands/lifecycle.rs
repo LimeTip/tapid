@@ -5,8 +5,13 @@ use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
-    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    /// Reject requirements without compatible evidence. Never implicitly executes Node.
     #[arg(long)]
+    pub(crate) strict_compat: bool,
+    #[command(flatten)]
+    pub(crate) runtime: crate::compatibility::RuntimeOptions,
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long, conflicts_with_all = ["identify_node", "node_runtime", "strict_compat"])]
     pub(crate) dry_run: bool,
     /// Packages to add, such as react@^19.0.0. Defaults to * without a requirement.
     #[arg(value_name = "PACKAGE")]
@@ -35,8 +40,13 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct RemoveArgs {
-    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    /// Reject requirements without compatible evidence. Never implicitly executes Node.
     #[arg(long)]
+    pub(crate) strict_compat: bool,
+    #[command(flatten)]
+    pub(crate) runtime: crate::compatibility::RuntimeOptions,
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long, conflicts_with_all = ["identify_node", "node_runtime", "strict_compat"])]
     pub(crate) dry_run: bool,
     /// Declared package names to remove, without version requirements.
     #[arg(value_name = "PACKAGE")]
@@ -47,8 +57,13 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
-    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    /// Reject requirements without compatible evidence. Never implicitly executes Node.
     #[arg(long)]
+    pub(crate) strict_compat: bool,
+    #[command(flatten)]
+    pub(crate) runtime: crate::compatibility::RuntimeOptions,
+    /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
+    #[arg(long, conflicts_with_all = ["identify_node", "node_runtime", "strict_compat"])]
     pub(crate) dry_run: bool,
     /// Declared package names to select. Omit to select all direct dependencies.
     #[arg(value_name = "PACKAGE")]
@@ -82,6 +97,10 @@ pub(crate) struct OutdatedArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct ReadOnlyArgs {
+    #[command(flatten)]
+    runtime: crate::compatibility::RuntimeOptions,
+    #[arg(long)]
+    strict_compat: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }
@@ -155,9 +174,15 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
             }
         })
         .collect::<Vec<_>>();
-    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_add(manifest, &mutations)
-    });
+    let result = mutate_and_install(
+        &args.common,
+        &args.runtime,
+        args.strict_compat,
+        json,
+        false,
+        args.dry_run,
+        |manifest| crate::application::lifecycle::plan_add(manifest, &mutations),
+    );
     report(result, json, "add", "Added dependencies")
 }
 
@@ -175,9 +200,15 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
             json,
         );
     }
-    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_remove(manifest, &args.packages)
-    });
+    let result = mutate_and_install(
+        &args.common,
+        &args.runtime,
+        args.strict_compat,
+        json,
+        false,
+        args.dry_run,
+        |manifest| crate::application::lifecycle::plan_remove(manifest, &args.packages),
+    );
     report(result, json, "remove", "Removed dependencies")
 }
 
@@ -223,7 +254,7 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
             )
             .map(LifecycleReport::Preview);
         }
-        crate::application::install::run(
+        crate::application::install::run_with_compatibility(
             crate::application::install::InstallRequest {
                 project_dir: &selection.root_dir,
                 target_manifest_path: &selection.manifest_path,
@@ -240,6 +271,10 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
                     .common
                     .allow_unverified_registry_artifacts,
             },
+            Default::default(),
+            args.runtime
+                .identify(&selection.root_dir, args.common.store_dir.as_deref()),
+            args.strict_compat,
             |event| crate::output::report_progress(event, json),
         )
         .map(LifecycleReport::Installed)
@@ -301,7 +336,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             );
         }
     };
-    match crate::application::install::run(
+    match crate::application::install::run_with_compatibility(
         crate::application::install::InstallRequest {
             project_dir: &selection.root_dir,
             target_manifest_path: &selection.manifest_path,
@@ -311,6 +346,10 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             registry_fixture: None,
             allow_unverified_registry_artifacts: false,
         },
+        Default::default(),
+        args.runtime
+            .identify(&selection.root_dir, args.common.store_dir.as_deref()),
+        args.strict_compat,
         |event| crate::output::report_progress(event, json),
     ) {
         Ok(report) => {
@@ -318,6 +357,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
                 return crate::output::json::installed(&report, "prune");
             }
             crate::output::report_warnings(&report.outcome.warnings);
+            crate::output::report_compatibility(report.outcome.compatibility.as_ref());
             println!("Pruned ({} package(s))", report.package_count);
             ExitCode::SUCCESS
         }
@@ -327,6 +367,8 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
 
 fn mutate_and_install(
     common: &CommonArgs,
+    runtime: &crate::compatibility::RuntimeOptions,
+    strict_compat: bool,
     json: bool,
     refresh: bool,
     dry_run: bool,
@@ -358,7 +400,7 @@ fn mutate_and_install(
         )
         .map(LifecycleReport::Preview);
     }
-    crate::application::install::run(
+    crate::application::install::run_with_compatibility(
         crate::application::install::InstallRequest {
             project_dir: &selection.root_dir,
             target_manifest_path: &selection.manifest_path,
@@ -373,6 +415,9 @@ fn mutate_and_install(
             registry_fixture: common.registry_fixture.as_deref(),
             allow_unverified_registry_artifacts: common.allow_unverified_registry_artifacts,
         },
+        Default::default(),
+        runtime.identify(&selection.root_dir, common.store_dir.as_deref()),
+        strict_compat,
         |event| crate::output::report_progress(event, json),
     )
     .map(LifecycleReport::Installed)
@@ -436,6 +481,8 @@ mod tests {
 
         let result = add(
             AddArgs {
+                strict_compat: false,
+                runtime: Default::default(),
                 dry_run: false,
                 packages: vec!["react@^18.0.0".into()],
                 dev: false,
@@ -504,18 +551,26 @@ mod stale_tests {
             registry_fixture: Some(fixture),
             allow_unverified_registry_artifacts: false,
         };
-        let result = mutate_and_install(&common, false, false, false, |manifest| {
-            let plan = crate::application::lifecycle::plan_add(
-                manifest,
-                &[crate::application::lifecycle::DependencyMutation {
-                    name: "react".into(),
-                    requirement: Some("^18.0.0".into()),
-                    kind: DependencyKind::PeerDependencies,
-                }],
-            )?;
-            project.write("package.json", newer).unwrap();
-            Ok(plan)
-        });
+        let result = mutate_and_install(
+            &common,
+            &Default::default(),
+            false,
+            false,
+            false,
+            false,
+            |manifest| {
+                let plan = crate::application::lifecycle::plan_add(
+                    manifest,
+                    &[crate::application::lifecycle::DependencyMutation {
+                        name: "react".into(),
+                        requirement: Some("^18.0.0".into()),
+                        kind: DependencyKind::PeerDependencies,
+                    }],
+                )?;
+                project.write("package.json", newer).unwrap();
+                Ok(plan)
+            },
+        );
         assert_eq!(
             std::fs::read(project.path().join("package.json")).unwrap(),
             newer,

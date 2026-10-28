@@ -7,9 +7,10 @@ use tapid_core::{
 };
 
 use crate::{
-    COPIED_SOURCE_LOCKFILE_VERSION, LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION,
-    LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
-    REGISTRY_ONLY_LOCKFILE_VERSION, ROOTS_LEGACY_LOCKFILE_VERSION, validation,
+    COMPATIBILITY_LOCKFILE_VERSION, COPIED_SOURCE_LOCKFILE_VERSION, LEGACY_LOCKFILE_VERSION,
+    LIFECYCLE_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError,
+    PROVENANCE_LEGACY_LOCKFILE_VERSION, REGISTRY_ONLY_LOCKFILE_VERSION,
+    ROOTS_LEGACY_LOCKFILE_VERSION, validation,
 };
 
 fn encode(value: &str) -> String {
@@ -774,13 +775,24 @@ impl Lockfile {
                 .source()
                 .is_some_and(|source| source.registry().is_none())
         }) {
-            self.lockfile_version = COPIED_SOURCE_LOCKFILE_VERSION;
+            self.lockfile_version = self.lockfile_version.max(COPIED_SOURCE_LOCKFILE_VERSION);
         }
         self.packages.extend(
             registry_packages
                 .into_iter()
                 .map(|package| (package.key(), package)),
         );
+        if self.lockfile_version >= COMPATIBILITY_LOCKFILE_VERSION
+            || self
+                .packages
+                .values()
+                .any(|package| package.node_engine.is_some())
+        {
+            self.lockfile_version = COMPATIBILITY_LOCKFILE_VERSION;
+            for package in self.packages.values_mut() {
+                package.node_engine.get_or_insert(LockedNodeEngine::Unknown);
+            }
+        }
         self.workspace_packages.extend(
             workspace_packages
                 .into_iter()
@@ -920,6 +932,13 @@ impl Lockfile {
     }
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        for package in self.packages.values() {
+            if (self.lockfile_version >= COMPATIBILITY_LOCKFILE_VERSION)
+                != package.node_engine.is_some()
+            {
+                return Err(LockfileError::InvalidNodeEngineEvidence);
+            }
+        }
         if self.lockfile_version < LIFECYCLE_LOCKFILE_VERSION
             && self
                 .packages
@@ -984,7 +1003,8 @@ impl Lockfile {
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
-        if lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
+        if lockfile.lockfile_version != COMPATIBILITY_LOCKFILE_VERSION
+            && lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LOCKFILE_VERSION
             && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
@@ -1075,6 +1095,8 @@ impl Lockfile {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LockedPackage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_engine: Option<LockedNodeEngine>,
     registry: String,
     name: String,
     version: String,
@@ -1191,7 +1213,36 @@ pub enum RegistryIntegrityProvenance {
     LocallyComputed,
 }
 
+/// Preserved source declaration evidence; not an authenticated archive claim.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    content = "range",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum LockedNodeEngine {
+    #[default]
+    Unknown,
+    NotDeclared,
+    Range(String),
+    MalformedEngines,
+    MalformedNode,
+}
+
 impl LockedPackage {
+    /// Historical omission remains unknown, rather than known absence.
+    pub fn node_engine(&self) -> &LockedNodeEngine {
+        self.node_engine
+            .as_ref()
+            .unwrap_or(&LockedNodeEngine::Unknown)
+    }
+
+    /// Records declaration evidence for serialization under schema 11.
+    pub fn set_node_engine(&mut self, requirement: LockedNodeEngine) {
+        self.node_engine = Some(requirement);
+    }
+
     pub fn new_with_provenance(
         registry: &str,
         name: &str,
@@ -1255,6 +1306,7 @@ impl LockedPackage {
                 .map_err(LockfileError::Domain)?
                 .to_string(),
             tree_digest: unpacked_digest.to_owned(),
+            node_engine: None,
             derived_hooks: Vec::new(),
             artifact_url: None,
             peer_context: canonical_peer_context(contexts.0),

@@ -76,6 +76,8 @@ static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
 type ResolveAndFetchOutput = Result<PreparedInstall, OperationalError>;
 
 pub(crate) struct PreparedInstall {
+    pub node_engines:
+        BTreeMap<String, (tapid_registry_client::NodeEngineRequirement, &'static str)>,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub lock: Lockfile,
     pub layout: PreparedLayout,
@@ -156,6 +158,8 @@ impl Drop for TemporaryTree {
 
 #[derive(Debug, Deserialize, Clone)]
 struct FixturePackage {
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     git_ref: Option<String>,
     #[serde(default)]
@@ -180,6 +184,8 @@ struct Fixture {
 
 #[derive(Clone)]
 struct PackageRecord {
+    node_engine: tapid_registry_client::NodeEngineRequirement,
+    node_engine_provenance: &'static str,
     git_reference: Option<String>,
     copied_archive: Option<std::sync::Arc<Vec<u8>>>,
     dist_tags: BTreeSet<String>,
@@ -640,6 +646,8 @@ fn remote_records(
     Ok(artifacts
         .into_iter()
         .map(|a| PackageRecord {
+            node_engine: a.node_engine,
+            node_engine_provenance: "registry_metadata",
             git_reference: None,
             copied_archive: None,
             dist_tags: a.dist_tags,
@@ -1057,6 +1065,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
             integrity_provenance,
         )
         .map_err(OperationalError::from)?;
+        locked.set_node_engine(crate::compatibility::lock_node_engine(&record.node_engine));
         if let Some(url) = pinned.and_then(LockedPackage::artifact_url).or_else(|| {
             (!record.fixture && !record.artifact.is_empty()).then_some(record.artifact.as_str())
         }) {
@@ -1314,6 +1323,15 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     Ok(PreparedInstall {
+        node_engines: packages
+            .iter()
+            .map(|(key, (_, record, _))| {
+                (
+                    key.clone(),
+                    (record.node_engine.clone(), record.node_engine_provenance),
+                )
+            })
+            .collect(),
         candidate_exclusions,
         lock,
         layout: PreparedLayout {

@@ -7,6 +7,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 /// artifact bytes, signatures, or build provenance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NpmPackageEvidence {
+    /// Node declaration from exact-version metadata, not authenticated archive content.
+    pub node_engine: crate::NodeEngineRequirement,
     pub identity: RegistryPackageId,
     pub integrity: Option<PackageIntegrity>,
     pub artifact_url: Option<String>,
@@ -73,6 +75,7 @@ impl NpmPackageEvidence {
             })
             .transpose()?;
         let mut evidence = NpmPackageEvidence {
+            node_engine: crate::NodeEngineRequirement::from_engines(entry.get("engines")),
             identity: RegistryPackageId::new(origin.clone(), name, version.clone()),
             integrity: None,
             artifact_url: None,

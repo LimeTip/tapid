@@ -311,7 +311,7 @@ pub(crate) fn windows_system_directory() -> Result<PathBuf, RunPreparationError>
     Err(RunPreparationError::WindowsSystemDirectoryUnavailable)
 }
 
-fn canonical_node_executable(path: &Path) -> Result<PathBuf, RunPreparationError> {
+pub(crate) fn canonical_node_executable(path: &Path) -> Result<PathBuf, RunPreparationError> {
     let canonical = fs::canonicalize(path).map_err(|_| RunPreparationError::InvalidNodeRuntime)?;
     let valid_name = canonical.file_name().is_some_and(|name| {
         if cfg!(windows) {

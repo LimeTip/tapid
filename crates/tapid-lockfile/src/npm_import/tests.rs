@@ -4,6 +4,51 @@ const MANIFEST: &str = include_str!("../../tests/fixtures/npm-import-package.jso
 const DIGEST: &str = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
+fn npm_import_node_declarations_roundtrip_without_inventing_absence() {
+    use crate::LockedNodeEngine as E;
+    for (engines, expected) in [
+        (None, E::Unknown),
+        (Some(serde_json::json!({})), E::NotDeclared),
+        (
+            Some(serde_json::json!({"node": ">=22"})),
+            E::Range(">=22".into()),
+        ),
+        (Some(Value::Null), E::MalformedEngines),
+        (Some(serde_json::json!({"node": false})), E::MalformedNode),
+    ] {
+        let mut input: Value = serde_json::from_str(INPUT).unwrap();
+        let entry = input["packages"]["node_modules/shared"]
+            .as_object_mut()
+            .unwrap();
+        if let Some(engines) = engines {
+            entry.insert("engines".into(), engines);
+        }
+        let lock = import(input.clone()).unwrap();
+        let restored = ImportedNpmLockfile::from_json(&lock.to_json().unwrap()).unwrap();
+        assert_eq!(
+            restored.graph().unwrap().packages["node_modules/shared"].node_engine,
+            expected
+        );
+        let wire: Value = serde_json::from_str(&restored.to_json().unwrap()).unwrap();
+        assert_eq!(wire["npmLock"], input);
+    }
+}
+
+#[test]
+fn npm_import_rejects_conflicting_node_evidence_for_one_instance() {
+    let mut input: Value = serde_json::from_str(INPUT).unwrap();
+    input["packages"]["node_modules/parent"]["dependencies"]["shared"] = "1.0.0".into();
+    input["packages"]["node_modules/shared"]["engines"] = serde_json::json!({"node": ">=22"});
+    input["packages"]["node_modules/parent/node_modules/shared"] =
+        input["packages"]["node_modules/shared"].clone();
+    assert!(import(input.clone()).is_ok());
+    input["packages"]["node_modules/parent/node_modules/shared"]["engines"] =
+        serde_json::json!({"node": ">=24"});
+    let error = import(input).unwrap_err();
+    assert!(error.reason.contains("same Tapid instance"), "{error}");
+}
+
+#[test]
 fn npm_import_workspace_normalizes_bin_forms_and_retains_metadata() {
     for name in ["member", "@scope/member"] {
         let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});

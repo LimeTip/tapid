@@ -100,6 +100,10 @@ pub(super) fn resolve_package_graph(
             fixture_records.insert(
                 (p.registry.clone(), p.name.clone(), p.version.clone()),
                 PackageRecord {
+                    node_engine_provenance: "registry_metadata",
+                    node_engine: tapid_registry_client::NodeEngineRequirement::from_engines(
+                        p.extra.get("engines"),
+                    ),
                     git_reference: p.git_ref.clone(),
                     copied_archive: None,
                     dist_tags: p.dist_tags.clone(),

@@ -32,6 +32,8 @@ pub(crate) struct Blocker {
 /// A report without blockers does not establish that installation or execution will succeed.
 #[derive(Serialize)]
 pub(crate) struct StatusReport {
+    #[serde(skip)]
+    pub(crate) compatibility: crate::compatibility::Report,
     pub(crate) assessment: &'static str,
     pub(crate) manifest_lock_agreement: &'static str,
     pub(crate) workspace: Value,
@@ -110,6 +112,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         }
     });
     let mut report = StatusReport {
+        compatibility: Default::default(),
         assessment: "no_local_blockers",
         manifest_lock_agreement: "unknown",
         workspace: json!({"selected": selector, "manifest": null, "members": [], "linking": "not_verified"}),
@@ -131,11 +134,11 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             "artifact_bytes_and_copied_sources",
             "lifecycle_approvals_and_derived_outputs",
             "runner_runtime_policy_and_platform_assurance",
-            "package_engine_and_target_platform_requirements",
+            "runtime_identification_and_target_platform_requirements",
         ],
         capabilities: json!({
             "experimental": true,
-            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
+            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION, tapid_lockfile::COMPATIBILITY_LOCKFILE_VERSION],
             "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
@@ -186,6 +189,9 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         .and_then(|text| PackageManifest::parse(text).ok());
     if manifest.is_none() {
         report.block("MANIFEST_INVALID_OR_MISSING", &manifest_path);
+    }
+    if let Some(manifest) = &manifest {
+        report.compatibility = crate::compatibility::Report::project(manifest);
     }
     let config = match RegistryConfig::load(&project) {
         Ok(config) => {
@@ -250,6 +256,13 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         );
         inspect_manifest(workspace.root(), &manifest_path, workspace, &mut report);
         for member in workspace.members().iter().take(MAX_ENTRIES) {
+            let location = member
+                .path()
+                .strip_prefix(&project)
+                .unwrap_or(member.path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            report.compatibility.manifest(member.manifest(), &location);
             inspect_manifest(member.manifest(), member.path(), workspace, &mut report);
             if let Some(dir) = member.path().parent() {
                 inspect_installation(dir, &mut report, &mut snapshots);
@@ -269,6 +282,9 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             .and_then(|text| Lockfile::from_json(text).ok())
         {
             Some(lock) => {
+                for (key, package) in lock.packages() {
+                    report.compatibility.locked_package(key, package);
+                }
                 if let (Some(manifest), Ok(bytes)) = (&manifest, &manifest_bytes) {
                     let root_matches = match lock.validate_replay(&digest_bytes(bytes)) {
                         Ok(()) => true,
@@ -308,10 +324,19 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
                     }
                 }
             }
-            None => report.block("LOCKFILE_INVALID", &lock_path),
+            None => {
+                report.compatibility.unknown_package("selected_graph");
+                report.block("LOCKFILE_INVALID", &lock_path);
+            }
         },
-        Err("missing") => report.block("LOCKFILE_MISSING", &lock_path),
-        Err(_) => report.block("LOCKFILE_UNREADABLE", &lock_path),
+        Err("missing") => {
+            report.compatibility.unknown_package("selected_graph");
+            report.block("LOCKFILE_MISSING", &lock_path);
+        }
+        Err(_) => {
+            report.compatibility.unknown_package("selected_graph");
+            report.block("LOCKFILE_UNREADABLE", &lock_path);
+        }
     }
     let mut changed = false;
     let files = snapshots.iter().map(|(path, (limit, digest))| {
@@ -325,6 +350,9 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     }
     report.snapshot =
         json!({"consistency": "not_atomic", "changes_detected": changed, "files": files});
+    if workspace.is_none() || report.truncated || changed {
+        report.compatibility.unknown_package("workspace_manifests");
+    }
     if !report.blockers.is_empty() || report.truncated {
         report.assessment = "blocked";
     }
@@ -396,12 +424,56 @@ fn inspect_imported_lock(
         .ok()
         .and_then(|text| ImportedNpmLockfile::from_json(text).ok())
     else {
+        report
+            .compatibility
+            .unknown_package("imported_selected_graph");
         report.block("LOCKFILE_INVALID", &lock_path);
         return;
     };
+    let selected = lock.graph().ok().and_then(|graph| {
+        let paths = graph
+            .selected_paths(
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                crate::online::current_libc(),
+            )
+            .ok()?;
+        for path in paths {
+            let package = &graph.packages[&path];
+            let platform = tapid_core::PackagePlatform {
+                os: package.os.clone(),
+                cpu: package.cpu.clone(),
+                libc: package.libc.clone(),
+            }
+            .selected_context(
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                crate::online::current_libc(),
+            )
+            .ok()?;
+            let key = tapid_lockfile::LockfilePackageKey::new(
+                package.registry.clone(),
+                package.name.clone(),
+                package.version.clone(),
+                &graph.peer_context(&path),
+                &platform,
+            );
+            report.compatibility.selected_package(
+                &key.to_string(),
+                &crate::compatibility::registry_node_engine(&package.node_engine),
+                "imported_lock",
+            );
+        }
+        Some(())
+    });
+    if selected.is_none() {
+        report
+            .compatibility
+            .unknown_package("imported_selected_graph");
+    }
     report
         .checks_not_performed
-        .push("imported_npm_registry_routing_and_platform_selection");
+        .push("imported_npm_registry_routing");
     report
         .checks_not_performed
         .push("imported_npm_ancestor_installation_layout");

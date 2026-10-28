@@ -441,6 +441,15 @@ pub(super) fn graph(input: &Value) -> Result<ImportedNpmGraph, NpmImportError> {
         packages.insert(
             path.clone(),
             ImportedNpmPackage {
+                node_engine: match entry.get("engines") {
+                    None => crate::LockedNodeEngine::Unknown,
+                    Some(Value::Object(fields)) => match fields.get("node") {
+                        None => crate::LockedNodeEngine::NotDeclared,
+                        Some(Value::String(range)) => crate::LockedNodeEngine::Range(range.clone()),
+                        Some(_) => crate::LockedNodeEngine::MalformedNode,
+                    },
+                    Some(_) => crate::LockedNodeEngine::MalformedEngines,
+                },
                 path: path.clone(),
                 name,
                 version,
@@ -825,6 +834,7 @@ fn validate_representable(graph: &ImportedNpmGraph) -> Result<(), NpmImportError
         let signature = (
             &package.resolved,
             &package.integrity,
+            &package.node_engine,
             edges,
             &package.os,
             &package.cpu,
