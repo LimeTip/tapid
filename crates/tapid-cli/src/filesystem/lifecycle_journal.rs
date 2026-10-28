@@ -12,6 +12,8 @@ const MAX_JOURNAL_BYTES: u64 = 96 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<TransactionKind>,
     #[serde(default = "default_manifest_path")]
     manifest_path: String,
     owner: String,
@@ -25,6 +27,11 @@ struct Record {
     store_root: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberActivation>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
+enum TransactionKind {
+    Activation,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -152,7 +159,8 @@ impl LifecycleJournal {
         let marker_existed = exists(project.join(".tapid-managed"))?;
         let node_modules_existed = exists(project.join("node_modules"))?;
         let record = Record {
-            version: 2,
+            version: 4,
+            kind: Some(TransactionKind::Activation),
             manifest_path: relative_manifest_path(project, manifest_path)?,
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -199,7 +207,7 @@ impl LifecycleJournal {
         members.sort_by(|a, b| a.path.cmp(&b.path));
         member_paths(&self.project, &members)?;
         if !members.is_empty() {
-            self.record.version = 3;
+            self.record.version = self.record.version.max(3);
             self.record.members = members;
             write_record(&self.project, &self.record)?;
         }
@@ -352,7 +360,12 @@ pub(crate) fn recover(
         fs::read(&path).map_err(|error| format!("cannot read lifecycle journal: {error}"))?;
     let record: Record = serde_json::from_slice(&bytes)
         .map_err(|error| format!("refusing to recover a malformed lifecycle journal: {error}"))?;
-    if !matches!(record.version, 1..=3)
+    let supported_kind = match record.version {
+        1..=3 => record.kind.is_none(),
+        4 => record.kind == Some(TransactionKind::Activation),
+        _ => false,
+    };
+    if !supported_kind
         || (record.version == 1 && record.manifest_path != "package.json")
         || !valid_owner(&record.owner)
         || stale_owner.is_some_and(|owner| record.owner != owner)
@@ -636,6 +649,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn activation_journal_records_explicit_transaction_kind() {
+        let project = tapid_test_support::TempProject::new("activation-journal-kind").unwrap();
+        project.write("package.json", b"{}").unwrap();
+        let mut journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"{}",
+            None,
+        )
+        .unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.path().join(JOURNAL)).unwrap()).unwrap();
+        assert_eq!(record["version"], 4);
+        assert_eq!(record["kind"], "Activation");
+        assert!(!journal.settle().unwrap());
+        assert!(!project.path().join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn activation_recovery_rejects_missing_or_unsupported_transaction_kind_before_mutation() {
+        let project = tapid_test_support::TempProject::new("journal-kind-rejection").unwrap();
+        project.write("package.json", b"current manifest").unwrap();
+        project.write("tapid.lock", b"current lock").unwrap();
+        project
+            .write("node_modules/sentinel", b"running application")
+            .unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"old manifest",
+            Some(b"old lock"),
+        )
+        .unwrap();
+        // Leave the journal as an interrupted transaction without running Drop settlement.
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for (version, kind) in [
+            (4, None),
+            (4, Some("Metadata")),
+            (4, Some("Unknown")),
+            (3, Some("Activation")),
+            (5, Some("Activation")),
+        ] {
+            let mut record = original.clone();
+            record["version"] = serde_json::json!(version);
+            if let Some(kind) = kind {
+                record["kind"] = serde_json::json!(kind);
+            } else {
+                record.as_object_mut().unwrap().remove("kind");
+            }
+            fs::write(&path, record.to_string()).unwrap();
+            assert!(
+                recover(project.path(), Some("123-deadbeef\n")).is_err(),
+                "version {version}, kind {kind:?}"
+            );
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                b"current manifest"
+            );
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                b"current lock"
+            );
+            assert_eq!(
+                fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+                b"running application"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_member_recovery_paths_fail_before_mutation() {
         let project = tapid_test_support::TempProject::new("journal-member-paths").unwrap();
         project.write("package.json", b"current manifest").unwrap();
@@ -663,6 +751,7 @@ mod tests {
         ] {
             let mut record = original.clone();
             record["version"] = serde_json::json!(3);
+            record.as_object_mut().unwrap().remove("kind");
             record["members"] = serde_json::Value::Array(paths.iter().map(|path| serde_json::json!({"path":path,"marker_existed":false,"node_modules_existed":false})).collect());
             fs::write(&path, record.to_string()).unwrap();
             assert!(recover(project.path(), Some(owner)).is_err(), "{paths:?}");
@@ -699,6 +788,7 @@ mod tests {
         let mut record: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         record["version"] = serde_json::json!(3);
+        record.as_object_mut().unwrap().remove("kind");
         record["members"] = serde_json::json!([{"path":"member","marker_existed":false,"node_modules_existed":false}]);
         fs::write(&path, record.to_string()).unwrap();
         assert!(recover(project.path(), Some(owner)).is_err());
@@ -794,6 +884,7 @@ mod tests {
         let backup = project.join(JOURNAL).with_extension("lifecycle.bak");
         let record = Record {
             version: 1,
+            kind: None,
             manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -834,6 +925,7 @@ mod tests {
         fs::write(project.join("package.json"), b"committed manifest").unwrap();
         let prepared = Record {
             version: 1,
+            kind: None,
             manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -848,6 +940,7 @@ mod tests {
         };
         let committed = Record {
             version: prepared.version,
+            kind: prepared.kind,
             manifest_path: prepared.manifest_path.clone(),
             owner: prepared.owner.clone(),
             state: State::Committed,
@@ -891,6 +984,7 @@ mod tests {
         fs::write(project.join("package.json"), committed_manifest).unwrap();
         let prepared = Record {
             version: 1,
+            kind: None,
             manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -905,6 +999,7 @@ mod tests {
         };
         let mut committed = Record {
             version: prepared.version,
+            kind: prepared.kind,
             manifest_path: prepared.manifest_path.clone(),
             owner: prepared.owner.clone(),
             state: State::Committed,

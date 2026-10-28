@@ -21,6 +21,8 @@ mod command_support;
 mod explain_tests;
 #[path = "cli_cases/lifecycle_reporting.rs"]
 mod lifecycle_reporting_tests;
+#[path = "cli_cases/lockfile_only.rs"]
+mod lockfile_only_tests;
 #[path = "cli_cases/run_permissions.rs"]
 mod run_permission_tests;
 

@@ -27,6 +27,11 @@ The generated release installers select archives through `https://tapid.dev/rele
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
+Installation transactions write lifecycle journal version 4 with an explicit
+`Activation` kind. Recovery still accepts legacy versions 1–3 with their original
+activation semantics. Older clients reject the new journals; finish interrupted
+transactions with a compatible client before downgrading.
+
 ## Commands
 
 ```text
