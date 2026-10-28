@@ -147,8 +147,14 @@ mod tests {
                 &input,
                 &plan,
                 &tapid_linker::WorkspaceLinkPlan::default(),
-                Some("local"),
-                "tool",
+                selection::select_manifest_command(
+                    &input,
+                    &manifest,
+                    Some("local"),
+                    "tool",
+                    crate::application::replay::current_platform(),
+                )
+                .unwrap(),
             )
         };
         assert!(
@@ -173,8 +179,14 @@ mod tests {
                 &input,
                 &foreign_plan,
                 &tapid_linker::WorkspaceLinkPlan::default(),
-                Some("local"),
-                "tool",
+                selection::select_manifest_command(
+                    &input,
+                    &manifest,
+                    Some("local"),
+                    "tool",
+                    crate::application::replay::current_platform(),
+                )
+                .unwrap(),
             )
             .is_err()
         );

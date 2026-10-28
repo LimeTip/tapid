@@ -310,6 +310,30 @@ pub(crate) struct ActivationLock {
     pub(crate) recovered: bool,
 }
 
+/// Inspect interruption markers without creating coordination state or recovering it.
+pub(crate) fn validate_no_interrupted_state(project: &Path) -> Result<(), OperationalError> {
+    let pending = fs::read_dir(project)
+        .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
+        .iter()
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".tapid-lifecycle-journal")
+                || name.starts_with(".tapid-install-stage-")
+                || name.starts_with(".tapid-node-modules-old-")
+                || name.starts_with(".tapid-managed-old-")
+        });
+    if pending {
+        return Err(OperationalError::new(
+            ErrorKind::Recovery,
+            "operation refuses interrupted install state; finish recovery with tapid install before retrying",
+        ));
+    }
+    Ok(())
+}
+
 impl ActivationLock {
     pub(crate) fn acquire(project: &Path) -> Result<Self, OperationalError> {
         Self::acquire_mode(project, true)
@@ -377,25 +401,7 @@ impl ActivationLock {
             ));
         }
         if !recover {
-            let pending = fs::read_dir(project)
-                .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
-                .iter()
-                .any(|entry| {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    name.starts_with(".tapid-lifecycle-journal")
-                        || name.starts_with(".tapid-install-stage-")
-                        || name.starts_with(".tapid-node-modules-old-")
-                        || name.starts_with(".tapid-managed-old-")
-                });
-            if pending {
-                return Err(OperationalError::new(
-                    ErrorKind::Recovery,
-                    "operation refuses interrupted install state; finish recovery with tapid install before retrying",
-                ));
-            }
+            validate_no_interrupted_state(project)?;
             return Ok(Self {
                 file,
                 owner: previous_owner,

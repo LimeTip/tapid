@@ -1,4 +1,4 @@
-use super::selection::{SelectedCommand, SelectionError, select_command};
+use super::selection::{SelectedCommand, SelectionError};
 use std::path::{Path, PathBuf};
 use tapid_linker::{MaterializationPlan, NamedLayoutInput, WorkspaceLinkPlan};
 
@@ -19,17 +19,10 @@ pub(super) fn bind_live_command(
     input: &NamedLayoutInput,
     plan: &MaterializationPlan,
     links: &WorkspaceLinkPlan,
-    package: Option<&str>,
-    command: &str,
+    selection: SelectedCommand,
 ) -> Result<LiveCommand, SelectionError> {
     crate::filesystem::activation::validate_managed_node_modules(project)
         .map_err(SelectionError::InconsistentInstallation)?;
-    let selection = select_command(
-        input,
-        package,
-        command,
-        crate::application::replay::current_platform(),
-    )?;
     crate::filesystem::tree::verification::verify_materialized_layout(
         project,
         workspace_root,

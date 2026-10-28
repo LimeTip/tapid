@@ -17,6 +17,8 @@ pub(super) struct SelectedCommand {
 
 #[derive(Debug)]
 pub(super) enum SelectionError {
+    InvalidProjectSelection(String),
+    ProjectEvidence(crate::application::outcome::OperationalError),
     InvalidPackageSelection(String),
     InvalidCommand,
     MissingCommand,
@@ -28,6 +30,8 @@ pub(super) enum SelectionError {
 impl std::fmt::Display for SelectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidProjectSelection(error) => f.write_str(error),
+            Self::ProjectEvidence(error) => error.fmt(f),
             Self::InvalidPackageSelection(name) => {
                 write!(f, "not an installed direct dependency binding: {name}")
             }
@@ -47,6 +51,58 @@ impl std::fmt::Display for SelectionError {
 }
 
 impl std::error::Error for SelectionError {}
+
+/// Restrict command eligibility to one selected manifest while retaining every
+/// instance and edge for the caller's complete-layout verification.
+#[allow(dead_code)] // Used by live binding; CLI composition remains pending.
+pub(super) fn select_manifest_command(
+    input: &NamedLayoutInput,
+    manifest: &PackageManifest,
+    package: Option<&str>,
+    command: &str,
+    platform: Platform,
+) -> Result<SelectedCommand, SelectionError> {
+    let names = |map: &std::collections::BTreeMap<String, String>| {
+        map.keys()
+            .map(|name| {
+                crate::online::dep_parts(name)
+                    .map(|(_, name)| name)
+                    .map_err(SelectionError::InconsistentInstallation)
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+    };
+    let mut required = names(manifest.dependencies())?;
+    required.extend(names(manifest.dev_dependencies())?);
+    let mut eligible = required.clone();
+    eligible.extend(names(manifest.optional_dependencies())?);
+    if let Some(package) = package
+        && !eligible.iter().any(|name| name.as_str() == package)
+    {
+        return Err(SelectionError::InvalidPackageSelection(package.into()));
+    }
+    for name in required {
+        if !input
+            .root_dependencies
+            .iter()
+            .any(|binding| binding.name == name)
+        {
+            return Err(SelectionError::InconsistentInstallation(format!(
+                "declared dependency {name} has no installed binding"
+            )));
+        }
+    }
+    let mut scoped = input.clone();
+    scoped
+        .root_dependencies
+        .retain(|binding| eligible.contains(&binding.name));
+    // Native workspace reconstruction may repeat a binding shared by members.
+    // Only identical bindings collapse; conflicting identities remain errors.
+    scoped
+        .root_dependencies
+        .sort_by(|a, b| a.name.cmp(&b.name).then(a.child.cmp(&b.child)));
+    scoped.root_dependencies.dedup();
+    select_command(&scoped, package, command, platform)
+}
 
 /// Only root bindings are eligible; instances reachable solely by dependency
 /// edges are deliberately excluded. Each binding is planned independently so
@@ -205,6 +261,51 @@ mod tests {
             dependency_edges: vec![],
         };
         (project, input)
+    }
+
+    #[test]
+    fn manifest_scope_excludes_other_members_and_preserves_aliases_and_optional_absence() {
+        let (_project, input) = fixture();
+        let root = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"alias":"npm:actual@1.0.0"},"optionalDependencies":{"absent":"*"}}"#,
+        ).unwrap();
+        let member = PackageManifest::parse(
+            r#"{"name":"member","version":"1.0.0","devDependencies":{"second":"npm:actual@1.0.0"}}"#,
+        ).unwrap();
+        let root_command =
+            select_manifest_command(&input, &root, None, "tool", Platform::Unix).unwrap();
+        assert_eq!(root_command.install_name.as_str(), "alias");
+        let mut shared = input.clone();
+        shared
+            .root_dependencies
+            .push(input.root_dependencies[1].clone());
+        assert_eq!(
+            select_manifest_command(&shared, &root, None, "tool", Platform::Unix).unwrap(),
+            root_command,
+        );
+        let both = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"alias":"npm:actual@1.0.0","second":"npm:actual@1.0.0"}}"#,
+        ).unwrap();
+        assert!(matches!(
+            select_manifest_command(&input, &both, None, "tool", Platform::Unix),
+            Err(SelectionError::Ambiguous(names)) if names == ["alias", "second"]
+        ));
+
+        let member_command =
+            select_manifest_command(&input, &member, None, "tool", Platform::Unix).unwrap();
+        assert_eq!(member_command.install_name.as_str(), "second");
+        assert!(matches!(
+            select_manifest_command(&input, &member, Some("alias"), "tool", Platform::Unix),
+            Err(SelectionError::InvalidPackageSelection(_))
+        ));
+        let mut missing = input.clone();
+        missing
+            .root_dependencies
+            .retain(|binding| binding.name.as_str() != "alias");
+        assert!(matches!(
+            select_manifest_command(&missing, &root, None, "tool", Platform::Unix),
+            Err(SelectionError::InconsistentInstallation(_))
+        ));
     }
 
     #[test]

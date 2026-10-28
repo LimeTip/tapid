@@ -61,7 +61,15 @@ impl ProjectEvidence {
     /// Verify native-lock materialization, including all owned member layouts.
     /// This authenticates content only; lifecycle approval and execution policy
     /// must be established separately before any checked launch.
-    pub(super) fn verify_native_layout(&self) -> Result<(), OperationalError> {
+    pub(super) fn verify_native_layout(
+        &self,
+    ) -> Result<
+        (
+            tapid_linker::NamedLayoutInput,
+            crate::online::WorkspaceInstallPlan,
+        ),
+        OperationalError,
+    > {
         self.revalidate()?;
         let (input, _) =
             super::installed_input(&self.lock, self.workspace.root(), &self.store, &self.config)?;
@@ -115,7 +123,134 @@ impl ProjectEvidence {
         for (root, member) in &workspace_plan.members {
             verify(root, &member.input, &member.links)?;
         }
-        self.revalidate()
+        self.revalidate()?;
+        Ok((input, workspace_plan))
+    }
+
+    /// Compose exact root/member selection with complete native-layout evidence.
+    /// Retaining `self` coordinates observations; this still grants no launch
+    /// authority and does not establish lifecycle approval or runtime identity.
+    pub(super) fn select_native_command(
+        &self,
+        member: Option<&str>,
+        package: Option<&str>,
+        command: &str,
+    ) -> Result<super::live::LiveCommand, super::selection::SelectionError> {
+        use super::selection::SelectionError;
+        let manifest = self
+            .workspace
+            .select(member)
+            .map_err(SelectionError::InvalidProjectSelection)?;
+        let (input, workspace_plan) = self
+            .verify_native_layout()
+            .map_err(SelectionError::ProjectEvidence)?;
+        // Native installation places registry/copied bindings at the root,
+        // including member dependencies. Eligibility uses the selected manifest;
+        // physical placement and verification continue to use the complete plan.
+        let plan = tapid_linker::plan_workspace_layout(
+            tapid_linker::ManagedRoot::new(&self.root).map_err(SelectionError::InvalidMapping)?,
+            input.clone(),
+            &workspace_plan.links,
+            crate::application::replay::current_platform(),
+        )
+        .map_err(SelectionError::InvalidMapping)?;
+        let bindings = if let Some(member) = member {
+            self.lock
+                .workspace_packages_typed()
+                .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?
+                .into_iter()
+                .find(|(key, _)| {
+                    key.source
+                        .workspace()
+                        .is_some_and(|source| source.name() == member)
+                })
+                .ok_or_else(|| {
+                    SelectionError::InconsistentInstallation(
+                        "missing selected member receipt".into(),
+                    )
+                })?
+                .1
+                .dependencies()
+                .clone()
+        } else if !self.lock.root_bindings().is_empty() {
+            self.lock.root_bindings().clone()
+        } else {
+            // Legacy roots have no alias bindings. Existing replay validation
+            // has already rejected forms without one exact reconstruction.
+            let mut keys = self
+                .lock
+                .packages_typed()
+                .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>();
+            keys.extend(
+                self.lock
+                    .workspace_packages_typed()
+                    .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?
+                    .into_iter()
+                    .map(|(key, _)| key),
+            );
+            let roots = crate::application::replay::replay_root_keys_with_config(
+                &self.lock,
+                self.workspace.root(),
+                &keys,
+                &self.config,
+            )
+            .map_err(SelectionError::InconsistentInstallation)?;
+            roots
+                .iter()
+                .map(|target| {
+                    let key = target
+                        .parse::<tapid_lockfile::LockfilePackageKey>()
+                        .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?;
+                    Ok((key.name.to_string(), target.clone()))
+                })
+                .collect::<Result<BTreeMap<_, _>, SelectionError>>()?
+        };
+        let mut allowed = std::collections::BTreeSet::new();
+        for (name, target) in bindings {
+            let key = target
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?;
+            if let Some(source) = key.source.package_source() {
+                let owner = tapid_linker::InstanceKey {
+                    id: tapid_core::PackageInstanceId::from_source(
+                        source,
+                        key.name.clone(),
+                        key.version.clone(),
+                    ),
+                    peer_context: key
+                        .peer_context()
+                        .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?,
+                    platform_context: key
+                        .platform_context()
+                        .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?,
+                };
+                allowed.insert((name, owner));
+            }
+        }
+        let mut eligible_input = input.clone();
+        eligible_input
+            .root_dependencies
+            .retain(|binding| allowed.contains(&(binding.name.to_string(), binding.child.clone())));
+        let selection = super::selection::select_manifest_command(
+            &eligible_input,
+            manifest,
+            package,
+            command,
+            crate::application::replay::current_platform(),
+        )?;
+        let selected = super::live::bind_live_command(
+            &self.root,
+            &self.root,
+            &input,
+            &plan,
+            &workspace_plan.links,
+            selection,
+        )?;
+        self.revalidate().map_err(SelectionError::ProjectEvidence)?;
+        Ok(selected)
     }
 
     pub(super) fn observe(
@@ -162,11 +297,18 @@ impl ProjectEvidence {
             .collect::<Result<Vec<_>, _>>()?;
         members.sort();
         for member in members {
-            if std::fs::symlink_metadata(member.join(".tapid-managed")).is_ok() {
-                crate::filesystem::lifecycle_journal::validate_member_root(&root, &member)
-                    .map_err(|e| failure(ErrorKind::Project, e))?;
+            crate::filesystem::lifecycle_journal::validate_member_root(&root, &member)
+                .map_err(|e| failure(ErrorKind::Project, e))?;
+            crate::filesystem::activation::validate_no_interrupted_state(&member)?;
+            // Root-managed member activation uses the root lock and journal.
+            // A separately installed member may also have its own lock;
+            // retain it if present, but never initialize one for inspection.
+            let path = member.join(".tapid-activation.lock");
+            let observed = observe_file(&path, 4096, true)?;
+            if observed.is_some() {
                 activation.push(ActivationLock::acquire_existing(&member)?);
             }
+            observations.insert(path, observed);
         }
         let config = observations[&root.join("tapid.toml")]
             .as_deref()
@@ -239,6 +381,15 @@ impl ProjectEvidence {
                 ));
             }
         }
+        for member in self.workspace.members() {
+            let root = member
+                .path()
+                .parent()
+                .ok_or_else(|| failure(ErrorKind::ProjectChanged, "member has no parent"))?;
+            crate::filesystem::lifecycle_journal::validate_member_root(&self.root, root)
+                .map_err(|e| failure(ErrorKind::ProjectChanged, e))?;
+            crate::filesystem::activation::validate_no_interrupted_state(root)?;
+        }
         let current = Workspace::discover_bounded(&self.root, MAX_MEMBERS, MAX_EXPANSION)
             .map_err(|e| failure(ErrorKind::ProjectChanged, e))?;
         if current
@@ -268,7 +419,7 @@ mod tests {
     use tapid_test_support::{TempHome, TempProject};
 
     #[test]
-    fn workspace_observation_requires_existing_member_coordination_and_rechecks_member_bytes() {
+    fn root_coordinated_workspace_observation_never_creates_member_lock_and_rechecks_state() {
         let project = TempProject::new("exec-member-observation").unwrap();
         let home = TempHome::new("exec-member-store").unwrap();
         let manifest = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
@@ -308,11 +459,9 @@ mod tests {
         project
             .write("packages/member/.tapid-managed", b"tapid-managed-v1\n")
             .unwrap();
-        assert!(ProjectEvidence::observe(project.path(), &store).is_err());
-        assert!(!member.join(".tapid-activation.lock").exists());
-        drop(ActivationLock::acquire(&member).unwrap());
         let evidence = ProjectEvidence::observe(project.path(), &store).unwrap();
-        assert!(ActivationLock::acquire_existing(&member).is_err());
+        assert!(!member.join(".tapid-activation.lock").exists());
+        assert!(ActivationLock::acquire_existing(project.path()).is_err());
         let (input, trees) = super::super::installed_input(
             &evidence.lock,
             evidence.workspace.root(),
@@ -374,6 +523,12 @@ mod tests {
         assert!(evidence.verify_native_layout().is_err());
         std::fs::remove_file(member.join("node_modules/unplanned.js")).unwrap();
         evidence.verify_native_layout().unwrap();
+        // An independent member operation starting after observation is visible.
+        drop(ActivationLock::acquire(&member).unwrap());
+        assert!(evidence.revalidate().is_err());
+        drop(evidence);
+        let evidence = ProjectEvidence::observe(project.path(), &store).unwrap();
+        assert!(ActivationLock::acquire_existing(&member).is_err());
         project
             .write(
                 "packages/member/package.json",
@@ -411,24 +566,61 @@ mod tests {
             .write("runtime.js", b"module.exports = 1;\n")
             .unwrap();
         let digest = tapid_archive::canonical_tree_digest(source.path()).unwrap();
+        let member_source = TempProject::new("exec-member-reference").unwrap();
+        member_source
+            .write(
+                "package.json",
+                br#"{"name":"other","version":"1.0.0","bin":{"member-tool":"cli.js"}}"#,
+            )
+            .unwrap();
+        member_source
+            .write("cli.js", b"console.log('member');\n")
+            .unwrap();
+        let member_digest = tapid_archive::canonical_tree_digest(member_source.path()).unwrap();
         let store = tapid_store::Store::new(home.path().join("store"));
         let mut transaction = store.transaction();
         transaction
             .stage_verified_tree(&digest.parse().unwrap(), source.path())
             .unwrap();
+        transaction
+            .stage_verified_tree(&member_digest.parse().unwrap(), member_source.path())
+            .unwrap();
         transaction.publish().unwrap().commit().unwrap();
         let manifest =
-            br#"{"name":"root","version":"1.0.0","dependencies":{"alias":"npm:actual@1.0.0"}}"#;
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"alias":"npm:actual@1.0.0"},"optionalDependencies":{"second":"npm:other@1.0.0"}}"#;
         project.write("package.json", manifest).unwrap();
+        project.write("packages/member/package.json", br#"{"name":"member","version":"1.0.0","devDependencies":{"second":"npm:other@1.0.0"}}"#).unwrap();
+        let workspace =
+            Workspace::discover_bounded(project.path(), MAX_MEMBERS, MAX_EXPANSION).unwrap();
+        let local = crate::online::workspace_materialization_from_discovered(
+            project.path(),
+            &RegistryConfig::default(),
+            None,
+            &workspace,
+        )
+        .unwrap();
         let package = tapid_lockfile::LockedPackage::new_with_provenance(
             "https://registry.npmjs.org", "actual", "1.0.0",
             "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", &digest,
             tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
         ).unwrap();
         let key = package.key();
+        let member_package = tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org", "other", "1.0.0",
+            "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", &member_digest,
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        ).unwrap();
+        let member_key = member_package.key();
         let mut lock = Lockfile::new(&crate::filesystem::atomic::digest_bytes(manifest)).unwrap();
         lock.insert_package(package).unwrap();
-        lock.set_roots([key.clone()]).unwrap();
+        lock.insert_package(member_package).unwrap();
+        let mut roots = vec![key.clone()];
+        for mut member in local.locked.clone() {
+            member.add_alias_dependency("second", &member_key).unwrap();
+            roots.push(member.key());
+            lock.insert_workspace_package(member).unwrap();
+        }
+        lock.set_roots(roots).unwrap();
         lock.set_root_bindings(BTreeMap::from([("alias".into(), key)]))
             .unwrap();
         project
@@ -443,41 +635,91 @@ mod tests {
             &evidence.config,
         )
         .unwrap();
-        let plan = tapid_linker::plan_named_layout(
-            tapid_linker::ManagedRoot::new(project.path()).unwrap(),
+        let plan = tapid_linker::plan_workspace_layout(
+            tapid_linker::ManagedRoot::new(&evidence.root).unwrap(),
             input.clone(),
+            &local.links,
             crate::application::replay::current_platform(),
         )
         .unwrap();
-        crate::filesystem::tree::materialize_stage(
-            project.path(),
+        let stage = evidence.root.join(".fixture-stage");
+        crate::filesystem::tree::materialize_stage_with_workspace_links(
+            &stage,
             &plan,
             &input.instances,
             &trees,
             false,
+            &local.links,
+            &evidence.root,
+            |_, _| {},
         )
         .unwrap();
+        std::fs::rename(
+            stage.join("node_modules"),
+            evidence.root.join("node_modules"),
+        )
+        .unwrap();
+        std::fs::remove_dir(stage).unwrap();
         project
             .write(".tapid-managed", b"tapid-managed-v1\n")
             .unwrap();
         evidence.verify_native_layout().unwrap();
         let bind = || {
             super::super::bind_live_command(
-                project.path(),
-                project.path(),
+                &evidence.root,
+                &evidence.root,
                 &input,
                 &plan,
-                &tapid_linker::WorkspaceLinkPlan::default(),
-                Some("alias"),
-                "tool",
+                &local.links,
+                super::super::selection::select_manifest_command(
+                    &input,
+                    evidence.workspace.root(),
+                    Some("alias"),
+                    "tool",
+                    crate::application::replay::current_platform(),
+                )
+                .unwrap(),
             )
         };
-        let selected = bind().unwrap();
+        let selected = evidence
+            .select_native_command(None, Some("alias"), "tool")
+            .unwrap();
+        assert!(matches!(
+            evidence.select_native_command(Some("unknown"), Some("alias"), "tool"),
+            Err(super::super::selection::SelectionError::InvalidProjectSelection(_))
+        ));
         assert_eq!(
             selected.entry,
-            project.path().join("node_modules/alias/cli.js")
+            evidence.root.join("node_modules/alias/cli.js")
         );
         assert_eq!(selected.selection.owner.id.name.as_str(), "actual");
+        let member_command = evidence
+            .select_native_command(Some("member"), None, "member-tool")
+            .unwrap();
+        assert_eq!(member_command.selection.install_name.as_str(), "second");
+        assert!(matches!(
+            evidence.select_native_command(None, None, "member-tool"),
+            Err(super::super::selection::SelectionError::MissingCommand)
+        ));
+
+        assert_eq!(
+            member_command.entry,
+            evidence.root.join("node_modules/second/cli.js")
+        );
+        assert!(matches!(
+            evidence.select_native_command(Some("member"), Some("alias"), "tool"),
+            Err(super::super::selection::SelectionError::InvalidPackageSelection(_))
+        ));
+        assert!(matches!(
+            evidence.select_native_command(None, Some("second"), "member-tool"),
+            Err(super::super::selection::SelectionError::InvalidPackageSelection(_))
+        ));
+        assert!(
+            !evidence
+                .root
+                .join("packages/member/.tapid-activation.lock")
+                .exists()
+        );
         project
             .write(
                 "node_modules/alias/runtime.js",
