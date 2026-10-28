@@ -7,7 +7,9 @@ use crate::application::outcome::{
 };
 
 mod exclusions;
+mod policy;
 use exclusions::{candidate_exclusions, with_exclusions};
+pub(super) use policy::compile_override_rules;
 
 fn resolution_error(
     error: ResolveError,
@@ -210,17 +212,7 @@ where
 {
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
-    for mut package in packages {
-        if package.registry.to_string() == NPM {
-            for (name, requirement) in overrides {
-                if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-                if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-            }
-        }
+    for package in packages {
         let registry = package.registry.to_string();
         let key = (
             registry.clone(),
@@ -243,6 +235,19 @@ where
             .or_default()
             .push(key);
     }
+    // Admission uses the effective range, but metadata retains the declaration.
+    // Nested policy stays disabled until admission can use incoming bindings.
+    let optional_requirement =
+        |registry: &PackageSource, name: &PackageName, original: &Requirement| {
+            if registry.as_str() == NPM
+                && let Some(replacement) = overrides.get(name)
+            {
+                return overridden_requirement(name, &original.raw, replacement)
+                    .parse::<Requirement>()
+                    .map_err(|error| error.to_string());
+            }
+            Ok(original.clone())
+        };
     let candidate_matches = |registry: &PackageSource,
                              name: &PackageName,
                              requirement: &Requirement| {
@@ -275,7 +280,11 @@ where
         for (name, requirement) in &record.optional_dependencies {
             let actual_name = requirement.package_name(name);
             let target_registry = registry_for_dependency(&package.registry, actual_name)?;
-            if candidate_matches(&target_registry, actual_name, requirement) {
+            if candidate_matches(
+                &target_registry,
+                actual_name,
+                &optional_requirement(&package.registry, name, requirement)?,
+            ) {
                 package_metadata
                     .dependencies
                     .insert(name.clone(), requirement.clone());
@@ -337,7 +346,11 @@ where
                 if inserted_names
                     .get(&target_registry.to_string())
                     .is_some_and(|names| names.contains(actual_name))
-                    && candidate_matches(&target_registry, actual_name, requirement)
+                    && candidate_matches(
+                        &target_registry,
+                        actual_name,
+                        &optional_requirement(&parent_registry, name, requirement)?,
+                    )
                 {
                     parent
                         .dependencies
@@ -548,6 +561,20 @@ where
     R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
     F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
 {
+    let policy = tapid_resolver::OverridePolicy::new_for_registry(
+        overrides
+            .iter()
+            .map(|(name, replacement)| tapid_resolver::OverrideRule {
+                id: crate::application::outcome::Declaration::pointer("overrides", name.as_str()),
+                parent: None,
+                dependency: name.clone(),
+                replacement: replacement.clone(),
+            })
+            .collect(),
+        NPM.parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+    )
+    .map_err(OperationalError::from)?;
     let mut roots = roots.to_vec();
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
@@ -599,12 +626,13 @@ where
         #[cfg(test)]
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
-        match tapid_resolver::resolve_graph_with_preferences(
+        match tapid_resolver::resolve_graph_with_policy(
             &roots,
             &metadata,
             ResolutionOptions::default(),
             |parent, dependency| registry_for_dependency(parent, dependency),
             &preferred,
+            &policy,
         ) {
             Ok(resolution) => {
                 let mut optional_frontier = BTreeSet::<(PackageSource, PackageName)>::new();
@@ -854,50 +882,28 @@ where
 pub(crate) fn manifest_overrides(
     manifest: &PackageManifest,
 ) -> Result<BTreeMap<PackageName, Requirement>, String> {
-    let mut overrides = BTreeMap::new();
-    for (name, range) in manifest.overrides() {
-        let tapid_manifest::OverrideDeclaration::Replacement(range) = range else {
+    // Until optional admission is binding-aware, do not activate targeted rules.
+    for (name, declaration) in manifest.overrides() {
+        if matches!(declaration, tapid_manifest::OverrideDeclaration::Nested(_)) {
             return Err(format!(
                 "unsupported nested override selector '{name}': targeted resolution is not supported"
             ));
-        };
-        if name.starts_with("jsr:") {
-            return Err(format!(
-                "unsupported override target '{name}': npm registry package names only are supported"
-            ));
         }
-        let selector_name = name.strip_prefix("npm:").unwrap_or(name);
-        let has_version_selector = if let Some(scoped) = selector_name.strip_prefix('@') {
-            scoped.contains('@')
-        } else {
-            selector_name.contains('@')
-        };
-        if has_version_selector {
-            return Err(format!(
-                "unsupported override selector '{name}': version-qualified selectors are not supported"
-            ));
-        }
-        let (registry, package) = dep_parts(name)?;
-        if registry.to_string() != NPM {
-            return Err(format!(
-                "unsupported override target '{name}': npm registry package names only are supported"
-            ));
-        }
-        let requirement = range
-            .parse::<Requirement>()
-            .map_err(|error| format!("invalid override '{name}' range '{range}': {error}"))?;
-        if requirement.is_alias() {
-            return Err(format!(
-                "unsupported alias override '{name}': override values must be version ranges"
-            ));
-        }
-        match overrides.insert(package.clone(), requirement.clone()) {
-            Some(previous) if previous != requirement => {
-                return Err(format!("conflicting override declarations for '{package}'"));
+    }
+    let rules = compile_override_rules(manifest)?;
+    let mut overrides = BTreeMap::new();
+    for rule in &rules {
+        match overrides.insert(rule.dependency.clone(), rule.replacement.clone()) {
+            Some(previous) if previous != rule.replacement => {
+                return Err(format!(
+                    "conflicting override declarations for '{}'",
+                    rule.dependency
+                ));
             }
             _ => {}
         }
     }
+    tapid_resolver::OverridePolicy::new(rules).map_err(|error| error.to_string())?;
     Ok(overrides)
 }
 

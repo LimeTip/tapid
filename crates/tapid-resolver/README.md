@@ -46,6 +46,11 @@ Aliases retain their actual targets and routing uses the original target.
 Copied parents and copied child sources are excluded. Peer requirements remain
 unchanged. Existing resolution entry points use an empty policy.
 
+`OverridePolicy::new_for_registry` restricts matches to parents from one exact
+registry origin. The CLI uses this boundary while migrating its existing flat
+npm overrides to edge selection. Raw metadata retains original requirements;
+optional admission checks effective flat ranges before adding eligible edges.
+
 The existing traversal registers every reachable exact-package/local-binding
 context, including bindings discovered after expansion. Equivalent outgoing maps
 share the package; differing effective maps fail with `OverrideTopology`, even

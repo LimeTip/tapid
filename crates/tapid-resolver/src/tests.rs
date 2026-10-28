@@ -1681,3 +1681,43 @@ fn refreshed_alias_roots_keep_same_package_transitive_preferences() {
         );
     }
 }
+
+#[test]
+fn registry_scoped_override_policy_does_not_leak_to_other_origins() {
+    let source = "https://registry.npmjs.org";
+    let other = "https://other.example";
+    let policy = OverridePolicy::new_for_registry(
+        vec![override_rule("child", None, "child", "2")],
+        source.parse().unwrap(),
+    )
+    .unwrap();
+    let metadata = [source, other].map(|origin| {
+        registry(
+            origin,
+            vec![
+                package("parent", "1.0.0", &[("child", "1")]),
+                package("child", "1.0.0", &[]),
+                package("child", "2.0.0", &[]),
+            ],
+        )
+    });
+    let result = resolve_graph_with_policy(
+        &[dep(source, "parent", "1"), dep(other, "parent", "1")],
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+        &policy,
+    )
+    .unwrap();
+    for edge in result.dependencies {
+        assert_eq!(
+            edge.child.version.to_string(),
+            if edge.parent.registry.as_str() == source {
+                "2.0.0"
+            } else {
+                "1.0.0"
+            }
+        );
+    }
+}

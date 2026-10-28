@@ -567,8 +567,9 @@ fn root_override_replaces_a_transitive_dependency_requirement() {
     }));
     assert_eq!(
         records[&(NPM.into(), "next".into(), "1.0.0".into())].dependencies["postcss"],
-        "8.5.28"
+        "8.4.31"
     );
+    assert_eq!(resolution.override_matches.len(), 1);
 }
 
 #[test]
@@ -1576,6 +1577,147 @@ fn all_excluded_long_versions_have_bounded_human_summary() {
         assert_eq!(
             candidate["truncated_fields"],
             serde_json::json!(["version"])
+        );
+    }
+}
+
+#[test]
+fn compiled_manifest_policy_targets_only_the_selected_parent() {
+    let manifest = PackageManifest::parse(
+        r#"{"name":"root","version":"1.0.0","overrides":{"a@^1":{"child":"2"}}}"#,
+    )
+    .unwrap();
+    let policy =
+        tapid_resolver::OverridePolicy::new(resolution::compile_override_rules(&manifest).unwrap())
+            .unwrap();
+    let metadata = RegistryMetadata::normalize(
+        NPM.parse().unwrap(),
+        vec![
+            normalize_record(&named_record("a", "1.0.0", &[("child", "1")]))
+                .unwrap()
+                .metadata,
+            normalize_record(&named_record("b", "1.0.0", &[("child", "1")]))
+                .unwrap()
+                .metadata,
+            normalize_record(&named_record("child", "1.0.0", &[]))
+                .unwrap()
+                .metadata,
+            normalize_record(&named_record("child", "2.0.0", &[]))
+                .unwrap()
+                .metadata,
+        ],
+    )
+    .unwrap();
+    let roots = ["a", "b"].map(|name| {
+        Dependency::new(
+            NPM.parse().unwrap(),
+            name.parse().unwrap(),
+            "1".parse().unwrap(),
+        )
+    });
+    let result = tapid_resolver::resolve_graph_with_policy(
+        &roots,
+        &[metadata],
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+        &policy,
+    )
+    .unwrap();
+    let versions = result
+        .dependencies
+        .iter()
+        .map(|edge| (edge.parent.name.as_str(), edge.child.version.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(versions["a"], "2.0.0");
+    assert_eq!(versions["b"], "1.0.0");
+    assert_eq!(result.override_matches[0].rules, ["/overrides/a@^1/child"]);
+}
+
+#[test]
+fn compiled_manifest_policy_rejects_unsupported_active_forms() {
+    for declaration in [
+        r#"{"child":"latest"}"#,
+        r#"{"child":"$other"}"#,
+        r#"{"child":"npm:other@2"}"#,
+        r#"{"child":"file:other"}"#,
+        r#"{"child":""}"#,
+        r#"{"child@1":"2"}"#,
+        r#"{"parent":{"child@1":"2"}}"#,
+        r#"{"parent":{".":"2"}}"#,
+        r#"{"parent":{"child":{"grandchild":"2"}}}"#,
+        r#"{"parent@latest":{"child":"2"}}"#,
+        r#"{"jsr:parent":{"child":"2"}}"#,
+    ] {
+        let manifest = PackageManifest::parse(&format!(
+            r#"{{"name":"root","version":"1.0.0","overrides":{declaration}}}"#,
+        ))
+        .unwrap();
+        assert!(
+            resolution::compile_override_rules(&manifest).is_err(),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn compiled_manifest_policy_preserves_scoped_local_names_and_pointer_escaping() {
+    let manifest = PackageManifest::parse(
+        r#"{"name":"root","version":"1.0.0","overrides":{"@scope/local@^1":{"@scope/child":"2"}}}"#,
+    )
+    .unwrap();
+    let compiled =
+        tapid_resolver::OverridePolicy::new(resolution::compile_override_rules(&manifest).unwrap())
+            .unwrap();
+    let expected = tapid_resolver::OverridePolicy::new(vec![tapid_resolver::OverrideRule {
+        id: "/overrides/@scope~1local@^1/@scope~1child".into(),
+        parent: Some(("@scope/local".parse().unwrap(), Some("^1".parse().unwrap()))),
+        dependency: "@scope/child".parse().unwrap(),
+        replacement: "2".parse().unwrap(),
+    }])
+    .unwrap();
+    assert_eq!(compiled, expected);
+}
+
+#[test]
+fn flat_override_optional_admission_uses_effective_range_without_rewriting_metadata() {
+    for available in [false, true] {
+        let roots = [Dependency::new(
+            NPM.parse().unwrap(),
+            "parent".parse().unwrap(),
+            "1".parse().unwrap(),
+        )];
+        let overrides = BTreeMap::from([("local".parse().unwrap(), "2".parse().unwrap())]);
+        let (result, records, _) =
+            resolve_with_overrides(&roots, &overrides, |_, name| match name.as_str() {
+                "parent" => {
+                    let mut parent = named_record("parent", "1.0.0", &[]);
+                    parent
+                        .optional_dependencies
+                        .insert("local".into(), "npm:actual@1".into());
+                    Ok(vec![parent])
+                }
+                "actual" => {
+                    let mut candidates = vec![named_record("actual", "1.0.0", &[])];
+                    if available {
+                        candidates.push(named_record("actual", "2.0.0", &[]));
+                    }
+                    Ok(candidates)
+                }
+                _ => panic!("unexpected request {name}"),
+            })
+            .unwrap();
+        assert_eq!(result.dependencies.len(), usize::from(available));
+        if available {
+            assert_eq!(result.dependencies[0].dependency.as_str(), "local");
+            assert_eq!(result.dependencies[0].child.name.as_str(), "actual");
+            assert_eq!(result.dependencies[0].child.version.to_string(), "2.0.0");
+            assert_eq!(result.override_matches[0].original.raw, "npm:actual@1");
+            assert_eq!(result.override_matches[0].effective.raw, "npm:actual@2");
+        }
+        assert_eq!(
+            records[&(NPM.into(), "parent".into(), "1.0.0".into())].optional_dependencies["local"],
+            "npm:actual@1"
         );
     }
 }

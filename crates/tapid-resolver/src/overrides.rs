@@ -16,6 +16,7 @@ pub struct OverrideRule {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OverridePolicy {
     rules: BTreeMap<PackageName, Vec<OverrideRule>>,
+    registry: Option<PackageSource>,
     pub(super) bytes: usize,
 }
 
@@ -31,6 +32,20 @@ pub struct OverrideMatch {
 }
 
 impl OverridePolicy {
+    /// Restrict policy to declaring parents from one exact registry origin.
+    pub fn new_for_registry(
+        rules: Vec<OverrideRule>,
+        registry: PackageSource,
+    ) -> Result<Self, ResolveError> {
+        let mut policy = Self::new(rules)?;
+        policy.bytes = policy.bytes.saturating_add(registry.as_str().len());
+        if policy.bytes > 64 * 1024 * 1024 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
+        policy.registry = Some(registry);
+        Ok(policy)
+    }
+
     pub fn new(rules: Vec<OverrideRule>) -> Result<Self, ResolveError> {
         if rules.len() > 100_000 {
             return Err(ResolveError::MetadataLimitExceeded);
@@ -86,7 +101,12 @@ impl OverridePolicy {
         work: &mut usize,
         bytes: &mut usize,
     ) -> Result<(Requirement, Vec<String>), ResolveError> {
-        if parent.registry.registry().is_none() {
+        if parent.registry.registry().is_none()
+            || self
+                .registry
+                .as_ref()
+                .is_some_and(|registry| registry != &parent.registry)
+        {
             return Ok((original.clone(), Vec::new()));
         }
         let mut matches = Vec::new();
