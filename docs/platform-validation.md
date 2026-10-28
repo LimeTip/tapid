@@ -133,7 +133,10 @@ A transient systemd unit owns the delegation and uses systemd 254 or newer's
 The harness logs raw unified membership and unit identity before validation,
 corroborates the systemd-reported delegation parent with the driver path, and
 rejects malformed paths or membership mismatches before controller writes. It
-validates the empty delegation parent, records cgroup types and controllers,
+reads parent and driver PID membership in the supervisor with Bash built-ins,
+labels each observation, and reports parent occupancy separately from missing
+supervisor membership. It validates the empty delegation parent, records cgroup
+types and controllers,
 enables memory/pids for sibling boundaries, and
 actually attempts private PID/mount namespace creation. It does not remount the
 host cgroup filesystem or change host-wide namespace policy. The runner still

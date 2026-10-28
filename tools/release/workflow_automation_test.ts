@@ -664,8 +664,9 @@ const assertManagedDelegation = (ci: string) => {
     'systemctl show --property=ControlGroup --value "$TAPID_MANAGED_UNIT"',
     'driver=/sys/fs/cgroup$member_path',
     'test "$member_path" = "$unit_path/driver"', 'group=/sys/fs/cgroup$unit_path',
-    'test -z "$(cat "$group/cgroup.procs")"',
-    'grep -Fx "$$" "$driver/cgroup.procs"',
+    'done < "$group/cgroup.procs"',
+    'done < "$driver/cgroup.procs"',
+    'if ! "$parent_empty"; then', 'if ! "$supervisor_present"; then',
     'cat "$group/cgroup.type" "$driver/cgroup.type"',
     'echo "+memory +pids" > "$group/cgroup.subtree_control"',
     'unshare --mount --pid --fork --mount-proc /bin/true',
@@ -687,7 +688,9 @@ test('ManagedTree delegation rejects missing prerequisites and driver-parent con
     '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
     '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
     'group=/sys/fs/cgroup$unit_path', 'test "$member_path" = "$unit_path/driver"',
-    'test -z "$(cat "$group/cgroup.procs")"', 'systemd_version >= 254',
+    'done < "$group/cgroup.procs"', 'systemd_version >= 254',
+    'done < "$driver/cgroup.procs"',
+    'if ! "$parent_empty"; then', 'if ! "$supervisor_present"; then',
   ]) {
     const broken = ci.replace(required, '');
     assert.notEqual(broken, ci, required);
@@ -700,7 +703,7 @@ test('ManagedTree discovery corroborates unit ownership before controller writes
   const start = setup.indexOf('              # Discovery observations');
   const end = setup.indexOf('              unshare --mount');
   assert(start >= 0 && end > start);
-  const directory = await mkdtemp(join(tmpdir(), 'tapid-delegation-'));
+  const directory = await mkdtemp(join(tmpdir(), "tapid delegation ' path-"));
   try {
     for (const [name, membership, unit, parentPids, driverPids, error] of [
       ['valid', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '4242', ''],
@@ -708,8 +711,8 @@ test('ManagedTree discovery corroborates unit ownership before controller writes
       ['unexpected', '0::/system.slice/test.service/other', '/system.slice/test.service', '', '4242', 'hierarchy:'],
       ['empty', '0::', '/system.slice/test.service', '', '4242', 'discovery:'],
       ['malformed', '0::/system.slice/../test.service/driver', '/system.slice/test.service', '', '4242', 'discovery:'],
-      ['nonempty', '0::/system.slice/test.service/driver', '/system.slice/test.service', '55', '4242', 'membership:'],
-      ['mismatch', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '99', 'membership:'],
+      ['nonempty', '0::/system.slice/test.service/driver', '/system.slice/test.service', '55', '4242', 'membership: delegation parent is not empty'],
+      ['mismatch', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '99', 'membership: supervisor is absent from driver'],
       ['wrong-unit', '0::/system.slice/test.service/driver', '/system.slice/other.service', '', '4242', 'hierarchy:'],
     ]) {
       const root = join(directory, name);
@@ -721,9 +724,11 @@ test('ManagedTree discovery corroborates unit ownership before controller writes
         }
       }
       await writeFile(join(root, 'membership'), membership + '\n');
-      const script = `systemctl() { printf '%s\\n' '${unit}'; }\n` + setup.slice(start, end)
-        .replaceAll('/sys/fs/cgroup', root).replaceAll('/proc/self/cgroup', join(root, 'membership')).replaceAll('$$', '4242');
-      const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', script], { env: { ...process.env, TAPID_MANAGED_UNIT: 'test.service' } })
+      const script = `systemctl() { printf '%s\\n' '${unit}'; }\n` +
+        'if test "$FIXTURE_DRIVER_PIDS" = 4242; then printf "%s\\n" "$$" > "$FIXTURE_DRIVER_FILE"; fi\n' + setup.slice(start, end)
+        .replaceAll('/sys/fs/cgroup', '"$FIXTURE_CGROUP_ROOT"')
+        .replaceAll('/proc/self/cgroup', '"$FIXTURE_MEMBERSHIP"').replaceAll('/proc/$$/cgroup', '"$FIXTURE_MEMBERSHIP"');
+      const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', script], { env: { ...process.env, TAPID_MANAGED_UNIT: 'test.service', FIXTURE_CGROUP_ROOT: root, FIXTURE_MEMBERSHIP: join(root, 'membership'), FIXTURE_DRIVER_PIDS: driverPids, FIXTURE_DRIVER_FILE: join(group, 'driver/cgroup.procs') } })
         .then(value => ({ ...value, code: 0 }), failure => failure);
       assert.match(result.stdout, /0::|1:cpu:/, name);
       if (error) {
@@ -732,6 +737,9 @@ test('ManagedTree discovery corroborates unit ownership before controller writes
         assert.equal(await readFile(join(group, 'cgroup.subtree_control'), 'utf8'), '', name);
       } else {
         assert.equal(result.code, 0, result.stderr);
+        const supervisor = result.stdout.match(/supervisor_pid=(\d+)/)?.[1];
+        assert(supervisor, result.stdout);
+        assert(result.stdout.includes(`driver_pid=${supervisor}\n`), result.stdout);
         assert.equal(await readFile(join(group, 'cgroup.subtree_control'), 'utf8'), '+memory +pids\n');
       }
     }

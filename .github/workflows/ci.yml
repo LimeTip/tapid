@@ -77,11 +77,14 @@ jobs:
               rustc --version
               systemd --version
               # Discovery observations must survive even a failed assertion.
+              echo "supervisor membership ($$):"
+              cat /proc/$$/cgroup
+              echo "observer membership:"
               cat /proc/self/cgroup
               unit_path=$(systemctl show --property=ControlGroup --value "$TAPID_MANAGED_UNIT") || {
                 echo "discovery: cannot query unit $TAPID_MANAGED_UNIT" >&2; exit 1;
               }
-              member_path=$(sed -n "s/^0:://p" /proc/self/cgroup)
+              member_path=$(sed -n "s/^0:://p" /proc/$$/cgroup)
               echo "unit=$TAPID_MANAGED_UNIT unit_path=$unit_path membership=$member_path"
               for observed in "$unit_path" "$member_path"; do
                 if ! [[ "$observed" =~ ^/([a-zA-Z0-9_.:@-]+/)*[a-zA-Z0-9_.:@-]+$ ]] ||
@@ -97,9 +100,27 @@ jobs:
               fi
               cat "$group/cgroup.type" "$driver/cgroup.type"
               cat "$group/cgroup.controllers" "$driver/cgroup.controllers"
-              cat "$group/cgroup.procs" "$driver/cgroup.procs"
-              if ! test -z "$(cat "$group/cgroup.procs")" || ! grep -Fx "$$" "$driver/cgroup.procs"; then
-                echo "membership: parent must be empty and driver must contain the supervisor" >&2; exit 1;
+              # Read in the supervisor, without command substitutions or helper
+              # processes observing cgroup pseudo-files on its behalf.
+              supervisor_pid=$$
+              parent_empty=true
+              supervisor_present=false
+              echo "supervisor_pid=$supervisor_pid"
+              echo "delegation parent PID observation:"
+              while IFS= read -r pid; do
+                echo "parent_pid=$pid"
+                parent_empty=false
+              done < "$group/cgroup.procs"
+              echo "driver PID observation:"
+              while IFS= read -r pid; do
+                echo "driver_pid=$pid"
+                if test "$pid" = "$supervisor_pid"; then supervisor_present=true; fi
+              done < "$driver/cgroup.procs"
+              if ! "$parent_empty"; then
+                echo "membership: delegation parent is not empty" >&2; exit 1;
+              fi
+              if ! "$supervisor_present"; then
+                echo "membership: supervisor is absent from driver" >&2; exit 1;
               fi
               echo "+memory +pids" > "$group/cgroup.subtree_control"
               cat "$group/cgroup.controllers" "$group/cgroup.subtree_control" /proc/self/cgroup
