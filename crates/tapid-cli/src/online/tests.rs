@@ -475,6 +475,49 @@ fn manifest_overrides_rejects_version_qualified_selectors() {
 }
 
 #[test]
+fn workspace_member_resolution_applies_optional_override() {
+    let project = tapid_test_support::TempProject::new("member-optional-override").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project.write("packages/member/package.json", br#"{"name":"member","version":"1.0.0","dependencies":{"tool":"1.0.0"},"optionalDependencies":{"tool":"2.0.0"}}"#).unwrap();
+    let config = crate::registry::RegistryConfig::default();
+    let workspace = workspace_materialization(project.path(), &config).unwrap();
+    assert_eq!(workspace.registry_dependencies.len(), 1);
+    assert_eq!(workspace.registry_dependencies[0].requirement.raw, "2.0.0");
+}
+
+#[test]
+fn manifest_preflight_applies_optional_alias_override() {
+    let project = tapid_test_support::TempProject::new("optional-alias-override").unwrap();
+    let source = r#"{"name":"root","version":"1.0.0","dependencies":{"tool":"npm:old-tool@1.0.0"},"optionalDependencies":{"tool":"npm:new-tool@2.0.0"}}"#;
+    project.write("package.json", source.as_bytes()).unwrap();
+    let manifest = PackageManifest::parse(source).unwrap();
+    validate_manifest_roots(project.path(), &manifest).unwrap();
+}
+
+#[test]
+fn manifest_roots_use_optional_override_without_losing_independent_dev_alias() {
+    let manifest = PackageManifest::parse(
+        r#"{"name":"root","version":"1.0.0","dependencies":{"tool":"npm:old-tool@1.0.0"},"optionalDependencies":{"tool":"npm:new-tool@2.0.0"},"devDependencies":{"tool":"npm:new-tool@2.0.0"}}"#,
+    )
+    .unwrap();
+    let roots = manifest_roots(&manifest).unwrap();
+    assert_eq!(roots.len(), 2);
+    for root in roots {
+        assert_eq!(root.name.as_str(), "tool");
+        assert_eq!(
+            root.requirement.package_name(&root.name).as_str(),
+            "new-tool"
+        );
+        assert_eq!(root.requirement.raw, "npm:new-tool@2.0.0");
+    }
+}
+
+#[test]
 fn manifest_roots_rejects_conflicting_direct_dependency_override() {
     let manifest = PackageManifest::parse(
             r#"{"name":"root","version":"1.0.0","dependencies":{"postcss":"8.4.31"},"overrides":{"postcss":"8.5.28"}}"#,

@@ -460,71 +460,63 @@ pub(crate) fn workspace_materialization_from_discovered(
                 provider,
             });
         }
-        for dependency_map in [
-            manifest.dependencies(),
-            manifest.dev_dependencies(),
-            manifest.optional_dependencies(),
-        ] {
-            for (name, range) in dependency_map {
-                let Some((source, version)) = members.get(name) else {
-                    if range.starts_with("workspace:") {
-                        return Err(format!(
+        for (_, name, range) in manifest.effective_install_declarations() {
+            let Some((source, version)) = members.get(name) else {
+                if range.starts_with("workspace:") {
+                    return Err(format!(
                             "workspace dependency '{}' in member '{}' has no local workspace target; refusing registry fallback",
                             name,
                             member.name()
                         ).into());
-                    }
-                    if copied::declaration(range)
-                        .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                        .is_some()
-                    {
-                        return Err(format!(
+                }
+                if copied::declaration(range)
+                    .map_err(|reason| format!("dependency '{name}': {reason}"))?
+                    .is_some()
+                {
+                    return Err(format!(
                             "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
                         ).into());
-                    }
-                    let requirement = range.parse::<Requirement>().map_err(|error| {
-                        format!(
-                            "invalid workspace member dependency '{name}' range '{range}': {error}"
-                        )
-                    })?;
-                    let (manifest_registry, local_package) = dep_parts(name)?;
-                    if manifest_registry.to_string() == JSR && requirement.is_alias() {
-                        return Err(format!(
-                            "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                        )
-                        .into());
-                    }
-                    if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
-                        return Err(format!(
+                }
+                let requirement = range.parse::<Requirement>().map_err(|error| {
+                    format!("invalid workspace member dependency '{name}' range '{range}': {error}")
+                })?;
+                let (manifest_registry, local_package) = dep_parts(name)?;
+                if manifest_registry.to_string() == JSR && requirement.is_alias() {
+                    return Err(format!(
+                        "npm alias '{name}@{range}' cannot use a JSR dependency name"
+                    )
+                    .into());
+                }
+                if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
+                    return Err(format!(
                             "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
                         ).into());
-                    }
-                    let package = requirement.package_name(&local_package).clone();
-                    let registry = registry_for_requirement(registry_config, name, &requirement)?;
-                    registry_dependencies.push(WorkspaceRegistryDependency {
-                        member_key: locked[package_index].key(),
-                        manifest_name: local_package.to_string(),
-                        registry,
-                        package,
-                        requirement,
-                    });
-                    continue;
-                };
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
+                }
+                let package = requirement.package_name(&local_package).clone();
+                let registry = registry_for_requirement(registry_config, name, &requirement)?;
+                registry_dependencies.push(WorkspaceRegistryDependency {
+                    member_key: locked[package_index].key(),
+                    manifest_name: local_package.to_string(),
+                    registry,
+                    package,
+                    requirement,
+                });
+                continue;
+            };
+            let requirement = workspace_requirement(range, version)?;
+            if !requirement.matches(version) {
+                return Err(format!(
                         "workspace dependency '{}@{}' in member '{}' does not match local member version {}",
                         name,
                         range,
                         member.name(),
                         version
                     ).into());
-                }
-                let target = LockfilePackageKey::workspace(source.clone()).to_string();
-                locked[package_index]
-                    .add_dependency(name, &target)
-                    .map_err(|error| error.to_string())?;
             }
+            let target = LockfilePackageKey::workspace(source.clone()).to_string();
+            locked[package_index]
+                .add_dependency(name, &target)
+                .map_err(|error| error.to_string())?;
         }
     }
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
@@ -791,66 +783,15 @@ fn workspace_root_resolution(
         .iter()
         .map(LockedWorkspacePackage::key)
         .collect::<Vec<_>>();
-    for (kind, map) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-    ] {
-        for (name, range) in map {
-            if let Some((source, version)) = workspace.members.get(name) {
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
-                        "workspace dependency '{name}@{range}' does not match local member version {version}"
-                    ));
-                }
-                let (_, package) = dependency_identity(registry_config, name)?;
-                if overrides
-                    .get(&package)
-                    .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
-                {
-                    return Err(format!(
-                        "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
-                    ));
-                }
-                let local_name = name
-                    .parse::<PackageName>()
-                    .map_err(|error| error.to_string())?;
-                register_local_root_identity(
-                    &mut local_root_identities,
-                    local_name,
-                    format!("workspace:{}", source.path()),
-                )?;
-                workspace_root_keys.push(LockfilePackageKey::workspace(source.clone()).to_string());
-                continue;
-            }
-            if range.starts_with("workspace:") {
+    for (kind, name, range) in manifest.effective_install_declarations() {
+        if let Some((source, version)) = workspace.members.get(name) {
+            let requirement = workspace_requirement(range, version)?;
+            if !requirement.matches(version) {
                 return Err(format!(
-                    "workspace dependency '{name}@{range}' has no matching local workspace member; refusing registry fallback"
+                    "workspace dependency '{name}@{range}' does not match local member version {version}"
                 ));
             }
-            if copied::declaration(range)
-                .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                .is_some()
-            {
-                continue;
-            }
-            let requirement = range.parse::<Requirement>().map_err(|error| {
-                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
-            })?;
-            let (manifest_registry, local_package) = dep_parts(name)?;
-            if manifest_registry.to_string() == JSR && requirement.is_alias() {
-                return Err(format!(
-                    "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                ));
-            }
-            let package = requirement.package_name(&local_package).clone();
-            let registry = registry_for_requirement(registry_config, name, &requirement)?;
-            register_local_root_identity(
-                &mut local_root_identities,
-                local_package.clone(),
-                format!("registry:{registry}|{package}"),
-            )?;
+            let (_, package) = dependency_identity(registry_config, name)?;
             if overrides
                 .get(&package)
                 .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
@@ -859,9 +800,57 @@ fn workspace_root_resolution(
                     "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
                 ));
             }
-            direct_root_identities.insert((registry.clone(), package.clone()));
-            roots.push(Dependency::new(registry, local_package, requirement));
+            let local_name = name
+                .parse::<PackageName>()
+                .map_err(|error| error.to_string())?;
+            register_local_root_identity(
+                &mut local_root_identities,
+                local_name,
+                format!("workspace:{}", source.path()),
+            )?;
+            workspace_root_keys.push(LockfilePackageKey::workspace(source.clone()).to_string());
+            continue;
         }
+        if range.starts_with("workspace:") {
+            return Err(format!(
+                "workspace dependency '{name}@{range}' has no matching local workspace member; refusing registry fallback"
+            ));
+        }
+        if copied::declaration(range)
+            .map_err(|reason| format!("dependency '{name}': {reason}"))?
+            .is_some()
+        {
+            continue;
+        }
+        let requirement = range.parse::<Requirement>().map_err(|error| {
+            format!(
+                "invalid {} dependency '{name}' range '{range}': {error}",
+                kind.field_name()
+            )
+        })?;
+        let (manifest_registry, local_package) = dep_parts(name)?;
+        if manifest_registry.to_string() == JSR && requirement.is_alias() {
+            return Err(format!(
+                "npm alias '{name}@{range}' cannot use a JSR dependency name"
+            ));
+        }
+        let package = requirement.package_name(&local_package).clone();
+        let registry = registry_for_requirement(registry_config, name, &requirement)?;
+        register_local_root_identity(
+            &mut local_root_identities,
+            local_package.clone(),
+            format!("registry:{registry}|{package}"),
+        )?;
+        if overrides
+            .get(&package)
+            .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
+        {
+            return Err(format!(
+                "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
+            ));
+        }
+        direct_root_identities.insert((registry.clone(), package.clone()));
+        roots.push(Dependency::new(registry, local_package, requirement));
     }
     for dependency in &workspace.registry_dependencies {
         let (_, local_name) = dep_parts(&dependency.manifest_name)?;

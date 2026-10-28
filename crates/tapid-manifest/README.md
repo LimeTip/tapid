@@ -23,6 +23,13 @@ preserving the existing error text.
 
 `with_dependency_kind` adds a dependency to one section and removes declarations of that name from other sections. `update_dependency_kind` changes an existing declaration only in the selected section, preserving overlapping declarations and unrelated fields. It returns an error when that section does not declare the name.
 
+`effective_install_declarations` iterates regular, dev, and optional declarations
+with their kinds and local names. An optional declaration overrides a regular
+declaration of the same local name, while a dev declaration remains independent.
+Apply any kind filtering after this view so excluding optional declarations does
+not restore the overridden regular declaration. Peer constraints are excluded;
+the original declaration maps and serialization remain unchanged.
+
 `Workspace::discover` reads root and member manifests, checks canonical path containment, and selects members by exact package name. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. Discovery rejects root and member manifests larger than `MAX_MANIFEST_BYTES`, 32 MiB, before parsing and bounds the read itself if a file grows. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.
 
 `dependency_lifecycle_commands` preserves exact script bytes in lifecycle order. It includes the implicit `node-gyp rebuild` install hook when `binding.gyp` exists and neither `preinstall` nor `install` is declared. The CLI supplies that filesystem fact; parsing grants no execution permission.

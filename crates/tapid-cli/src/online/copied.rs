@@ -42,12 +42,10 @@ pub(crate) fn declaration(raw: &str) -> Result<Option<CopiedDeclaration>, String
     Ok(None)
 }
 
-fn declarations(manifest: &PackageManifest) -> impl Iterator<Item = (&String, &String)> {
+fn declarations(manifest: &PackageManifest) -> impl Iterator<Item = (&str, &str)> {
     manifest
-        .dependencies()
-        .iter()
-        .chain(manifest.dev_dependencies())
-        .chain(manifest.optional_dependencies())
+        .effective_install_declarations()
+        .map(|(_, name, requirement)| (name, requirement))
 }
 
 pub(super) fn validate_declarations(
@@ -58,7 +56,7 @@ pub(super) fn validate_declarations(
     for (name, raw) in declarations(manifest) {
         let parsed = declaration(raw).map_err(|reason| format!("dependency '{name}': {reason}"))?;
         let copied = parsed.is_some();
-        let mut identity = raw.clone();
+        let mut identity = raw.to_owned();
         if let Some(parsed) = parsed {
             name.parse::<PackageName>().map_err(|_| {
                 format!("copied dependency '{name}' must use a local npm package name")
@@ -254,7 +252,7 @@ pub(super) fn prepare_roots(
                         .plan
                         .mutations
                         .iter()
-                        .any(|mutation| mutation.name == *local)
+                        .any(|mutation| mutation.name == local)
                 })
             })
             .and_then(|lock| lock.root_bindings().get(local))
@@ -447,7 +445,7 @@ pub(crate) fn validate_copied_root_binding(
     source: Option<&PackageSource>,
 ) -> Result<bool, String> {
     let declarations = declarations(manifest)
-        .filter(|(name, _)| name.as_str() == local)
+        .filter(|(name, _)| *name == local)
         .map(|(_, raw)| raw)
         .collect::<Vec<_>>();
     let mut copied = false;
@@ -474,7 +472,7 @@ pub(crate) fn validate_copied_root_binding(
 pub(crate) fn copied_root_names(manifest: &PackageManifest) -> Result<BTreeSet<String>, String> {
     declarations(manifest)
         .filter_map(|(name, raw)| match declaration(raw) {
-            Ok(Some(_)) => Some(Ok(name.clone())),
+            Ok(Some(_)) => Some(Ok(name.to_owned())),
             Ok(None) => None,
             Err(error) => Some(Err(format!("dependency '{name}': {error}"))),
         })
@@ -484,6 +482,15 @@ pub(crate) fn copied_root_names(manifest: &PackageManifest) -> Result<BTreeSet<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_registry_override_does_not_read_replaced_copied_artifact() {
+        let project = tapid_test_support::TempProject::new("copied-optional-override").unwrap();
+        let manifest = PackageManifest::parse(r#"{"name":"demo","version":"1.0.0","dependencies":{"tool":"file:missing.tgz"},"optionalDependencies":{"tool":"^1"}}"#).unwrap();
+        validate_declarations(project.path(), &manifest).unwrap();
+        assert!(copied_root_names(&manifest).unwrap().is_empty());
+        assert!(!validate_copied_root_binding(&manifest, "tool", None).unwrap());
+    }
 
     #[test]
     fn copied_and_registry_declarations_cannot_share_a_local_name() {

@@ -1420,7 +1420,16 @@ fn update_latest_preserves_overlapping_dependency_sections() {
                     &fs::read(dir.join("node_modules").join(name).join("package.json")).unwrap(),
                 )
                 .unwrap();
-                assert_eq!(installed["version"], if latest { "2.0.0" } else { "1.0.0" });
+                // Optional overrides the regular range, even when update preserves
+                // both original declaration sections without --latest.
+                assert_eq!(
+                    installed["version"],
+                    if latest || second_section == "optionalDependencies" {
+                        "2.0.0"
+                    } else {
+                        "1.0.0"
+                    }
+                );
 
                 fs::remove_dir_all(dir.join("node_modules")).unwrap();
                 let replay = run(
