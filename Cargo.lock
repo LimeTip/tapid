@@ -1659,9 +1659,11 @@ version = "0.0.1"
 dependencies = [
  "fs4",
  "libc",
+ "serde",
  "serde_json",
  "sha2",
  "tapid-attestations",
+ "tapid-core",
  "tapid-protocol",
  "tapid-signatures",
  "tapid-test-support",

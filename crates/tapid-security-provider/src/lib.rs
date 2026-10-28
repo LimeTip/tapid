@@ -1,6 +1,9 @@
 //! Authorized retrieval of verified security evidence.
 #![deny(unsafe_code)]
 
+mod configuration;
+pub use configuration::{CredentialMode, InvalidProviderConfig, ProviderConfig};
+
 mod retrieval;
 pub use retrieval::{Disclosure, RetrievalError, retrieve, retrieve_recorded};
 

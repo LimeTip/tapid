@@ -303,6 +303,50 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         Some("renamed")
     );
     assert!(report.failures.is_empty());
+    let consented = report
+        .evidence
+        .iter()
+        .map(|entry| entry.result.request.clone())
+        .collect::<Vec<_>>();
+    let config = tapid_security_provider::ProviderConfig::parse(
+        br#"{"version":1,"origin":"https://cloud.example","headlessCredentialEnv":"AUDIT_CI","cache":"disabled"}"#,
+    )
+    .unwrap();
+    let consent_enabled = std::cell::Cell::new(false);
+    let mut configured_authorize = |request: &tapid_protocol::SecurityRequest| {
+        config
+            .authorize(
+                request,
+                if consent_enabled.get() {
+                    &consented
+                } else {
+                    &[]
+                },
+                tapid_security_provider::CredentialMode::Headless,
+                "https://cloud.example",
+                &mut |name| {
+                    assert_eq!(name, "AUDIT_CI");
+                    Some("fixture-ci-token".into())
+                },
+            )
+            .is_ok()
+    };
+    provider.authorize = &mut configured_authorize;
+    forbid_transport.set(true);
+    let denied = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+    assert!(denied.evidence.is_empty());
+    assert_eq!(denied.failures.len(), 2);
+    assert!(
+        denied
+            .failures
+            .iter()
+            .all(|failure| failure.code == "not_authorized")
+    );
+    consent_enabled.set(true);
+    forbid_transport.set(false);
+    let permitted = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+    assert_eq!(permitted.outcome, tapid_policy::AuditOutcome::Findings);
+    assert_eq!(permitted.evidence.len(), 2);
     let (value, status) = crate::output::json::audit_value(project.path(), &Ok(report));
     assert_eq!(status, 1);
     assert_eq!(
@@ -354,6 +398,8 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         forbid_transport.set(false);
     }
     // The same signed provider and policy path handles imported placements.
+    let mut permit = |_: &tapid_protocol::SecurityRequest| true;
+    provider.authorize = &mut permit;
     let npm = serde_json::json!({"lockfileVersion":3,"packages":{
         "":serde_json::from_slice::<serde_json::Value>(manifest).unwrap(),
         "node_modules/actual":{
@@ -457,7 +503,7 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     let failed = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
     assert_eq!(failed.failures[0].code, "not_authorized");
     assert_eq!(failed.outcome, tapid_policy::AuditOutcome::Incomplete);
-    assert_eq!(recorded, 13);
+    assert_eq!(recorded, 15);
     for (path, expected) in [
         ("package.json", manifest.as_slice()),
         ("tapid.lock", bytes.as_bytes()),
