@@ -272,6 +272,18 @@ jobs:
             exit 1
           }
 
+      - name: Verify published resolver packaging and registry consumption
+        run: node --experimental-strip-types tools/release/verify_registry.ts candidate/signed-result.json candidate/intent.json "$RUNNER_TEMP/tapid-release-source" "$RUNNER_TEMP/registry-verification"
+
+      - name: Retain registry verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: registry-verification
+          path: ${{ runner.temp }}/registry-verification
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Record final release read-back
         env:
           GH_TOKEN: ${{ github.token }}
@@ -286,7 +298,7 @@ jobs:
           test "$(jq '.blockers | length' "$RUNNER_TEMP/final-plan.json")" = 0
           # shellcheck disable=SC2016
           # shellcheck disable=SC2016
-          printf '### Release complete\n\n[GitHub release](https://github.com/%s/releases/tag/%s)\n\nSource: `%s`\n\nRelease ID: `%s`\n\nCandidate: `%s`\n\nNative verification and public smoke passed in this run. All approved crate versions are public; a clean Cargo install returned the expected version.\n' "$GITHUB_REPOSITORY" "$TAG" "$SOURCE_SHA" "$RELEASE_ID" "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Release complete\n\n[GitHub release](https://github.com/%s/releases/tag/%s)\n\nSource: `%s`\n\nRelease ID: `%s`\n\nCandidate: `%s`\n\nNative verification and public smoke passed in this run. All approved crate versions are public; a clean Cargo install returned the expected version. Tagged resolver packaging and registry consumer verification passed.\n' "$GITHUB_REPOSITORY" "$TAG" "$SOURCE_SHA" "$RELEASE_ID" "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
           {
             printf '\n[Verification run and retained evidence](https://github.com/%s/actions/runs/%s)\n\nConfirmed versions:\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             jq -r '.packages[] | "- " + .name + " " + .version' candidate/intent.json

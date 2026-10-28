@@ -638,3 +638,18 @@ test('stable consumer shell gate rejects failure cancellation skipped and absent
     await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
   }
 });
+
+test('registry resolver verification gates completion even with an empty publication plan and retains failure evidence', async () => {
+  const owner = job(await workflow('crates-publication'), 'publish');
+  const verify = step(owner, 'Verify published resolver packaging and registry consumption');
+  assert.match(verify, /verify_registry\.ts candidate\/signed-result\.json candidate\/intent\.json/);
+  assert.match(verify, /tapid-release-source/);
+  assert.doesNotMatch(verify, /if:|continue-on-error|CARGO_REGISTRY_TOKEN|GH_TOKEN|steps\.auth/);
+  assert(owner.indexOf(step(owner, 'Publish missing crates one at a time')) < owner.indexOf(verify));
+  assert(owner.indexOf(verify) < owner.indexOf(step(owner, 'Record final release read-back')));
+  const retain = step(owner, 'Retain registry verification evidence');
+  assert.match(retain, /if: always\(\)/);
+  assert.match(retain, /actions\/upload-artifact@[a-f0-9]{40}/);
+  assert.match(retain, /registry-verification/);
+  assert.doesNotMatch(step(owner, 'Record final release read-back'), /if: always|continue-on-error/);
+});
