@@ -1641,3 +1641,41 @@ fn all_excluded_long_versions_have_bounded_human_summary() {
         );
     }
 }
+
+#[test]
+fn selected_optional_alias_retains_declaration_provenance_for_pruning() {
+    let roots = vec![Dependency::new(
+        NPM.parse().unwrap(),
+        "app".parse().unwrap(),
+        "*".parse().unwrap(),
+    )];
+    let (graph, _, _) = resolve_with_fetch(&roots, |_, name| {
+        Ok(match name.as_str() {
+            "app" => {
+                let mut package = named_record("app", "1.0.0", &[]);
+                package
+                    .optional_dependencies
+                    .insert("native-alias".into(), "npm:native@1".into());
+                vec![package]
+            }
+            "native" => vec![named_record("native", "1.0.0", &[])],
+            other => panic!("unexpected metadata fetch for {other}"),
+        })
+    })
+    .unwrap();
+    let edge = graph
+        .declarations
+        .iter()
+        .find(|edge| edge.name.as_str() == "native-alias")
+        .unwrap();
+    assert_eq!(edge.kind, tapid_resolver::DeclarationKind::Optional);
+    assert_eq!(edge.requirement.raw, "npm:native@1");
+    assert_eq!(edge.parent.as_ref().unwrap().name.as_str(), "app");
+    assert_eq!(edge.target.name.as_str(), "native");
+    assert_eq!(edge.target.registry.as_str(), NPM);
+    let result = graph
+        .prune_unavailable(&BTreeSet::from([edge.target.clone()]))
+        .unwrap();
+    assert_eq!(result.cuts.as_slice(), std::slice::from_ref(edge));
+    assert_eq!(result.resolution.selected.len(), 1);
+}

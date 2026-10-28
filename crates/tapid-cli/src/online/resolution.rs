@@ -606,7 +606,7 @@ where
             |parent, dependency| registry_for_dependency(parent, dependency),
             &preferred,
         ) {
-            Ok(resolution) => {
+            Ok(mut resolution) => {
                 let mut optional_frontier = BTreeSet::<(PackageSource, PackageName)>::new();
                 for parent in &resolution.selected {
                     let key = (
@@ -649,6 +649,34 @@ where
                     }
                     continue;
                 }
+                // Optional candidates are promoted into the resolver dependency map
+                // only after normalization and routing. Restore that declaration
+                // fact on the exact selected parent, without conflating aliases or
+                // another registry's equal name/version record.
+                for declaration in &mut resolution.declarations {
+                    let Some(parent) = &declaration.parent else {
+                        continue;
+                    };
+                    if declaration.kind != tapid_resolver::DeclarationKind::Required {
+                        continue;
+                    }
+                    let key = (
+                        parent.registry.to_string(),
+                        parent.name.to_string(),
+                        parent.version.to_string(),
+                    );
+                    if normalized
+                        .get(&key)
+                        .and_then(|record| record.as_ref().ok())
+                        .is_some_and(|record| {
+                            record.optional_dependencies.get(&declaration.name)
+                                == Some(&declaration.requirement)
+                        })
+                    {
+                        declaration.kind = tapid_resolver::DeclarationKind::Optional;
+                    }
+                }
+                resolution.declarations.sort();
                 return Ok((resolution, records, candidate_exclusions(&normalized, None)));
             }
             Err(ResolveError::MissingMetadata { packages }) => {

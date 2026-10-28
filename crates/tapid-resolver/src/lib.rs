@@ -6,6 +6,9 @@ use std::{
     fmt,
     str::FromStr,
 };
+mod pruning;
+pub use pruning::{DeclarationKind, PruneError, PrunedResolution, ResolvedDeclaration};
+
 use tapid_core::{PackageName, PackageSource, PackageVersion, PeerContext};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
@@ -538,6 +541,8 @@ pub struct ResolutionPreferences {
 /// Exact package identities, root selections, and parent-to-child edges for a graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
+    /// Selected declaration provenance; ordinary resolver inputs are required edges.
+    pub declarations: Vec<ResolvedDeclaration>,
     /// Every exact package identity selected in deterministic order.
     pub selected: Vec<RegistryPackageId>,
     /// Exact identities selected for direct manifest dependencies.
@@ -721,6 +726,7 @@ where
             .insert(dependency.requirement.clone());
     }
 
+    let mut declarations = Vec::new();
     let mut selected = BTreeSet::new();
     let mut selected_packages = BTreeMap::new();
     let mut roots = Vec::new();
@@ -762,6 +768,15 @@ where
             Err(error) => return Err(error),
         };
         let id = RegistryPackageId::from_source(registry.clone(), name, package.version.clone());
+        for requirement in requirements {
+            declarations.push(ResolvedDeclaration {
+                parent: None,
+                name: local_name.clone(),
+                requirement,
+                target: id.clone(),
+                kind: DeclarationKind::Required,
+            });
+        }
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
         roots.push(id.clone());
@@ -790,7 +805,7 @@ where
             let actual_name = requirement.package_name(&dependency).clone();
             let registry = registry_for_dependency(&parent.registry, &actual_name)
                 .map_err(ResolveError::RegistryRouting)?;
-            let requirements = BTreeSet::from([requirement]);
+            let requirements = BTreeSet::from([requirement.clone()]);
             let child_package = match select_package(
                 &registry,
                 &actual_name,
@@ -817,6 +832,13 @@ where
                 actual_name,
                 child_package.version.clone(),
             );
+            declarations.push(ResolvedDeclaration {
+                parent: Some(parent.clone()),
+                name: dependency.clone(),
+                requirement,
+                target: child.clone(),
+                kind: DeclarationKind::Required,
+            });
             dependencies.insert(ResolvedDependency {
                 parent: parent.clone(),
                 dependency: dependency.clone(),
@@ -888,6 +910,17 @@ where
                     provider: provider.cloned().map(Box::new),
                 });
             }
+            declarations.push(ResolvedDeclaration {
+                parent: Some(id.clone()),
+                name: peer.clone(),
+                requirement: requirement.clone(),
+                target: provider.expect("validated root peer provider").clone(),
+                kind: if package.optional_peer_dependencies.contains(peer) {
+                    DeclarationKind::OptionalPeer
+                } else {
+                    DeclarationKind::Peer
+                },
+            });
             context = context.with(
                 peer.clone(),
                 provider
@@ -899,7 +932,9 @@ where
         peer_contexts.insert(id.clone(), context);
     }
 
+    declarations.sort();
     Ok(Resolution {
+        declarations,
         selected: selected.into_iter().collect(),
         roots,
         root_bindings,
