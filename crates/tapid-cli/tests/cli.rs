@@ -7902,7 +7902,97 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             .status()
             .unwrap()
             .success()
-    ); // Changed pinned tools require a deliberate valid policy update. The package
+    );
+    // Interrupted rebuilds use the same coordinated activation journal as install.
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    for (checkpoint, cancelled) in [
+        ("store_published", false),
+        ("lockfile_replaced", false),
+        ("activation_complete", false),
+        ("commit_decision", false),
+        ("activation_complete", true),
+        ("commit_decision", true),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .args(["rebuild", "native-demo", "--force", "--store-dir"])
+            .arg(home.path().join("store"));
+        let crashed = if cancelled {
+            let ready = home.path().join(format!("rebuild-{checkpoint}-ready"));
+            let mut child = command
+                .env("TAPID_TEST_PAUSE_POINT", checkpoint)
+                .env("TAPID_TEST_PAUSE_READY", &ready)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !ready.exists() {
+                if child.try_wait().unwrap().is_some() {
+                    panic!(
+                        "rebuild exited before cancellation: {:?}",
+                        child.wait_with_output().unwrap()
+                    );
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("rebuild cancellation checkpoint watchdog expired");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Kill only the CLI parent after hooks finish at a durable boundary.
+            child.kill().unwrap();
+            child.wait_with_output().unwrap()
+        } else {
+            command
+                .env("TAPID_TEST_CRASH_POINT", checkpoint)
+                .output()
+                .unwrap()
+        };
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            crashed.status.signal(),
+            Some(if cancelled { 9 } else { 6 }),
+            "{checkpoint}: {crashed:?}"
+        );
+        assert!(
+            project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        let recovered = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args(["install", "--offline", "--store-dir"])
+            .arg(home.path().join("store"))
+            .env("TAPID_TEST_RECOVER_ONLY", "1")
+            .output()
+            .unwrap();
+        assert!(recovered.status.success(), "{checkpoint}: {recovered:?}");
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            original_manifest
+        );
+        assert_eq!(
+            fs::read(package.join("generated.txt")).unwrap(),
+            b"generated"
+        );
+    }
+    // Changed pinned tools require a deliberate valid policy update. The package
     // version, requirements and source graph stay fixed throughout this change.
     let local_node = project.path().join("pinned-node");
     let mut node_bytes = fs::read(&node).unwrap();

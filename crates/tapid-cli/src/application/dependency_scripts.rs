@@ -134,7 +134,21 @@ pub(super) fn apply(
         graph
             .order
             .iter()
-            .filter(|key| selected.contains(*key) || !graph.closure(key).is_disjoint(selected))
+            .filter(|key| {
+                if selected.contains(*key) {
+                    return true;
+                }
+                let package = &lock.packages()[*key];
+                // Only potential dependency readers can be invalidated by a
+                // selected output. Preflight still validates every exact hook
+                // approval; this planning filter grants no execution authority.
+                policy.approvals().iter().any(|approval| {
+                    approval.dependencies()
+                        && approval.package() == package.name()
+                        && approval.version() == package.version()
+                        && approval.archive_digest() == package.artifact_integrity()
+                }) && !graph.closure(key).is_disjoint(selected)
+            })
             .cloned()
             .collect::<BTreeSet<_>>()
     });

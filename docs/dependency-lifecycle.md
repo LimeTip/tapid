@@ -140,7 +140,9 @@ for authenticated cached outputs without executing hooks.
 Matching authenticated outputs are reused by default. `--force` reruns selected
 approved hook sequences from verified source. Dependency inputs run before their
 dependants; affected dependants reuse matching outputs or execute approved hooks
-when their bound inputs change. Force does not force dependants. Unrelated hooks
+when their bound inputs change. Dependants enter the impact set only when their
+approval permits dependency reads; a dependency edge alone does not authorize or
+require their hooks. Force does not force dependants. Unrelated hooks
 never execute. Existing generated prerequisites outside the impact set must
 already authenticate under the current policy, recipe and toolchain; otherwise
 run an approved online install first. A policy-wide or recipe-domain change can
