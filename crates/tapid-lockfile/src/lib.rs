@@ -14,7 +14,7 @@ mod tests;
 pub use error::LockfileError;
 pub use graph::{
     LockedGraph, LockedGraphEdge, LockedGraphPath, LockedGraphPaths, LockedGraphRoot,
-    LockedGraphStep,
+    LockedGraphStep, ReachableLockedGraph,
 };
 pub use model::{
     DerivedHookOutput, LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile,

@@ -389,6 +389,9 @@ fn rootless_legacy_graph_does_not_invent_recorded_entry_points() {
     let graph = legacy.graph().unwrap();
     assert_eq!(graph.nodes().len(), 1);
     assert!(graph.roots().is_empty());
+    let reachable = graph.reachable();
+    assert!(!reachable.roots_recorded);
+    assert!(reachable.occurrences.is_empty());
 }
 
 #[test]
@@ -414,5 +417,84 @@ fn workspace_entry_points_are_not_lost_when_registry_roots_have_bindings() {
             .roots()
             .iter()
             .any(|(name, key)| name == "member" && key == &workspace_key)
+    );
+}
+
+#[test]
+fn reachable_inventory_excludes_orphans_and_preserves_aliases_through_cycles() {
+    let mut root = package("https://registry.npmjs.org", "root");
+    let mut child = package("https://private.example", "child");
+    let orphan = package("https://registry.npmjs.org", "orphan");
+    let root_key = root.key();
+    let child_key = child.key();
+    root.add_alias_dependency("first", &child_key).unwrap();
+    root.add_alias_dependency("second", &child_key).unwrap();
+    child.add_dependency("root", &root_key).unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_packages([root, child, orphan]).unwrap();
+    lock.set_roots([root_key.clone()]).unwrap();
+    let before = lock.to_json().unwrap();
+    let inventory = lock.graph().unwrap().reachable();
+    assert!(inventory.roots_recorded);
+    assert_eq!(inventory.occurrences.len(), 2);
+    assert_eq!(
+        inventory.occurrences[&child_key]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert!(inventory.unresolved_peers.is_empty());
+    assert_eq!(lock.to_json().unwrap(), before);
+}
+
+#[test]
+fn reachable_inventory_retains_peer_candidates_but_reports_ambiguous_applicability() {
+    let peer = tapid_core::PeerContext::default()
+        .with("provider".parse().unwrap(), "1.0.0".parse().unwrap());
+    let platform = tapid_core::PlatformContext::new(None, None, None).unwrap();
+    let consumer = LockedPackage::new_with_context_and_provenance(
+        "https://registry.npmjs.org",
+        "consumer",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        (&peer, &platform),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let consumer_key = consumer.key();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_package(consumer).unwrap();
+    lock.set_roots([consumer_key.clone()]).unwrap();
+    let missing = lock.graph().unwrap().reachable();
+    assert!(
+        missing
+            .unresolved_peers
+            .contains(&(consumer_key.clone(), "provider".into()))
+    );
+    lock.insert_package(package("https://registry.npmjs.org", "provider"))
+        .unwrap();
+    let unique = lock.graph().unwrap().reachable();
+    assert!(unique.unresolved_peers.is_empty());
+    assert_eq!(unique.occurrences.len(), 2);
+    let other_platform = tapid_core::PlatformContext::new(Some("linux"), None, None).unwrap();
+    let other = LockedPackage::new_with_context_and_provenance(
+        "https://registry.npmjs.org",
+        "provider",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "a".repeat(64)),
+        (&tapid_core::PeerContext::default(), &other_platform),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    lock.insert_package(other).unwrap();
+    let ambiguous = lock.graph().unwrap().reachable();
+    assert_eq!(ambiguous.occurrences.len(), 3);
+    assert!(
+        ambiguous
+            .unresolved_peers
+            .contains(&(consumer_key, "provider".into()))
     );
 }

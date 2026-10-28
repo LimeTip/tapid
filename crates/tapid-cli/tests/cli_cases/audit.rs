@@ -110,3 +110,37 @@ fn audit_validates_imported_graph_without_migrating_it_or_claiming_clean_coverag
             .contains("not checked")
     );
 }
+
+#[test]
+fn audit_distinguishes_reachable_native_subjects_from_orphan_records() {
+    let project = tapid_test_support::TempProject::new("audit-reachable").unwrap();
+    let manifest = br#"{"name":"audit","version":"1.0.0","dependencies":{"root":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let packages = ["root", "orphan"].map(|name| {
+        tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            name,
+            "1.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &format!("sha256-{}", "a".repeat(64)),
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap()
+    });
+    let root = packages[0].key();
+    lock.insert_packages(packages).unwrap();
+    lock.set_roots([root]).unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let output = run(project.path(), &["audit", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["recorded_subjects"], 2);
+    assert_eq!(value["data"]["reachable_subjects"], 1);
+    assert_eq!(value["data"]["graph_coverage"]["roots_recorded"], true);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+}

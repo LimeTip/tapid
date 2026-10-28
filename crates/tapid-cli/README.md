@@ -454,7 +454,9 @@ native or imported lock graph, reports recorded subject counts, and returns
 or establish a clean audit, including for empty graphs. It makes zero live
 requests, does not load Cloud credentials, and does not recover pending project
 transactions or touch installed/store content. Invalid or manifest-mismatched
-locks produce typed errors without repair. Exact reachable-occurrence selection,
+locks produce typed errors without repair. Native graph counts distinguish
+reachable identities from orphan records and report missing roots and unresolved
+peer candidates. Imported reachable-occurrence selection,
 provider orchestration, findings output and result-file delivery are pending;
 recorded subject counts are not a completed coverage assessment.
 

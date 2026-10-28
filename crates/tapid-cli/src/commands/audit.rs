@@ -20,6 +20,15 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 "Recorded subjects: {} ({})",
                 report.recorded_subjects, report.format
             );
+            if let Some(count) = report.reachable_subjects {
+                println!("Reachable subjects: {count}");
+                if report.roots_recorded == Some(false) {
+                    println!("Graph limitation: no recorded roots");
+                }
+                if let Some(count) = report.unresolved_peers.filter(|count| *count > 0) {
+                    println!("Graph limitation: {count} unresolved peer identities");
+                }
+            }
             println!("Coverage: incomplete; advisory and reported-malware checks not performed");
             println!("Artifact analysis: not checked. Live requests: 0");
         }

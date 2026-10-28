@@ -24,7 +24,61 @@ pub struct LockedGraph {
     roots: Vec<(String, String)>,
 }
 
+/// Reachable native identities and every recorded incoming spelling. Candidate
+/// peer providers remain reachable, but non-unique applicability is explicit.
+#[derive(Debug)]
+pub struct ReachableLockedGraph {
+    pub occurrences: BTreeMap<String, BTreeSet<String>>,
+    pub roots_recorded: bool,
+    /// `(consumer key, peer name)` with zero or multiple recorded candidates.
+    pub unresolved_peers: BTreeSet<(String, String)>,
+}
+
 impl LockedGraph {
+    /// Traverse the recorded graph once per identity, without explanation limits
+    /// or host filtering. Aliases encountered after a cycle are retained too.
+    pub fn reachable(&self) -> ReachableLockedGraph {
+        let mut result = ReachableLockedGraph {
+            occurrences: BTreeMap::new(),
+            roots_recorded: !self.roots.is_empty(),
+            unresolved_peers: BTreeSet::new(),
+        };
+        let mut pending = self.roots.clone();
+        while let Some((name, key)) = pending.pop() {
+            let names = result.occurrences.entry(key.clone()).or_default();
+            let first = names.is_empty();
+            names.insert(name);
+            if !first {
+                continue;
+            }
+            let edges = &self.edges[&key];
+            // Keys have already passed the owning reader's context validation.
+            for peer in self.nodes[&key]
+                .peer_context()
+                .expect("validated graph context")
+                .entries()
+                .keys()
+            {
+                if edges
+                    .iter()
+                    .filter(|edge| edge.kind == "peer" && edge.name == peer.as_str())
+                    .count()
+                    != 1
+                {
+                    result
+                        .unresolved_peers
+                        .insert((key.clone(), peer.to_string()));
+                }
+            }
+            pending.extend(
+                edges
+                    .iter()
+                    .map(|edge| (edge.name.clone(), edge.target.clone())),
+            );
+        }
+        result
+    }
+
     pub fn nodes(&self) -> &BTreeMap<String, LockfilePackageKey> {
         &self.nodes
     }

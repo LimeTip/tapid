@@ -90,3 +90,10 @@ path budget. Paths retain incoming alias names; imported identity, peer targets
 and platform alternatives remain in the original graph rather than being
 coerced into a native identity. Path truncation describes explanation display,
 not security-check coverage or proof of applicability.
+
+`LockedGraph::reachable()` projects native recorded roots without the explanation
+path budget. It retains each exact key and all incoming names, excludes orphan
+records, stops cycles, and includes all candidate peer branches without host
+filtering. Missing roots and peer names with zero or multiple candidates are
+explicit. A unique candidate is still a recorded explanation candidate, not proof
+of provider applicability. This inventory does not establish security coverage.

@@ -19,6 +19,11 @@ pub(crate) fn audit(project: &Path, report: Result<AuditReport, &'static str>) -
         Ok(report) => {
             result["data"]["lock_format"] = json!(report.format);
             result["data"]["recorded_subjects"] = json!(report.recorded_subjects);
+            result["data"]["reachable_subjects"] = json!(report.reachable_subjects);
+            result["data"]["graph_coverage"] = json!({
+                "roots_recorded": report.roots_recorded,
+                "unresolved_peers": report.unresolved_peers,
+            });
         }
         Err(code) => result["errors"] = json!([{ "code": code }]),
     }

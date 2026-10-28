@@ -496,3 +496,10 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+Audit's native graph inventory distinguishes `recorded_subjects` from
+`reachable_subjects`. `graph_coverage.roots_recorded` identifies whether persisted
+entry points exist; `graph_coverage.unresolved_peers` counts reachable peer names
+with zero or multiple recorded candidates. These fields do not establish checked
+security coverage. Imported graph projection is not yet implemented for these
+fields and returns `null`; audit remains `not_checked` with exit 3.

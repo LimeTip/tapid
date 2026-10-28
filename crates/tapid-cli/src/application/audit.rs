@@ -6,6 +6,9 @@ use tapid_lockfile::{ImportedNpmLockfile, Lockfile};
 pub(crate) struct AuditReport {
     pub(crate) format: &'static str,
     pub(crate) recorded_subjects: usize,
+    pub(crate) reachable_subjects: Option<usize>,
+    pub(crate) roots_recorded: Option<bool>,
+    pub(crate) unresolved_peers: Option<usize>,
 }
 
 /// Inspect recorded inputs only. Provider activation and exact request projection
@@ -24,9 +27,13 @@ pub(crate) fn inspect(project: &Path) -> Result<AuditReport, &'static str> {
         lock.validate_replay(&digest)
             .map_err(|_| "AUDIT_LOCK_MISMATCH")?;
         let graph = lock.graph().map_err(|_| "AUDIT_LOCK_INVALID")?;
+        let reachable = graph.reachable();
         Ok(AuditReport {
             format: "native",
             recorded_subjects: graph.nodes().len(),
+            reachable_subjects: Some(reachable.occurrences.len()),
+            roots_recorded: Some(reachable.roots_recorded),
+            unresolved_peers: Some(reachable.unresolved_peers.len()),
         })
     } else {
         let lock = ImportedNpmLockfile::from_json(input).map_err(|_| "AUDIT_LOCK_INVALID")?;
@@ -36,6 +43,9 @@ pub(crate) fn inspect(project: &Path) -> Result<AuditReport, &'static str> {
         Ok(AuditReport {
             format: "imported_npm",
             recorded_subjects: graph.packages.len() + graph.workspaces.len(),
+            reachable_subjects: None,
+            roots_recorded: None,
+            unresolved_peers: None,
         })
     }
 }
