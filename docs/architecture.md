@@ -86,6 +86,8 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-store`: local verified content-addressed storage, offline reuse, quarantine, leases, and conservative garbage collection. It is not the online Tapid Registry.
 - `tapid-linker`: deterministic project materialization, `node_modules` layout, links, junctions, shims, and activation.
 - `tapid-policy`: evidence evaluation, approval decisions, stable reason codes, and lifecycle policy. It is pure where possible.
+  Audit thresholds consume the classified v2 report DTOs from `tapid-protocol`;
+  evidence verification and collection completeness remain caller prerequisites.
 - `tapid-runner`: controlled process and executable invocation, environment handling, output and time limits, and script execution policy enforcement.
 - `tapid-publish`: package packing, publication preparation, staging, and promotion workflows.
 - `tapid-signatures`: signing and signature verification primitives.
