@@ -9,6 +9,30 @@ pub(crate) struct Args {
     /// Write the versioned JSON result to a new file outside the project.
     #[arg(long, value_name = "PATH", conflicts_with = "json")]
     pub(crate) result_file: Option<PathBuf>,
+    /// Minimum advisory severity that fails CI; malware and unknown severity always fail.
+    #[arg(long, value_enum, default_value = "any")]
+    pub(crate) threshold: Threshold,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub(crate) enum Threshold {
+    Any,
+    Low,
+    Moderate,
+    High,
+    Critical,
+}
+
+impl From<Threshold> for tapid_policy::AuditThreshold {
+    fn from(value: Threshold) -> Self {
+        match value {
+            Threshold::Any => Self::Any,
+            Threshold::Low => Self::Low,
+            Threshold::Moderate => Self::Moderate,
+            Threshold::High => Self::High,
+            Threshold::Critical => Self::Critical,
+        }
+    }
 }
 
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
@@ -22,7 +46,8 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         },
         None => None,
     };
-    let report = crate::application::audit::inspect(&args.project_dir);
+    let report = crate::application::audit::inspect(&args.project_dir)
+        .map(|report| report.with_threshold(args.threshold.into()));
     if json {
         return crate::output::json::audit(&args.project_dir, report);
     }

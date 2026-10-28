@@ -425,14 +425,18 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     assert_eq!(partial.evidence.len(), 1);
     assert_eq!(partial.failures.len(), 1);
     assert_eq!(partial.failures[0].key, nested_key);
+    let partial = partial.with_threshold(tapid_policy::AuditThreshold::Critical);
+    assert_eq!(partial.outcome, tapid_policy::AuditOutcome::Incomplete);
     fail_private.set(false);
     provider.threshold = tapid_policy::AuditThreshold::Critical;
-    assert_eq!(
-        inspect_with_provider(project.path(), Some(&mut provider))
-            .unwrap()
-            .outcome,
-        tapid_policy::AuditOutcome::BelowThreshold
-    );
+    let complete = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+    assert_eq!(complete.outcome, tapid_policy::AuditOutcome::BelowThreshold);
+    let any = complete.with_threshold(tapid_policy::AuditThreshold::Any);
+    assert_eq!(any.outcome, tapid_policy::AuditOutcome::Findings);
+    let critical = any.with_threshold(tapid_policy::AuditThreshold::Critical);
+    let (value, status) = crate::output::json::audit_value(project.path(), &Ok(critical));
+    assert_eq!(status, 0);
+    assert_eq!(value["data"]["threshold"], "critical");
     provider.record = &mut reject_record;
     let failed = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
     assert_eq!(failed.outcome, tapid_policy::AuditOutcome::Incomplete);

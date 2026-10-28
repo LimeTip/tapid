@@ -33,7 +33,7 @@ Automation clients can use the compact [agent guide v1](../../docs/agent-guide.m
 tapid init [PATH]
 tapid license
 tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
-tapid audit [--project-dir <PATH>] [--json | --result-file <PATH>]
+tapid audit [--project-dir <PATH>] [--threshold <LEVEL>] [--json | --result-file <PATH>]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
@@ -491,6 +491,16 @@ Files use mode `0600` on Unix and inherit the caller directory's ACL on Windows.
 Read only after Tapid exits and require a complete newline-terminated JSON object;
 an empty or partial file is a delivery failure. Creation or write failures exit 3.
 Input failures are delivered when the destination was successfully created.
+
+`audit --threshold LEVEL` selects `any` (the default), `low`, `moderate`, `high`
+or `critical`. The severity floor is inclusive; reported malware and unknown
+severity always meet it. Withdrawn reports do not count as active findings.
+Complete verified coverage returns exit 1 for findings meeting the threshold
+and exit 0 otherwise. Incomplete or unchecked coverage always returns exit 3,
+including when every known finding is below the selected threshold. Invalid
+threshold values return exit 2. JSON and result-file reports record the selected
+level in `data.threshold`. Provider activation remains unavailable, so this option
+currently cannot produce a successful command-line assessment.
 
 `tapid status [--project-dir PATH] [--workspace NAME] [--json]` inspects local
 project metadata offline. The project directory is the explicit workspace root,

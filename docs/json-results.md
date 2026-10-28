@@ -277,6 +277,14 @@ It holds the same non-inheritable handle, writes one newline-terminated JSON obj
 and synchronizes the file. This deliberately writes only the requested result
 outside the audited project; it does not authorize project or package-store writes.
 
+Successful graph inspection records `data.threshold`: `any` (default), `low`,
+`moderate`, `high` or `critical`, selected by `audit --threshold LEVEL`. This is
+an inclusive advisory severity floor; malware and unknown severity always meet
+it. Threshold selection never changes incomplete coverage into success. Audit
+exits 0 below threshold with complete coverage, 1 for complete coverage with
+qualifying findings, 2 for invalid invocation and 3 for incomplete coverage or
+operational failure. CLI provider activation remains unavailable.
+
 Read after Tapid exits, validate `schema_version` and `operation`, and reject empty,
 partial, missing or malformed records. Delivery errors exit 3 and are reported on
 stderr; failed writes attempt to truncate the destination. An invalid destination

@@ -26,6 +26,13 @@ pub(crate) fn audit_value(
     let mut status = 3;
     match report {
         Ok(report) => {
+            result["data"]["threshold"] = json!(match report.threshold {
+                tapid_policy::AuditThreshold::Any => "any",
+                tapid_policy::AuditThreshold::Low => "low",
+                tapid_policy::AuditThreshold::Moderate => "moderate",
+                tapid_policy::AuditThreshold::High => "high",
+                tapid_policy::AuditThreshold::Critical => "critical",
+            });
             status = report.outcome.exit_code();
             result["outcome"] = json!(if status == 3 { "partial" } else { "success" });
             if !report.failures.is_empty() {

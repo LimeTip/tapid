@@ -262,3 +262,50 @@ fn audit_distinguishes_reachable_native_subjects_from_orphan_records() {
         bytes.as_bytes()
     );
 }
+
+#[test]
+fn audit_thresholds_never_turn_unchecked_coverage_into_success() {
+    let project = tapid_test_support::TempProject::new("audit-threshold").unwrap();
+    let manifest = br#"{"name":"audit","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    for threshold in ["any", "low", "moderate", "high", "critical"] {
+        let output = run(
+            project.path(),
+            &["audit", "--threshold", threshold, "--json"],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{threshold}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["assessment"], "not_checked");
+        assert_eq!(value["data"]["live_requests"], 0);
+        assert_eq!(value["data"]["threshold"], threshold);
+    }
+    let results = tapid_test_support::TempProject::new("audit-threshold-results").unwrap();
+    let path = results.path().join("critical.json");
+    let output = run(
+        project.path(),
+        &[
+            "audit",
+            "--threshold",
+            "critical",
+            "--result-file",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    let file: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(file["data"]["threshold"], "critical");
+    let output = run(project.path(), &["audit", "--threshold", "none"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+}
