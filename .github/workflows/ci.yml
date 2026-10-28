@@ -606,6 +606,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       # Avoid the image-bundled runtime: its .NET assembly loader failed even
       # for a standalone no-op. Keep installer tests on a verified LTS runtime.
       - name: Provision verified PowerShell

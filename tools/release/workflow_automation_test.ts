@@ -638,3 +638,15 @@ test('stable consumer shell gate rejects failure cancellation skipped and absent
     await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
   }
 });
+
+test('architecture lane provisions Cargo before fixtures and retains the repository check', async () => {
+  const owner = job(await workflow('ci'), 'release-contract');
+  const rust = step(owner, 'Install Rust toolchain');
+  assert.match(rust, /uses: dtolnay\/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable/);
+  const fixtures = step(owner, 'Test release helpers and workflows');
+  assert.match(fixtures, /run: node --experimental-strip-types --test tools\/check_architecture_test\.ts tools\/release\/\*_test\.ts/);
+  const check = step(owner, 'Check source architecture');
+  assert.match(check, /run: node --experimental-strip-types tools\/check_architecture\.ts/);
+  assert(owner.indexOf(rust) < owner.indexOf(fixtures));
+  assert(owner.indexOf(fixtures) < owner.indexOf(check));
+});
