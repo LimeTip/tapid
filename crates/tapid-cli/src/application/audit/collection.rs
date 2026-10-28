@@ -23,7 +23,7 @@ pub(crate) struct Provider<'a> {
     pub(crate) record: &'a mut Recorder<'a>,
     /// When present, owns replay loading and recording; injected freshness still
     /// supplies time/age policy and may impose a stricter floor.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) replay: Option<&'a tapid_security_provider::ReplayStore>,
     pub(crate) threshold: AuditThreshold,
 }
@@ -57,7 +57,7 @@ pub(super) fn collect(
     };
     let requests = &inventory.requests[..inventory.requests.len().min(MAX_COLLECTION_REQUESTS)];
     let unprepared = inventory.requests.len() - requests.len();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let floors = requests
         .iter()
         .map(|(_, request)| {
@@ -70,7 +70,7 @@ pub(super) fn collect(
         .iter()
         .map(|(_, request)| (provider.freshness)(request))
         .collect::<Vec<_>>();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let state_failed = freshness
         .iter()
         .zip(&floors)
@@ -82,7 +82,7 @@ pub(super) fn collect(
             _ => false,
         })
         .collect::<Vec<_>>();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let freshness = {
         let mut freshness = freshness;
         for (freshness, floor) in freshness.iter_mut().zip(&floors) {
@@ -112,7 +112,7 @@ pub(super) fn collect(
         &inputs,
         &provider.trust,
         &mut |request| {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if let Some(index) = requests.iter().position(|(_, input)| input == request)
                 && state_failed[index]
             {
@@ -121,7 +121,7 @@ pub(super) fn collect(
             (provider.transport)(request)
         },
         &mut |issuer, request, sequence, digest| {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if let Some(store) = provider.replay {
                 return store.record(issuer, request, sequence, digest);
             }

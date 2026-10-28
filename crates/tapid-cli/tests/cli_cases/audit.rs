@@ -441,13 +441,13 @@ fn audit_configured_empty_consent_never_contacts_provider_and_rejects_project_in
     let output = invoke(&config_path);
     assert_eq!(output.status.code(), Some(3));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         assert!(value["errors"].as_array().unwrap().is_empty(), "{value}");
         assert_eq!(value["data"]["failures"][0]["code"], "not_authorized");
         assert!(state.is_dir());
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     assert_eq!(
         value["errors"][0]["code"],
         "AUDIT_REPLAY_PLATFORM_UNSUPPORTED"

@@ -123,12 +123,12 @@ fn inspect_configured_using(
     if state_path.exists() {
         external_path(project, state_path)?;
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (mode, config, consented, keys, make_transport);
         Err("AUDIT_REPLAY_PLATFORM_UNSUPPORTED")
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use tapid_security_provider::{ReplayStore, RetrievalError};
         let replay = ReplayStore::open(state_path).map_err(|_| "AUDIT_REPLAY_STATE_INVALID")?;

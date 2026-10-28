@@ -15,7 +15,7 @@ pub use collection::{
     CollectionInput, CollectionLimit, MAX_COLLECTION_REQUESTS, SecurityCollection, collect_recorded,
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod replay;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use replay::ReplayStore;

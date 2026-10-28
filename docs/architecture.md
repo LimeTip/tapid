@@ -94,7 +94,7 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-signatures`: signing and signature verification primitives.
 - `tapid-attestations`: artifact-bound provenance, audit claims and authenticated package-security evidence verification.
 - `tapid-security-provider`: explicitly authorized raw-stream retrieval through
-  the shared v2 verifier, with Unix owner-only durable replay floors stored
+  the shared v2 verifier, with Unix and Windows owner-only durable replay floors stored
   separately from evictable evidence. An explicit HTTPS query adapter enforces
   exact inventory consent, configured credential selection, no redirects and
   request/collection deadlines. CLI activation, production trust provisioning

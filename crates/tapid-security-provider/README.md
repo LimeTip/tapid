@@ -20,7 +20,7 @@ sequence and envelope digest to the writer. The writer must atomically compare
 against current state and durably publish the new floor, rejecting concurrent
 rollback or equivocation. Writer failures return `StateUnavailable`; denied
 disclosure and invalid evidence never invoke the writer. An in-memory writer does
-not provide durability; the Unix adapter below supplies a durable filesystem
+not provide durability; the platform adapters below supply a durable filesystem
 implementation.
 
 `collect_recorded` evaluates exact requests in input order and retains successful
@@ -52,24 +52,40 @@ sequence/digest state before using evidence for policy. A verified response alon
 does not establish collection completeness. No project, verified-package store,
 artifact or transaction operation is performed here. See [security evidence](../../docs/security-evidence.md).
 
-On Unix, `ReplayStore` supplies the durable callback for `retrieve_recorded`:
+On Unix and Windows, `ReplayStore` supplies the durable callback for `retrieve_recorded`:
 `load(issuer, request)` returns the optional sequence/digest floor, and `record`
 compares again under a permanent cross-process file lock before publishing.
 The caller must supply a trusted, stable, owned parent directory. The adapter
-creates a mode-0700 state directory and mode-0600 files, rejects symlinks,
+creates a mode-0700 state directory and mode-0600 files on Unix, rejects symlinks,
 hard-linked or malformed floors, and hashes the issuer plus entire validated
 request into filenames. It stores no envelope bodies or plaintext inventory.
 Directory identity and permissions are rechecked on operations. This protects
 against other users, not a malicious process running as the same user or local
 state deletion/backup rollback.
 
-Floor updates sync a staging file, atomically rename it over the floor, and sync
-the directory before returning. Interrupted staging never replaces the old floor;
+On Unix, floor updates sync a staging file, atomically rename it over the floor,
+and sync the directory before returning. Interrupted staging never replaces the
+old floor;
 a retry discards it under the lock. Errors withhold evidence, even if publication
 may already have happened. Equal-sequence retries still sync publication. Cache
 body eviction must never delete this directory. There is no eviction API.
-Windows persistence remains unimplemented; the Unix adapter alone does not enable
-network requests.
+Neither persistence adapter alone enables network requests.
+
+Windows creates the directory, lock and staging files with a protected DACL
+containing only the current process-token owner, granting that owner full access.
+Opened handles validate the exact canonical owner/DACL without repairing existing
+ACLs. Reparse points, directories in place of files, and multiply linked files
+fail closed. A held directory handle denies delete sharing, pinning the root
+against rename/replacement. Cross-process locking uses the same permanent lock
+and shared floor comparison. Publication flushes the staging file and uses
+same-directory `MoveFileExW` with replacement and write-through, without a
+copy/delete fallback. The caller must supply trusted stable ancestors on a local
+filesystem supporting Windows ACLs and these operations. Filesystem or flush
+errors withhold evidence. Native Windows tests cover ACL broadening, junctions,
+root replacement, hard links, interrupted staging and separate-process writers;
+cross-compilation alone does not establish these runtime guarantees. Neither
+platform prevents same-user state deletion or backup rollback, and interrupted
+staging tests do not simulate a power failure.
 
 `HttpsProvider` is an explicitly constructed query adapter for the configured
 origin's `POST /v1/security/evidence/query` endpoint. It requires exact inventory

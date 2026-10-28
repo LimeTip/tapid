@@ -1669,6 +1669,7 @@ dependencies = [
  "tapid-protocol",
  "tapid-signatures",
  "tapid-test-support",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

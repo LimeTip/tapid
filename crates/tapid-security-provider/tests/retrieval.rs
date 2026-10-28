@@ -669,7 +669,7 @@ fn collection_completeness_requires_current_full_signed_coverage_and_recording()
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn retrieval_commits_a_durable_floor_before_returning_evidence() {
     use tapid_security_provider::{ReplayStore, retrieve_recorded};

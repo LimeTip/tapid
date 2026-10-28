@@ -1,58 +1,40 @@
 //! Durable replay floors, deliberately separate from evictable envelope bodies.
 use crate::RetrievalError;
-use fs4::FileExt;
+
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs,
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 use tapid_protocol::SecurityRequest;
 
-/// Unix owner-only replay state. The caller supplies a trusted, stable parent
-/// directory; it must not delete this directory when evicting cached evidence.
-/// Other platforms deliberately have no persistence adapter yet.
+#[cfg(unix)]
+#[path = "replay/unix.rs"]
+mod platform;
+#[cfg(windows)]
+#[path = "replay/windows.rs"]
+#[allow(unsafe_code)]
+mod platform;
+
+/// Owner-only durable replay floors. Requires a trusted, stable parent directory.
 pub struct ReplayStore {
     root: PathBuf,
-    owner: u32,
-    device: u64,
-    inode: u64,
+    directory: platform::Directory,
 }
 
 impl ReplayStore {
     pub fn open(root: &Path) -> Result<Self, RetrievalError> {
-        Self::open_inner(root).map_err(|_| RetrievalError::StateUnavailable)
-    }
-
-    fn open_inner(root: &Path) -> io::Result<Self> {
-        let parent = root.parent().ok_or_else(invalid)?;
-        let parent_meta = fs::metadata(parent)?;
-        if parent_meta.mode() & 0o022 != 0 {
-            return Err(invalid());
-        }
-        match fs::DirBuilder::new().mode(0o700).create(root) {
-            Ok(()) => File::open(parent)?.sync_all()?,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-        let meta = fs::symlink_metadata(root)?;
-        // The caller supplies an owned parent; keep all state under that owner.
-        // No HOME or credential lookup participates in this decision.
-        if !meta.is_dir()
-            || meta.file_type().is_symlink()
-            || meta.mode() & 0o077 != 0
-            || meta.uid() != parent_meta.uid()
-        {
-            return Err(invalid());
-        }
+        let directory =
+            platform::Directory::open(root).map_err(|_| RetrievalError::StateUnavailable)?;
         let store = Self {
             root: root.to_path_buf(),
-            owner: meta.uid(),
-            device: meta.dev(),
-            inode: meta.ino(),
+            directory,
         };
-        let _lock = store.lock()?;
+        let _lock = store
+            .directory
+            .lock()
+            .map_err(|_| RetrievalError::StateUnavailable)?;
         Ok(store)
     }
 
@@ -64,7 +46,7 @@ impl ReplayStore {
         request: &SecurityRequest,
     ) -> Result<Option<(u64, String)>, RetrievalError> {
         (|| {
-            let _lock = self.lock()?;
+            let _lock = self.directory.lock()?;
             self.read_floor(&self.path(issuer, request)?)
         })()
         .map_err(|_| RetrievalError::StateUnavailable)
@@ -93,7 +75,7 @@ impl ReplayStore {
         if !valid_digest(digest) {
             return Err(invalid());
         }
-        let _lock = self.lock()?;
+        let _lock = self.directory.lock()?;
         let path = self.path(issuer, request)?;
         if let Some((old_sequence, old_digest)) = self.read_floor(&path)?
             && (sequence < old_sequence || (sequence == old_sequence && digest != old_digest))
@@ -108,43 +90,11 @@ impl ReplayStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&stage)?;
+        let mut file = self.directory.stage(&stage)?;
         write!(file, "{sequence}\n{digest}\n")?;
         file.sync_all()?;
-        fs::rename(stage, path)?;
-        File::open(&self.root)?.sync_all()
-    }
-
-    fn lock(&self) -> io::Result<File> {
-        let root = fs::symlink_metadata(&self.root)?;
-        if !root.is_dir()
-            || root.file_type().is_symlink()
-            || root.mode() & 0o077 != 0
-            || root.uid() != self.owner
-            || root.dev() != self.device
-            || root.ino() != self.inode
-        {
-            return Err(invalid());
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.root.join(".lock"))?;
-        private_file(&file)?;
-        if file.metadata()?.uid() != self.owner {
-            return Err(invalid());
-        }
-        FileExt::lock(&file)?;
-        Ok(file)
+        drop(file);
+        self.directory.publish(&stage, &path)
     }
 
     fn path(&self, issuer: &str, request: &SecurityRequest) -> io::Result<PathBuf> {
@@ -157,17 +107,12 @@ impl ReplayStore {
     }
 
     fn read_floor(&self, path: &Path) -> io::Result<Option<(u64, String)>> {
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-        {
+        let file = match self.directory.read(path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        private_file(&file)?;
-        if file.metadata()?.uid() != self.owner || file.metadata()?.len() > 128 {
+        if file.metadata()?.len() > 128 {
             return Err(invalid());
         }
         let mut text = String::new();
@@ -189,13 +134,6 @@ impl ReplayStore {
     }
 }
 
-fn private_file(file: &File) -> io::Result<()> {
-    let meta = file.metadata()?;
-    if !meta.is_file() || meta.nlink() != 1 || meta.mode() & 0o077 != 0 {
-        return Err(invalid());
-    }
-    Ok(())
-}
 fn valid_digest(value: &str) -> bool {
     value.strip_prefix("sha256-").is_some_and(|value| {
         value.len() == 64

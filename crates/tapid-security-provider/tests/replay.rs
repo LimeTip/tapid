@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 use tapid_security_provider::ReplayStore;
 
 fn request() -> tapid_protocol::SecurityRequest {
@@ -95,6 +95,7 @@ fn interrupted_staging_preserves_old_floor_and_retry_is_durable() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn replay_state_rejects_public_permissions_symlinks_and_corrupt_floors() {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -183,6 +184,7 @@ fn request_contexts_are_separate_and_linked_floors_fail_closed() {
     assert_eq!(outcomes.iter().filter(|r| r.is_err()).count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn replaced_root_and_symlinked_root_are_rejected() {
     use std::os::unix::fs::{DirBuilderExt, symlink};
@@ -199,3 +201,56 @@ fn replaced_root_and_symlinked_root_are_rejected() {
     symlink(home.path().join("saved"), &root).unwrap();
     assert!(ReplayStore::open(&root).is_err());
 }
+
+#[test]
+fn replay_process_worker() {
+    let Some(root) = std::env::var_os("TAPID_REPLAY_TEST_ROOT") else {
+        return;
+    };
+    let sequence: u64 = std::env::var("TAPID_REPLAY_TEST_SEQUENCE")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = ReplayStore::open(std::path::Path::new(&root)).unwrap();
+    let result = store.record(
+        "issuer",
+        &request(),
+        sequence,
+        &format!("sha256-{sequence:064x}"),
+    );
+    if sequence == 8 {
+        result.unwrap();
+    }
+}
+
+#[test]
+fn separate_process_writers_cannot_lower_the_committed_floor() {
+    let home = tapid_test_support::TempHome::new("security-replay-processes").unwrap();
+    let root = home.path().join("floors");
+    ReplayStore::open(&root).unwrap();
+    let mut children = (1..=8)
+        .map(|sequence| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "replay_process_worker"])
+                .env("TAPID_REPLAY_TEST_ROOT", &root)
+                .env("TAPID_REPLAY_TEST_SEQUENCE", sequence.to_string())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for child in &mut children {
+        assert!(child.wait().unwrap().success());
+    }
+    assert_eq!(
+        ReplayStore::open(&root)
+            .unwrap()
+            .load("issuer", &request())
+            .unwrap(),
+        Some((8, format!("sha256-{:064x}", 8)))
+    );
+}
+
+#[cfg(windows)]
+#[path = "replay/windows.rs"]
+mod windows;

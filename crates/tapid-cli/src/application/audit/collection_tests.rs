@@ -62,7 +62,7 @@ fn oversized_audit_bounds_preparation_and_reports_unchecked_occurrences() {
         },
         transport: &mut |_| panic!("denied inventory cannot reach transport"),
         record: &mut |_, _, _, _| panic!("denied inventory cannot record evidence"),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         replay: None,
         threshold: tapid_policy::AuditThreshold::Any,
     };
@@ -119,7 +119,7 @@ fn oversized_audit_bounds_preparation_and_reports_unchecked_occurrences() {
         authorize: &mut |_| true,
         transport: &mut transport,
         record: &mut |_, _, _, _| Ok(()),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         replay: None,
         threshold: tapid_policy::AuditThreshold::Any,
     };
@@ -262,7 +262,7 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     let mut reject_record = |_: &str, _: &tapid_protocol::SecurityRequest, _: u64, _: &str| {
         Err(tapid_security_provider::RetrievalError::StateUnavailable)
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let store = tapid_security_provider::ReplayStore::open(&home.path().join("floors")).unwrap();
     let mut provider = Provider {
         trust,
@@ -275,7 +275,7 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         authorize: &mut |_| true,
         transport: &mut transport,
         record: &mut record,
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         replay: None,
         threshold: tapid_policy::AuditThreshold::Any,
     };
@@ -367,7 +367,7 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         "advisory"
     );
     assert_eq!(value["data"]["coverage"]["complete"], true);
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         provider.replay = Some(&store);
         let checked = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();

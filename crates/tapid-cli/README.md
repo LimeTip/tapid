@@ -462,7 +462,7 @@ represented exactly are excluded from request counts. Opaque deterministic
 placement identifiers retain local mappings to exact graph keys; projection
 does not authorize disclosure, including for public registries.
 An internal application adapter now connects exact native and imported requests to signed
-provider collection, replay recording and threshold policy. On Unix, the adapter
+provider collection, replay recording and threshold policy. On Unix and Windows, the adapter
 can use `ReplayStore` directly for exact issuer/request floor loading and durable
 recording. Corrupt or unreadable floors prevent transport for that occurrence;
 other occurrences retain their findings. The store replaces the injected recorder
@@ -473,7 +473,7 @@ provider's shared request limit before loading freshness, replay floors or conse
 Remaining occurrences are reported as unchecked and force incomplete coverage,
 even when every processed occurrence has current signed clean evidence.
 The adapter is tested with raw signed fixtures. No production keys or credentials
-are supplied. Windows durable security state remains unimplemented.
+are supplied. Windows state uses an owner-only protected ACL and pinned directory handles.
 Imported selection traverses recorded root and workspace entry points without
 host filtering, preserves exact peer placements and excludes workspace sources
 and unrepresentable platform predicates. Local placement paths are hashed before
@@ -547,7 +547,7 @@ and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installat
 
 ### Explicit security provider inputs
 
-On Unix, live retrieval requires all five options together:
+On Unix and Windows, live retrieval requires all five options together:
 
 ```text
 tapid audit --provider-config /trusted/provider.json --provider-trust /trusted/trust.json --inventory-consent /trusted/consent.json --replay-state /trusted/security-state --credential-mode headless --json
@@ -559,7 +559,7 @@ files from a trusted directory; this path check does not authenticate their
 contents or protect against a malicious process running as the same user.
 The replay parent must already exist and meet `ReplayStore` ownership and
 permission requirements. Invalid inputs fail before creating replay state.
-Windows returns `AUDIT_REPLAY_PLATFORM_UNSUPPORTED` before transport.
+Other platforms return `AUDIT_REPLAY_PLATFORM_UNSUPPORTED` before transport.
 
 Provider configuration uses the security-provider version-1 format: canonical
 HTTPS `origin`, explicit `cache: "disabled"`, and optional distinct
