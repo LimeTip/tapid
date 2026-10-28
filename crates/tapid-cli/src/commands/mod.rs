@@ -11,6 +11,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 mod npm_import;
+mod profile;
 mod release_verification;
 pub(crate) mod run;
 mod sandbox;
