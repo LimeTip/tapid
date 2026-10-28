@@ -232,6 +232,7 @@ impl LifecycleJournal {
             crate::filesystem::activation::commit_owned_activation(&member, &self.record.owner)?;
         }
         crate::filesystem::activation::commit_owned_activation(&self.project, &self.record.owner)?;
+        crate::filesystem::activation::test_crash_at("post_commit_cleanup");
         remove_journal(&self.project)?;
         self.finished = true;
         Ok(())
