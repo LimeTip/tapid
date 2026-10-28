@@ -269,3 +269,60 @@ source-size recommendations remain. Final whitespace checks passed. Documentatio
 links and the recorded wrapper commands were reviewed. These results complete all
 independently executable local checks; the failed native containment lane requires
 the engine validation handoff rather than an unsandboxed host retry.
+
+## Latest-main revalidation
+
+Revalidated integrated HEAD `58fb912ebeec86fa3911e7e834ce1668833e3683`
+on `relay/20-f4e5d221`, containing main
+`99c2bffa2418cc49551db8ce64fe82c9c479b1ca`. The worktree initially was clean;
+no conflicts or conflict markers remained. Inspection retained the complete batch
+implementation and both pointer regressions. Final pointer normalization follows
+all graph, envelope and exclusion contributors. The actionable P3 in
+[review 5663154538](https://github.com/LimeTip/tapid/pull/360#pullrequestreview-5663154538)
+is repaired in source; refreshed reviews and empty review threads supplied no
+additional finding. No runtime repair was needed in this revalidation.
+
+All commands used the supplied absolute Node 22 runtime, its directory first in
+`PATH`, `CARGO_TARGET_DIR=target`, and sequential Cargo wrapper invocations.
+
+| Focused command suffix | Fresh result |
+| --- | --- |
+| `test -p tapid --lib --locked dependency_edit` | 10 passed |
+| `test -p tapid --test cli --locked dependency_edits_` | 8 passed |
+| `test -p tapid --test json_results --locked candidate_exclusions` | 2 passed |
+| `test -p tapid --lib --locked batch_` | 11 passed |
+| `test -p tapid --test agent_workflows --locked` | 8 passed |
+| `test -p tapid --test cli --locked dependency_dry_run` | 17 passed |
+| `test -p tapid --lib --locked preview_rejects_inputs_changed` | 1 passed |
+| `test -p tapid --test upgrade --locked` | 15 passed |
+
+The dependency-edit filter freshly exercised both ordering regressions and the
+60-sample final-state/operation-count matrix. Retained timing samples remain
+historical. Existing bounded exclusion serialization, manifest validation,
+verified storage and recoverable install operations remain authoritative;
+ordinary add/remove retain their distinct cross-section contracts.
+
+`node --experimental-strip-types --test tools/release/detect_version_test.ts
+tools/release/installers_test.ts` passed: 62 passed, 11 platform/capability skips,
+zero failures (73 tests including nested cases). Logs for focused commands are
+`/tmp/tapid-current-<target>-<filter-or-all>.log`; release helpers use
+`/tmp/tapid-current-release.log`.
+
+Workspace formatting and warnings-denied all-target/all-feature Clippy passed.
+The full workspace test command used `--no-fail-fast` and exited 101 with exactly
+three failing targets: CLI integration 279 passed / 5 failed; run planning
+11 passed / 2 failed; runner library 152 passed / 25 failed. CLI library passed
+303 tests and manifest passed 38. Other targets passed. Native diagnostics again
+report `UnsupportedContainment`, failed native probe-profile installation and
+missing enforcement receipts; no assertions or policies were weakened.
+Separate integration tests passed (1 consumer-install and 4 contracts), and
+architecture passed with 192 production Rust files scanned. Full-lane logs are
+`/tmp/tapid-resync-{fmt,clippy,workspace,integration,architecture}.log`.
+
+Only this evidence report changed during revalidation. A source-matched isolated
+full-lane receipt is still required, using the execution-enabled temporary
+storage guidance in [testing](../testing.md). The refreshed published-head CI,
+CodeQL and release-intent workflows succeeded for
+`83130d6b54a87b7f74591c5c4bd9ea7d6cdfb259`, not this integrated source.
+Independent QA/Security and published-candidate Acceptance, including native
+platform checks, remain downstream. No commit, push, merge or deployment occurred.
