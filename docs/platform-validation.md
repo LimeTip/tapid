@@ -179,9 +179,14 @@ Native Windows pin controls still require the existing Windows CI lane.
 Common contained preflight also rejects resolved write grants covering a declared
 executable path, including backend write additions, before backend preparation.
 Portable controls cover exact-file and ancestor-directory grants, plus a disjoint
-writable output directory. This closes direct policy-authorized mutation after
-prelaunch hashing; it does not close hard-link aliases, host races, dynamic inputs
-or the remaining authority inventory. It does not enable Windows authentication.
+writable output directory. Unix preflight additionally requires exactly one hard
+link for each declared executable whenever resolved write grants are nonempty.
+This conservatively rejects existing aliases without traversing writable trees;
+the regression creates an alias after request construction beneath an otherwise
+disjoint output directory, requires rejection, then removes it and requires the
+same request to pass again. This does not prevent subsequent host topology races,
+dynamic inputs or the remaining authority inventory. Windows retains its separate
+held-file and writable-topology checks. It does not enable Windows authentication.
 
 Trusted Node requests now bind a streaming SHA-256 of the primary executable
 (bounded to 512 MiB) as well as its native file identity. Revalidation rejects

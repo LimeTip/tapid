@@ -11,8 +11,10 @@ Policy-aware package execution foundations for Tapid. Existing approval APIs bin
 
 Contained preflight rejects declared executable paths beneath resolved child write
 grants, including backend write additions. Disjoint output grants remain usable.
-This pathname exclusion does not establish hard-link alias exclusion, immutable
-loader inputs, or complete toolchain authority. Explicit uncontained execution
+On Unix, requests with write grants also require declared tools to have exactly
+one hard link at preflight, rejecting aliases without scanning writable trees.
+These checks do not prevent subsequent host topology races or establish immutable
+loader inputs or complete toolchain authority. Explicit uncontained execution
 retains its separate contract and produces no attestation.
 
 `execute_uncontained` is a separate, explicitly authorized path for the CLI's dependency containment override. It reuses validated requests and controlled environment/PATH construction, returns termination without an enforcement receipt, and provides no filesystem/network restrictions or descendant cleanup guarantee. File-backed output and root timeout/output polling are supervisor safety checks only. The contained `execute` API never falls back to it. Override-created outputs receive no authenticated build-cache attestation. See [ADR 0009](../../docs/adr/0009-explicit-dependency-execution-overrides.md).

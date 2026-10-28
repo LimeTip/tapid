@@ -306,6 +306,21 @@ impl ExecutionRequest {
         write: &[ResolvedGrant],
     ) -> Result<(), ExecutionError> {
         for executable in &self.verified_executables {
+            #[cfg(unix)]
+            if !write.is_empty() {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = fs::metadata(&executable.path)
+                    .map_err(|error| path_error("declared executable", &executable.path, error))?;
+                // Canonical paths cannot locate every hard-link alias inside a
+                // writable subtree. Reject ambiguous topology without scanning
+                // potentially unbounded, attacker-controlled directory trees.
+                if metadata.nlink() != 1 {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::PolicyViolation,
+                        "declared executable with child write authority must have exactly one hard link",
+                    ));
+                }
+            }
             if write.iter().any(|grant| {
                 executable
                     .path

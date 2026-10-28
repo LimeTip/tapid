@@ -3127,6 +3127,43 @@ fn native_write_grant_does_not_imply_read_authority() {
 }
 
 #[test]
+#[cfg(unix)]
+fn declared_executable_rejects_hard_link_alias_under_disjoint_write_grant() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("aliased-declared-tool").unwrap();
+    project.write("tools/tool", b"abc").unwrap();
+    project.write("output/result", b"").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let tool = root.join("tools/tool");
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![], vec!["output".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let request = ExecutionRequest::builder(&tool)
+        .project_root(&root)
+        .policy(policy)
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    assert!(resolve_policy(&request, RuntimeFilesystemAdditions::default()).is_ok());
+    // Introduce the alias after construction: digest and canonical path remain unchanged.
+    fs::hard_link(&tool, root.join("output/alias")).unwrap();
+    let error = resolve_policy(&request, RuntimeFilesystemAdditions::default()).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    fs::remove_file(root.join("output/alias")).unwrap();
+    assert!(resolve_policy(&request, RuntimeFilesystemAdditions::default()).is_ok());
+}
+
+#[test]
 fn declared_executable_rejects_child_write_authority() {
     let project = tapid_test_support::TempProject::new("writable-declared-tool").unwrap();
     project.write("tools/tool", b"abc").unwrap();
