@@ -31,6 +31,68 @@ This scope covers explicit root project scripts only. It does not enable depende
 
 ## Current status
 
+### Dependency toolchain authority inventory for #273
+
+Authenticated Windows dependency builds remain disabled at
+`dependency_toolchain_identity`. The following source audit starts the remaining
+work in [#273](https://github.com/LimeTip/tapid/issues/273). It does not expand the
+root-script support claim or complete #157. The LPAC evidence recorded in
+[platform validation](platform-validation.md#private-windows-dependency-write-and-key-validation)
+establishes sampled AAP denial, not a complete input boundary.
+
+| Input or authority | Current treatment | Required before authenticating generated output |
+| --- | --- | --- |
+| All Application Packages, `S-1-15-2-1` | Launch opts out. Paired AccessCheck controls inspect the suspended child's actual token before resume. Existing native fixtures deny undeclared AAP-only reads in root and child. | Extend the same fixture to deny AAP-only executable launch and dynamic image loading, with successful host and approved-image controls. |
+| All Restricted Application Packages, `S-1-15-2-2` | The LPAC check does not reject ARAP-only authority. Explicit target ACL grants add permissions; they do not subtract ambient grants elsewhere. | Characterize ARAP-only data, executable and dynamic DLL access in root and child. Any accessible bytes outside bound inputs prevent authentication. A System32 digest cannot cover arbitrary ARAP-readable paths. |
+| Declared project, dependency and tool inputs | The CLI copies build sources and approved executable bytes into private staging. `Read` grants permit image execution; `ReadData` does not. `tool_identity` includes declared tool names, paths and digests. | Bind the actual staged snapshots and their access/order rules to the recipe, hold their identity through execution, and test adjacent data/DLL changes, replacement and extra-file insertion. A primary executable digest is insufficient. |
+| Private writes | The CLI labels private dependency copies for low-integrity writes. General root-script grants have a separate existing-target contract. | Keep temporary output and writable input state separate. Prove later loads and descendants cannot turn writable state into an unbound host tool input. Existing private-write controls remain required. |
+| AppContainer profile storage | Each execution creates a fresh named profile and deletes it after owned execution cleanup. The environment builder forces the host `LOCALAPPDATA` and `SYSTEMROOT` values. Fresh naming does not establish empty or inaccessible profile contents. | Inspect actual filesystem and registry storage under the execution token. Classify initial bytes, writable state and profile cleanup failures. Test cross-run contamination without touching a real user's data. |
+| Registry | The sole enabled capability is `registryRead`, retained for socket-provider initialization. Token verification excludes other capabilities but does not enumerate readable registry values. | Use disposable registry fixtures with positive and negative controls. Account for readable values, key topology, WOW64 view, value types and registry-driven resolution. Do not equate absence of network capability SIDs with absence of registry inputs. |
+| COM and other OS brokers | No `lpacCom` capability is granted. The current token checks do not establish a complete list of reachable endpoints or returned data. | Test representative activation and broker paths under the real token and descendants. Deny undeclared broker inputs or define and bind their finite inputs. Capability omission alone is not a behavioral verdict. |
+| KnownDLLs and API sets | Native loader inputs are outside the application's static PE import list. The compatibility adapter excludes system modules from import patching. | Bind effective mappings, architecture and resolved system image bytes, or explicitly document which immutable OS state is trusted and enforce that assumption. Test a changed mapping or runtime byte outside the primary executable. |
+| Side-by-side activation and DLL redirection | The launcher does not collect effective activation contexts, manifests or redirection state into a dependency recipe. | Include effective configuration and resolved inputs, including external manifests and dependent-image resolution. Changing configuration or resolution order must change identity or reject execution. |
+| Dynamic loads and descendants | The adapter patches supported application imports after ordinary loads. System DLL internals, initialization-time launches, manually mapped images and dynamically resolved process APIs remain outside promised adaptation. LPAC/Job restrictions still apply. | Exercise absolute and searched DLL paths, changed search order, loads during initialization, native calls and descendant execution. Enforce the input boundary independently of these compatibility hooks. A load log or static import scan cannot prove that inaccessible paths remain inaccessible. |
+| Backend, OS and compatibility code | The component is embedded, byte-verified and pinned against write/replacement. Receipts disclose its digest. Windows has no authenticated dependency system identity yet. | Bind backend executable/component bytes, OS build and architecture, loader configuration, runtime inputs and ordered declared tool snapshots to the recipe. Enforce consistency between identification and use. |
+| Network and inherited authority | The suspended launch verifies package identity, capabilities and Job membership. No-network execution requires the WFP guard; stdio handles and explicit environment are separately constructed. | Retain guard, handle, descendant and cleanup controls. Network-disabled execution does not imply that filesystem, registry or broker inputs are bound. |
+
+The new `windows_containment` characterization keeps the existing native execution
+interface. It compares AAP and ARAP fixture grants on disposable
+`tapid-test-support` projects. Both the root and a real child read an approved
+file, load an approved private image, then attempt the undeclared file,
+executable and DLL. Host controls verify the outside executable and DLL first;
+successful DLL loads must resolve to the exact copied fixture path. The ARAP
+case expects accessible inputs and separately requires the public
+`dependency_toolchain_identity` API to reject authentication. These expectations
+record the gap; they are not denial acceptance for ARAP. No native result is
+claimed until Windows executes the changed tests.
+
+Run the unignored controls through the existing Windows CI acceptance step, after
+guard installation:
+
+```text
+node --experimental-strip-types scripts/dev.ts test -p tapid-runner --test windows_containment --locked windows_denies_ambient_all_application_packages -- --show-output
+node --experimental-strip-types scripts/dev.ts test -p tapid-runner --test windows_containment --locked windows_lpac_records_unbound_restricted_package_inputs -- --show-output
+```
+
+Record exact source and artifact identities, Windows build/architecture, Rust
+version, commands, successful positive controls and root/child verdicts under
+the [platform evidence rules](platform-validation.md#evidence-record).
+Compilation on another OS is not native validation. If a characterization
+differs on a supported Windows build, investigate the actual token and fixture
+ACLs before changing the expected access result.
+
+Microsoft documents [LPAC launch and capability requirements](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+and [AppContainer local storage](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getappcontainerfolderpath).
+Its [DLL search-order documentation](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order)
+describes redirection, API sets, side-by-side manifests, already loaded modules,
+KnownDLLs and search-order configuration. These are the documented reasons to
+inventory more than static imports; they are not evidence that Tapid has bounded
+those inputs. No complete Windows dependency toolchain identity or new trusted
+OS assumption is adopted here. Keep default authentication gated while any row
+remains unbound, and retain explicit unsafe overrides without attestations.
+
+### Standard-Node compatibility
+
 The integrated Windows runner now owns standard-Node compatibility. Cargo builds a Rust DLL for the target architecture and embeds its bytes in Tapid, preserving the single-executable installer/release contract. A fresh request-owned copy is pinned against writes and replacement outside project write authority. The launcher verifies the AppContainer token and Job assignment before delegating finite exact ancestor metadata handles and installing the component while the application thread remains suspended. Child and grandchild compatibility uses the same held-handle preparation and preserves caller-requested suspension. Original Node bytes are unchanged.
 
 Ancestor capabilities have FILE_READ_ATTRIBUTES only. They are ReadMetadata/ExactDirectory/BackendRuntime grants in the checked receipt and do not grant directory listing, file contents, writes, image execution, deletion, ownership or ACL editing. Startup checks sensitive DuplicateHandle upgrades for every capability and ReOpenFile upgrades for volume roots. Existing AppContainer ACLs continue to enforce ordinary project access. Kernel restrictions still apply to direct native calls and unhooked modules. No ancestor DACL mutation or host path/PID RPC service is used. Bindings retain CanonicalPath evidence and the existing trusted-host race limitation.
