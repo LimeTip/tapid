@@ -444,6 +444,57 @@ fn racing_matching_artifact_is_accepted_and_preserved() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn racing_directory_artifact_is_rejected_and_preserved() {
+    let project = tapid_test_support::TempProject::new("racing-directory").unwrap();
+    let store = Store::new(project.path());
+    let bytes = b"expected artifact";
+    let expected = digest(bytes);
+    let destination = store.artifact_path(&expected);
+    struct CompetingReader {
+        destination: PathBuf,
+        input: Cursor<&'static [u8]>,
+        inserted: bool,
+    }
+    impl Read for CompetingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.inserted {
+                fs::create_dir_all(self.destination.parent().unwrap())?;
+                fs::create_dir(&self.destination)?;
+                fs::write(self.destination.join("sentinel"), b"competitor contents")?;
+                self.inserted = true;
+            }
+            self.input.read(buffer)
+        }
+    }
+    let mut reader = CompetingReader {
+        destination: destination.clone(),
+        input: Cursor::new(bytes),
+        inserted: false,
+    };
+    let result = store.ingest(&expected, &mut reader);
+    assert!(reader.inserted, "competitor setup must complete");
+    assert_eq!(reader.input.position(), bytes.len() as u64);
+    assert!(matches!(result, Err(IngestError::Io(_))));
+    assert!(fs::symlink_metadata(&destination).unwrap().is_dir());
+    assert_eq!(
+        fs::read(destination.join("sentinel")).unwrap(),
+        b"competitor contents"
+    );
+    let entries = fs::read_dir(&destination)
+        .unwrap()
+        .collect::<io::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        fs::read_dir(project.path().join(".staging"))
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// Recognize unavailable Windows symlink support, including missing privilege 1314.
 fn symlink_creation_unavailable(error: &io::Error) -> bool {
     matches!(
@@ -559,6 +610,91 @@ fn no_follow_artifact_open_rejects_symlink() {
 
     assert!(result.is_err());
     let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn racing_fifo_artifact_is_rejected_and_preserved() {
+    use std::os::unix::fs::FileTypeExt;
+
+    const CHILD_MARKER: &str = "TAPID_TEST_RACING_FIFO_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        let project = tapid_test_support::TempProject::new("racing-fifo").unwrap();
+        let store = Store::new(project.path());
+        let bytes = b"expected artifact";
+        let expected = digest(bytes);
+        let destination = store.artifact_path(&expected);
+        struct CompetingReader {
+            destination: PathBuf,
+            input: Cursor<&'static [u8]>,
+            inserted: bool,
+        }
+        impl Read for CompetingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.inserted {
+                    fs::create_dir_all(self.destination.parent().unwrap())?;
+                    let status = std::process::Command::new("mkfifo")
+                        .args(["-m", "600"])
+                        .arg(&self.destination)
+                        .status()?;
+                    if !status.success() {
+                        return Err(io::Error::other(format!("mkfifo failed: {status}")));
+                    }
+                    self.inserted = true;
+                }
+                self.input.read(buffer)
+            }
+        }
+        let mut reader = CompetingReader {
+            destination: destination.clone(),
+            input: Cursor::new(bytes),
+            inserted: false,
+        };
+        let result = store.ingest(&expected, &mut reader);
+        assert!(reader.inserted, "competitor setup must complete");
+        assert_eq!(reader.input.position(), bytes.len() as u64);
+        assert!(matches!(
+            result,
+            Err(IngestError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists
+        ));
+        assert!(
+            fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert!(
+            fs::read_dir(project.path().join(".staging"))
+                .unwrap()
+                .collect::<io::Result<Vec<_>>>()
+                .unwrap()
+                .is_empty()
+        );
+        return;
+    }
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("tests::racing_fifo_artifact_is_rejected_and_preserved")
+        .env(CHILD_MARKER, "1")
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "FIFO ingestion subprocess failed: {status}"
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("ingesting a competing FIFO blocked instead of rejecting it");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 #[cfg(unix)]
