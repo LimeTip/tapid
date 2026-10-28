@@ -531,3 +531,20 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+Project-lock contention fails immediately as `PROJECT_BUSY`. Normal shared-store
+lock acquisition has a five-second budget per acquisition call, shared across
+recovery escalation and retries; expiry reports `STORE_BUSY`. Cache maintenance
+continues to refuse immediately as `CACHE_BUSY`. Separate acquisitions have
+separate budgets. This is not a command deadline: recovery already started,
+filesystem latency, network work, lifecycle execution, and lock ownership are not
+bounded. No attempt starts after expiry, but scheduling or an in-flight attempt can
+delay return. Long legitimate holders can cause failure; polling has no fairness
+guarantee. See [store locking](../tapid-store/README.md) for the acquisition policy.
+
+If a mutation response is lost, inspect expected state with `status` and follow
+pending-recovery guidance before another mutation. Current status and an
+`unchanged` result cannot prove whether a particular historical invocation
+committed, especially after cleanup or a later mutation. Operation IDs and durable
+completion records remain deferred. See [JSON results](../../docs/json-results.md#contention-and-lost-responses)
+and the [workflow evaluation](../../docs/testing.md#bounded-wait-and-lost-response-evaluation).
