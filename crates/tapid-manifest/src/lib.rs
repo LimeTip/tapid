@@ -28,6 +28,34 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn effective_install_declarations_apply_optional_override_and_preserve_dev() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1.0.0","runtime":"1.0.0"},"optionalDependencies":{"shared":"2.0.0"},"devDependencies":{"shared":"2.0.0"},"peerDependencies":{"provider":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let declarations: Vec<_> = manifest.effective_install_declarations().collect();
+        assert_eq!(
+            declarations,
+            vec![
+                (DependencyKind::Dependencies, "runtime", "1.0.0"),
+                (DependencyKind::DevDependencies, "shared", "2.0.0"),
+                (DependencyKind::OptionalDependencies, "shared", "2.0.0"),
+            ]
+        );
+        assert_eq!(manifest.dependencies()["shared"], "1.0.0");
+        let required: Vec<_> = declarations
+            .into_iter()
+            .filter(|(kind, _, _)| *kind != DependencyKind::OptionalDependencies)
+            .collect();
+        assert_eq!(required.len(), 2);
+        assert!(
+            !required
+                .iter()
+                .any(|(_, name, range)| *name == "shared" && *range == "1.0.0")
+        );
+    }
+
+    #[test]
     fn parses_supported_metadata() {
         let manifest = PackageManifest::parse(r#"{"name":"example-app","version":"1.2.3","private":true,"dependencies":{"kleur":"^4.1.5"},"scripts":{"test":"cargo test"}}"#).unwrap();
         assert_eq!(manifest.name().as_str(), "example-app");

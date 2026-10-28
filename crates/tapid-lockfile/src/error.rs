@@ -5,6 +5,7 @@ use tapid_core::DomainError;
 #[derive(Debug)]
 pub enum LockfileError {
     Serialization(serde_json::Error),
+    InvalidProfileSelection(String),
     Domain(DomainError),
     InvalidUrl(String),
     InvalidSha512(String),
@@ -44,6 +45,9 @@ pub enum LockfileError {
 impl fmt::Display for LockfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidProfileSelection(reason) => {
+                write!(f, "invalid native profile selection: {reason}")
+            }
             Self::Serialization(error) => write!(f, "invalid lockfile JSON: {error}"),
             Self::Domain(error) => error.fmt(f),
             Self::InvalidUrl(value) => {

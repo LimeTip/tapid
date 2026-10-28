@@ -1420,7 +1420,16 @@ fn update_latest_preserves_overlapping_dependency_sections() {
                     &fs::read(dir.join("node_modules").join(name).join("package.json")).unwrap(),
                 )
                 .unwrap();
-                assert_eq!(installed["version"], if latest { "2.0.0" } else { "1.0.0" });
+                // Optional overrides the regular range, even when update preserves
+                // both original declaration sections without --latest.
+                assert_eq!(
+                    installed["version"],
+                    if latest || second_section == "optionalDependencies" {
+                        "2.0.0"
+                    } else {
+                        "1.0.0"
+                    }
+                );
 
                 fs::remove_dir_all(dir.join("node_modules")).unwrap();
                 let replay = run(
@@ -8963,6 +8972,46 @@ fn why_confirmed_absent_package_still_exits_one() {
         String::from_utf8_lossy(&output.stdout)
             .contains("No path to 'missing' was found in the resolved dependency graph.")
     );
+}
+
+#[test]
+fn native_why_reports_selection_scope_in_human_and_json_absent_results() {
+    let project = tapid_test_support::TempProject::new("why-native-output").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0"}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let lock = tapid_lockfile::NativeSelection::new(
+        "0".into(),
+        "0".into(),
+        lock_for_manifest(manifest)
+            .root_manifest_digest()
+            .to_owned(),
+        Default::default(),
+        Vec::new(),
+        Default::default(),
+    )
+    .unwrap()
+    .to_json()
+    .unwrap();
+    project.write("tapid.lock", lock.as_bytes()).unwrap();
+    let human = run(project.path(), &["why", "missing"]);
+    assert_eq!(human.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("complete selection"));
+    let output = run(project.path(), &["why", "missing", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["not_found"], true);
+    assert!(
+        json["data"]["graph_warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("complete selection")
+    );
+    assert_eq!(json["changes"]["state"], "unchanged");
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        lock
+    );
+    assert!(!project.path().join("node_modules").exists());
 }
 
 #[test]

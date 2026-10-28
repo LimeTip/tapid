@@ -4,8 +4,10 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    #[command(flatten)]
+    profile: super::profile::ProfileArgs,
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["omit", "include", "production"])]
     pub(crate) dry_run: bool,
     /// Package to add to dependencies, such as react@^19.0.0. Defaults to * without a requirement. Online only.
     #[arg(value_parser = parse_package_argument)]
@@ -98,6 +100,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     };
     let result = crate::application::install::run_with_execution(
         crate::application::install::InstallRequest {
+            profile: args.profile.effective(),
             project_dir: &args.project_dir,
             target_manifest_path: &target_manifest_path,
             mutation: args.package.as_deref().map_or(

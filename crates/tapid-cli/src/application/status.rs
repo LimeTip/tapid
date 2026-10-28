@@ -260,6 +260,12 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     match read(&lock_path, MAX_FILE_BYTES) {
         Ok(bytes)
             if serde_json::from_slice::<Value>(&bytes)
+                .is_ok_and(|value| value["lockfileVersion"] == 11) =>
+        {
+            inspect_native_selection(&bytes, &manifest_bytes, workspace.as_ref(), &mut report);
+        }
+        Ok(bytes)
+            if serde_json::from_slice::<Value>(&bytes)
                 .is_ok_and(|value| value["lockfileVersion"] == 8) =>
         {
             inspect_imported_lock(&bytes, &manifest_bytes, workspace.as_ref(), &mut report);
@@ -322,6 +328,11 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     if changed {
         report.block("SNAPSHOT_CHANGED", &project);
         report.manifest_lock_agreement = "unknown";
+        for installation in &mut report.installation {
+            if installation.get("profile").is_some() {
+                installation["profile"] = json!({"state": "unknown_snapshot_changed"});
+            }
+        }
     }
     report.snapshot =
         json!({"consistency": "not_atomic", "changes_detected": changed, "files": files});
@@ -343,6 +354,13 @@ fn inspect_installation(
     snapshots.insert(path.clone(), (0, fingerprint(&path, 0)));
     let marker = project.join(".tapid-managed");
     snapshots.insert(marker.clone(), (1024, fingerprint(&marker, 1024)));
+    for (name, limit) in [
+        (".tapid-profile.json", 4 * 1024 * 1024),
+        (".tapid-generation", 128),
+    ] {
+        let metadata = path.join(name);
+        snapshots.insert(metadata.clone(), (limit, fingerprint(&metadata, limit)));
+    }
     let valid = validate_managed_node_modules(project).is_ok();
     #[cfg(test)]
     tests::after_ownership_validation(project);
@@ -380,6 +398,84 @@ fn workspace_matches(
             .map_err(|_| "WORKSPACE_COMPATIBILITY_BLOCKER")?;
     crate::application::replay::validate_workspace_dependency_edges(&workspace, &dependencies, lock)
         .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
+}
+
+/// Inspect complete selection snapshots without consulting installed source evidence.
+fn inspect_native_selection(
+    bytes: &[u8],
+    manifest_bytes: &Result<Vec<u8>, &'static str>,
+    workspace: Option<&Workspace>,
+    report: &mut StatusReport,
+) {
+    let lock_path = report.project.join("tapid.lock");
+    let Some(selection) = std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| tapid_lockfile::NativeSelection::from_json(text).ok())
+    else {
+        report.block("LOCKFILE_INVALID", &lock_path);
+        return;
+    };
+    report.checks_not_performed.extend([
+        "native_selection_registry_routing_and_declaration_bindings",
+        "native_selection_source_integrity",
+    ]);
+    let profile = if report.installation[0]["state"] == "absent" {
+        json!({"state": "absent"})
+    } else {
+        match crate::filesystem::installed_profile::load_profile(
+            &report.project,
+            &selection,
+            &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        ) {
+            Ok(profile) => {
+                json!({"state": "validated", "includeDev": profile.include_dev, "includeOptional": profile.include_optional})
+            }
+            Err(_) => {
+                let path = report.project.join("node_modules/.tapid-profile.json");
+                report.block("INSTALLED_PROFILE_INVALID", &path);
+                json!({"state": "invalid"})
+            }
+        }
+    };
+    report.installation[0]["profile"] = profile;
+    let Ok(root) = manifest_bytes else { return };
+    let members = workspace
+        .into_iter()
+        .flat_map(|workspace| workspace.members())
+        .map(|member| {
+            let relative = member
+                .path()
+                .parent()
+                .and_then(|path| path.strip_prefix(&report.project).ok())
+                .ok_or(())?;
+            let key = relative
+                .components()
+                .map(|part| part.as_os_str().to_str().ok_or(()))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("/");
+            Ok((
+                key,
+                digest_bytes(&read(member.path(), MAX_FILE_BYTES).map_err(|_| ())?),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, ()>>();
+    let result = members
+        .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
+        .and_then(|members| {
+            selection
+                .validate_replay(&digest_bytes(root), &members)
+                .map_err(|error| match error {
+                    LockfileError::RootManifestDigestMismatch { .. } => "LOCK_MANIFEST_MISMATCH",
+                    _ => "LOCK_WORKSPACE_MISMATCH",
+                })
+        });
+    match result {
+        Ok(()) => report.manifest_lock_agreement = "match",
+        Err(code) => {
+            report.manifest_lock_agreement = "mismatch";
+            report.block(code, &lock_path);
+        }
+    }
 }
 
 /// Validate schema-8 root and workspace receipts with bounded manifest reads.
@@ -552,6 +648,130 @@ mod tests {
         if let Some((path, bytes)) = replacement {
             fs::write(path, bytes).unwrap();
         }
+    }
+
+    #[test]
+    fn status_reports_installed_profile_and_rejects_missing_stale_and_forged_records() {
+        use crate::filesystem::{
+            activation::{ActivationLock, activate_node_modules_with_preflight},
+            installed_profile::stage_profile,
+        };
+        let project = TempProject::new("status-installed-profile").unwrap();
+        let manifest = br#"{"name":"root","version":"1.0.0"}"#;
+        project.write("package.json", manifest).unwrap();
+        let selection = tapid_lockfile::NativeSelection::new(
+            "0".into(),
+            "0".into(),
+            digest_bytes(manifest),
+            Default::default(),
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let lock_bytes = selection.to_json().unwrap();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        let lock = ActivationLock::acquire(project.path()).unwrap();
+        let stage = lock.create_stage(project.path()).unwrap();
+        fs::create_dir_all(stage.join("node_modules")).unwrap();
+        stage_profile(
+            &stage,
+            &selection,
+            tapid_lockfile::InstallProfile::production(),
+            &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            lock.owner_line(),
+        )
+        .unwrap();
+        activate_node_modules_with_preflight(project.path(), &stage, &lock, false, || Ok(()))
+            .unwrap();
+        drop(lock);
+        let report = inspect(project.path(), None);
+        assert_eq!(
+            report.installation[0]["profile"],
+            json!({"state":"validated", "includeDev":false, "includeOptional":true})
+        );
+        let path = project.path().join("node_modules/.tapid-profile.json");
+        let original = fs::read(&path).unwrap();
+        for field in ["generation", "materializedKeys"] {
+            let mut record: Value = serde_json::from_slice(&original).unwrap();
+            record[field] = if field == "generation" {
+                json!("stale")
+            } else {
+                json!(["forged"])
+            };
+            let bytes = serde_json::to_vec(&record).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let report = inspect(project.path(), None);
+            assert!(
+                report
+                    .blockers
+                    .iter()
+                    .any(|b| b.code == "INSTALLED_PROFILE_INVALID")
+            );
+            assert_eq!(report.installation[0]["profile"]["state"], "invalid");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_file(&path).unwrap();
+        let report = inspect(project.path(), None);
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|b| b.code == "INSTALLED_PROFILE_INVALID")
+        );
+        assert!(!path.exists());
+        fs::write(&path, &original).unwrap();
+        let mut replacement: Value = serde_json::from_slice(&original).unwrap();
+        replacement["includeDev"] = json!(true);
+        MANIFEST_REPLACEMENT.with(|pending| {
+            *pending.borrow_mut() = Some((path.clone(), serde_json::to_vec(&replacement).unwrap()))
+        });
+        let _guard = FaultGuard;
+        let report = inspect(project.path(), None);
+        assert!(report.blockers.iter().any(|b| b.code == "SNAPSHOT_CHANGED"));
+        assert_eq!(
+            report.installation[0]["profile"]["state"],
+            "unknown_snapshot_changed"
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
+    }
+
+    #[test]
+    fn status_recognizes_native_selection_and_blocks_stale_manifest() {
+        let project = TempProject::new("status-native-selection").unwrap();
+        let manifest = br#"{"name":"root","version":"1.0.0"}"#;
+        project.write("package.json", manifest).unwrap();
+        let selection = tapid_lockfile::NativeSelection::new(
+            "0".into(),
+            "0".into(),
+            digest_bytes(manifest),
+            Default::default(),
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let lock = selection.to_json().unwrap();
+        project.write("tapid.lock", lock.as_bytes()).unwrap();
+        let report = inspect(project.path(), None);
+        assert_eq!(report.manifest_lock_agreement, "match");
+        assert!(!report.blockers.iter().any(|b| b.code == "LOCKFILE_INVALID"));
+        project
+            .write("package.json", br#"{"name":"root","version":"2.0.0"}"#)
+            .unwrap();
+        let report = inspect(project.path(), None);
+        assert_eq!(report.manifest_lock_agreement, "mismatch");
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|b| b.code == "LOCK_MANIFEST_MISMATCH")
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock.as_bytes()
+        );
     }
 
     #[test]

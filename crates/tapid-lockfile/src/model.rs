@@ -1135,7 +1135,7 @@ impl DerivedHookOutput {
         &self.tree_digest
     }
 }
-fn validate_derived_hooks(outputs: &[DerivedHookOutput]) -> Result<(), LockfileError> {
+pub(crate) fn validate_derived_hooks(outputs: &[DerivedHookOutput]) -> Result<(), LockfileError> {
     let mut previous = None;
     for output in outputs {
         let tag = output
@@ -1327,7 +1327,7 @@ impl LockedPackage {
         &self.dependencies
     }
 
-    fn validate(&self) -> Result<(), LockfileError> {
+    pub(crate) fn validate(&self) -> Result<(), LockfileError> {
         let registry = self
             .registry
             .parse::<PackageSource>()
@@ -1401,6 +1401,17 @@ impl LockedPackage {
     pub fn set_artifact_url(&mut self, url: &str) -> Result<(), LockfileError> {
         validation::validate_artifact_url(url)?;
         self.artifact_url = Some(url.to_owned());
+        Ok(())
+    }
+    pub(crate) fn replace_dependency_bindings(
+        &mut self,
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<(), LockfileError> {
+        self.dependencies.clear();
+        self.dependency_aliases.clear();
+        for (name, target) in bindings {
+            self.add_alias_dependency(name, target)?;
+        }
         Ok(())
     }
     pub fn add_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {

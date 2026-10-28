@@ -59,3 +59,71 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+`NativeSelection` is the schema-11 capability model for explicit dependency-kind
+profiles. `install` can create it for a fresh non-full
+registry selection and replay full or omitted profiles without changing its bytes.
+`install` and `ci` expose explicit omit/include and production options; existing
+legacy and imported locks reject non-full profiles. Replay validates complete declaration kinds and
+exact manifest bindings before archive access; only the enabled closure reaches
+lifecycle discovery and layout activation. These source layouts use default-denied
+lifecycle policy. Replay checks approvals and derived outputs only for materialized
+packages; omitted-only lifecycle approvals do not require their archives or tools.
+Native preparation preserves retained derived-hook claims in its invocation-local
+lifecycle graph without selecting their output trees or authenticating the claims.
+Retained derived outputs without matching approvals fail the existing lifecycle
+replay output-list check before activation; removing policy cannot silently
+replace a derived tree with its source tree. Retained hooks use the existing exact
+approval, recipe and store-local attestation verifier before journaled activation;
+replay never executes a missing build. Authenticated replay requires the supported
+Linux toolchain identity. Selection mutation remains unsupported.
+Fresh profile preparation uses the existing lifecycle store transaction for
+approved hooks and records verified source and derived-output evidence in the
+complete selection. Omitted-only approvals require no archives or tools; failed
+authorization, execution or activation retains project rollback. Hook execution
+requires the supported Linux toolchain and containment backend. Native workspace
+profiles validate complete member snapshots and declaration kinds before archive
+access, keep registry bindings and local links scoped to each manifest, and stage
+every member with the root in the existing recovery transaction. Profiles apply
+to all discovered members, including members whose enabled declarations are empty.
+Workspace peer declarations and package edges to workspace sources remain
+unsupported and reject before source preparation. Unlike `Lockfile`, it
+separates pending registry archive pins from verified source/derived evidence,
+records typed declaration and package edges, and retains exact peer providers.
+`new` accepts typed declaration, package, edge and source-evidence inputs;
+both it and `from_json` validate the complete selection, including omitted packages;
+`validate_replay` compares the root digest and exact workspace manifest snapshot
+before source preparation;
+`materialized_declarations(InstallProfile)` and `materialized_dependencies(key,
+profile)` expose enabled local bindings, including exact peer providers, for
+layout planning. An omitted optional binding remains absent even if another
+enabled path retains its target. `materialized_keys(InstallProfile)` uses the
+same binding rules and returns exact retained keys without altering
+that selection. Optional declarations must already override regular declarations;
+dev declarations remain independent. Workspace declarations share the same
+profile, and local workspace records bind to declared member paths. Pending
+records cannot contain tree receipts, copied sources, or derived outputs.
+Verified records reuse existing package and derived-output validation. Structural
+receipt validation does not authenticate a derived output or authorize activation.
+Offline CLI status recognizes schema 11 and checks the root and workspace
+manifest snapshots with bounded reads. For an installed root layout it validates
+the recorded profile against the selection, target, exact closure and activation
+generation. Missing or invalid installed profile metadata is a local blocker;
+an absent installation is reported without inferring a profile. Profile and
+generation metadata participate in snapshot rechecks; detected changes invalidate
+the reported profile. Human and JSON status include the same profile metadata.
+Registry declaration bindings and source integrity remain checks not performed.
+Prune preserves a schema-11 installation's recorded profile, validating its
+selection, target, exact closure and activation generation before replay. Missing
+or stale profile metadata fails before materialization. The generation record
+travels with the layout during activation and recovery; neither record grants
+source integrity or lifecycle-output authority. Older layouts without a generation
+record require explicit install replay before schema-11 prune.
+Offline CLI `why` explicitly dispatches schema 11 and validates the complete
+manifest snapshot. It explains the complete selection using typed declaration
+and dependency edges and exact peer providers, including omitted packages and
+workspace-scoped declarations. It does not infer installed membership or verify
+source integrity; human and JSON results state these limits.
+The existing `Lockfile` reader continues to reject schema 11. See
+[ADR 0012](../../docs/adr/0012-native-profile-selection-evidence.md) for evidence
+authority, frozen replay and transaction integration requirements.

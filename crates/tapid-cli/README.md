@@ -56,6 +56,26 @@ tapid clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | --result-file <PATH>] [-- <ARGS>...]
 ```
 
+`install` and `ci` accept repeated `--omit dev|optional`, `--include dev|optional`,
+and `--production` (equivalent to `--omit dev`). Both kinds are included by
+default; explicit inclusion wins regardless of argument order. `NODE_ENV` does
+not select a profile. Required dependencies and exact peer providers remain
+reachable even when also declared through an omitted kind. Optional declarations
+retain their existing override precedence. These options select materialization,
+not a smaller lockfile. Human and JSON success output report the native profile.
+
+Non-full profiles require a complete native schema-11 selection, or a fresh
+registry install without an existing lock. Existing legacy and imported
+locks reject non-full profiles rather than infer transitive kinds. Profiles apply
+to the root and every discovered workspace member: each scope keeps its own
+registry bindings and enabled local workspace links. Root and member layouts and
+profile metadata recover together. Native workspace peer declarations, package
+edges to workspace sources, selection mutations and execution overrides remain
+unsupported and reject before activation. Profile options conflict with `--dry-run`. Frozen and
+CI replay preserve selection bytes; offline replay additionally requires verified
+source evidence and locally available content. Fresh default-full installs retain
+the existing lock format. Full replay of a schema-11 lock restores omitted kinds.
+
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
 `tapid manifest validate` rejects symlinks and other non-regular files before
@@ -208,12 +228,18 @@ tapid install --registry-fixture ./fixture.json --project-dir ./example
 
 The fixture option is for local tests and air-gapped development. It is not a registry authentication or production mirror feature. The live npm path resolves supported transitive ranges, requires registry-declared SHA-512 integrity by default, selects compatible optional packages for the current OS/CPU/libc target, verifies extracted trees, writes schema 7 locks without derived outputs, schema 9 locks with approved lifecycle outputs, or schema 10 locks with copied file/Git sources, and stores trees in the platform cache outside the consumer project. `--allow-unverified-registry-artifacts` is an explicit online-only compatibility exception and emits a warning.
 
-When that option is enabled, existing lock entries with locally computed integrity
+Fixture package records may include `artifactUrl` for the accepted HTTPS archive
+pin used by native selections, while `artifact` supplies the local archive path
+or base64 bytes. Archive integrity and source identity checks still apply.
+
+When `--allow-unverified-registry-artifacts` is enabled, existing lock entries with locally computed integrity
 are resolved and fetched again. Ordinary online installs still preserve compatible
 registry-verified selections. Offline, frozen, and CI replay reject locally computed
 integrity even when the artifact is cached.
 
 `tapid why <PACKAGE>` reads the selected project's `package.json` and `tapid.lock` and lists deterministic dependency paths from direct roots to each reachable locked instance of that package. Use `--project-dir PATH` to select a project and `--workspace NAME` for a workspace member. It is strictly read-only and offline: it does not contact registries, recover transactions, inspect or modify the store, or materialize `node_modules`. Direct install roots retain their manifest kind (`dependencies`, `devDependencies`, or `optionalDependencies`); recorded package peer-context relationships are labeled `peer`, while transitive lockfile dependency edges are labeled `dependency` because the current schema does not preserve their original kind. The consuming project's own `peerDependencies` are declarations, not install roots. Registry identity, version, and workspace source are shown to disambiguate instances. A confirmed absent match prints an explicit message and exits with status `1`; a bounded search is reported as partial instead.
+
+For native schema-11 selections, `why` checks the complete root and workspace manifest snapshot and explains the complete selection, including omitted dev and optional packages. It uses recorded declaration kinds, required/optional transitive kinds and exact peer providers. Paths through workspace members include their scoped declarations. Human output and JSON graph warnings state that these paths do not establish installed membership or source integrity; installed profile metadata is not read. Legacy locks retain the edge-kind limitations described above.
 
 `tapid --json why PACKAGE` emits the version 1 JSON envelope with `schema_version: 1`, `operation: "why"`, `outcome`, `project`, `changes`, `warnings`, `errors`, `retry`, and a command-specific `data` object. The `data` object contains `package`, `paths`, `truncated`, `not_found`, and `graph_warnings`. Results are deterministic and bounded to 50 paths, 128 dependency levels, and 10,000 graph visits; `truncated: true` means the search is partial, so `not_found` is false and the command exits successfully even when no path was found. Transitive edge-kind limitations are surfaced in `data.graph_warnings`.
 

@@ -91,7 +91,7 @@ and replaces managed node_modules. Imported locks use install with --frozen.
 
 ## Install and dependency preview results
 
-Ordinary install and mutating lifecycle results contain `data.package_count` and `data.replayed`. They exclude graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages.
+Ordinary install and mutating lifecycle results contain `data.package_count` and `data.replayed`. Native schema-11 success results additionally contain `data.profile` with boolean `include_dev` and `include_optional` fields, matching the human dependency-profile line. This describes materialization, not a reduced accepted selection. Legacy results omit this field because their complete dependency kinds are unknown. They exclude graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages.
 
 `tapid --json install --dry-run`, `add --dry-run`, `remove --dry-run`, and `update --dry-run` instead return a resolved graph preview under the version 1 envelope. The operation retains its canonical command name. Successful previews use `outcome: "success"`, `changes.state: "unchanged"`, empty affected-file lists, null retry advice, and exit 0. This payload is an observation, not an executable plan or a prepared installation.
 

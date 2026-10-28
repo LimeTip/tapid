@@ -97,22 +97,30 @@ pub(crate) fn explain(
         };
         OperationalError::from_source(kind, error).context("cannot read tapid.lock")
     })?;
-    let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
-    lock.validate_replay(&root_digest)
-        .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
-
-    let roots = if selection.manifest_path == root_manifest_path {
-        direct_roots(&lock, &selection.manifest, &selection.root_dir)?
+    let native = serde_json::from_str::<serde_json::Value>(&lock_bytes)
+        .ok()
+        .is_some_and(|value| value["lockfileVersion"] == tapid_lockfile::PROFILE_LOCKFILE_VERSION);
+    let (roots, graph) = if native {
+        native_graph(&lock_bytes, &selection, &root_digest, &requested)?
     } else {
-        workspace_roots(
-            &lock,
-            &selection.manifest,
-            &requested,
-            &selection.root_dir,
-            &selection.manifest_path,
-        )?
+        let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
+        lock.validate_replay(&root_digest)
+            .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
+
+        let roots = if selection.manifest_path == root_manifest_path {
+            direct_roots(&lock, &selection.manifest, &selection.root_dir)?
+        } else {
+            workspace_roots(
+                &lock,
+                &selection.manifest,
+                &requested,
+                &selection.root_dir,
+                &selection.manifest_path,
+            )?
+        };
+        let graph = graph(&lock)?;
+        (roots, graph)
     };
-    let graph = graph(&lock)?;
     let mut state = SearchState::default();
     for root in roots {
         let Some(source_kind) = graph.nodes.get(&root.key).map(source_kind) else {
@@ -140,7 +148,9 @@ pub(crate) fn explain(
         }
     }
 
-    let warnings = if state.paths.iter().any(|path| {
+    let warnings = if native {
+        vec!["paths describe the complete selection, including packages omitted from the installed profile; installation and source integrity are not checked".to_owned()]
+    } else if state.paths.iter().any(|path| {
         path.steps
             .iter()
             .skip(1)
@@ -168,6 +178,116 @@ pub(crate) fn explain(
         paths: state.paths,
         truncated: state.truncated,
     })
+}
+
+fn native_graph(
+    input: &str,
+    workspace: &super::lifecycle::WorkspaceSelection,
+    root_digest: &str,
+    requested: &tapid_core::PackageName,
+) -> Result<(Vec<Root>, WhyGraph), OperationalError> {
+    use tapid_lockfile::{
+        InstallProfile, NativeDeclarationKind as DeclarationKind,
+        NativeDependencyKind as DependencyKind, NativeSelection,
+    };
+    let selection = NativeSelection::from_json(input)?;
+    let discovered = tapid_manifest::Workspace::discover_typed(&workspace.root_dir)
+        .map_err(OperationalError::from)?;
+    let mut digests = BTreeMap::new();
+    for member in discovered.members() {
+        let path = member.path();
+        let relative = path
+            .parent()
+            .and_then(|path| path.strip_prefix(&workspace.root_dir).ok())
+            .ok_or_else(|| {
+                OperationalError::new(ErrorKind::Manifest, "workspace member is outside project")
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = fs::read(path)
+            .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))?;
+        digests.insert(relative, digest_bytes(&bytes));
+    }
+    selection.validate_replay(root_digest, &digests)?;
+    let selected_scope = if workspace.manifest_path == workspace.root_dir.join("package.json") {
+        None
+    } else {
+        Some(
+            workspace
+                .manifest_path
+                .parent()
+                .expect("manifest parent")
+                .strip_prefix(&workspace.root_dir)
+                .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    };
+    let mut roots = selection
+        .materialized_declarations(InstallProfile::default())
+        .filter(|edge| edge.workspace == selected_scope)
+        .map(|edge| Root {
+            key: edge.target.clone(),
+            name: edge.name.clone(),
+            kind: match edge.kind {
+                DeclarationKind::Required => "dependencies",
+                DeclarationKind::Dev => "devDependencies",
+                DeclarationKind::Optional => "optionalDependencies",
+            }
+            .into(),
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by(|a, b| (&a.name, &a.kind, &a.key).cmp(&(&b.name, &b.kind, &b.key)));
+    let mut graph = WhyGraph {
+        nodes: BTreeMap::new(),
+        edges: BTreeMap::new(),
+    };
+    for (key, package) in selection.packages() {
+        let identity = key.parse::<LockfilePackageKey>()?;
+        graph.nodes.insert(key.clone(), identity.clone());
+        let mut edges = package
+            .dependencies
+            .iter()
+            .map(|(name, edge)| Edge {
+                name: name.clone(),
+                target: edge.target.clone(),
+                kind: match edge.kind {
+                    DependencyKind::Required => "dependencies",
+                    DependencyKind::Optional => "optionalDependencies",
+                },
+            })
+            .chain(package.peer_providers.iter().map(|(name, target)| Edge {
+                name: name.clone(),
+                target: target.clone(),
+                kind: "peer",
+            }))
+            .collect::<Vec<_>>();
+        if let Some(source) = identity.source.workspace() {
+            edges.extend(
+                selection
+                    .materialized_declarations(InstallProfile::default())
+                    .filter(|edge| edge.workspace.as_deref() == Some(source.path()))
+                    .map(|edge| Edge {
+                        name: edge.name.clone(),
+                        target: edge.target.clone(),
+                        kind: match edge.kind {
+                            DeclarationKind::Required => "dependencies",
+                            DeclarationKind::Dev => "devDependencies",
+                            DeclarationKind::Optional => "optionalDependencies",
+                        },
+                    }),
+            );
+            if selected_scope.as_deref() == Some(source.path()) && &identity.name == requested {
+                roots.push(Root {
+                    key: key.clone(),
+                    name: identity.name.to_string(),
+                    kind: "workspace".into(),
+                });
+            }
+        }
+        graph.edges.insert(key.clone(), edges);
+    }
+    Ok((roots, graph))
 }
 
 fn direct_roots(
@@ -479,6 +599,172 @@ fn search_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_why_explains_complete_selection_with_typed_optional_edges() {
+        use serde_json::json;
+        let project = tapid_test_support::TempProject::new("why-native").unwrap();
+        let manifest =
+            br#"{"name":"root","version":"1.0.0","devDependencies":{"dev-alias":"npm:dev@1.0.0"}}"#;
+        project.write("package.json", manifest).unwrap();
+        let dev = package_key("dev", "1.0.0");
+        let optional = package_key("optional", "1.0.0");
+        let package = |dependencies| {
+            json!({
+                "sourceEvidence": {"state":"pending", "artifactUrl":"https://registry.npmjs.org/pkg.tgz",
+                    "artifactIntegrity":format!("sha512-{}==", "A".repeat(86))},
+                "dependencies": dependencies, "peerProviders":{}
+            })
+        };
+        let lock = json!({
+            "lockfileVersion":11, "resolverVersion":"0", "linkerVersion":"0",
+            "rootManifestDigest":digest_bytes(manifest), "workspaceManifestDigests":{},
+            "declarations":[{"workspace":null,"name":"dev-alias","kind":"dev","target":dev}],
+            "packages":{
+                dev.clone():package(json!({"optional-alias":{"kind":"optional","target":optional}})),
+                optional.clone():package(json!({}))
+            }
+        }).to_string();
+        project.write("tapid.lock", lock.as_bytes()).unwrap();
+        // An installed layout is deliberately unnecessary: why explains selection,
+        // including packages omitted from production materialization.
+        let report = explain(project.path(), None, "optional").unwrap();
+        assert_eq!(report.paths.len(), 1);
+        let steps = &report.paths[0].steps;
+        assert_eq!(steps[0].via.as_deref(), Some("dev-alias"));
+        assert_eq!(steps[0].edge_kind.as_deref(), Some("devDependencies"));
+        assert_eq!(steps[1].key, optional);
+        assert_eq!(steps[1].via.as_deref(), Some("optional-alias"));
+        assert_eq!(steps[1].edge_kind.as_deref(), Some("optionalDependencies"));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("complete selection"))
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            lock
+        );
+        assert!(!project.path().join("node_modules").exists());
+        project
+            .write("package.json", br#"{"name":"root","version":"2.0.0"}"#)
+            .unwrap();
+        assert!(explain(project.path(), None, "optional").is_err());
+    }
+
+    #[test]
+    fn native_why_traverses_workspace_declarations_and_validates_all_members() {
+        use serde_json::json;
+        let project = tapid_test_support::TempProject::new("why-native-workspace").unwrap();
+        let root = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"member":"1.0.0"}}"#;
+        let member = br#"{"name":"member","version":"1.0.0","devDependencies":{"tool":"1.0.0"}}"#;
+        project.write("package.json", root).unwrap();
+        project
+            .write("packages/member/package.json", member)
+            .unwrap();
+        let source =
+            tapid_lockfile::LocalWorkspaceSource::new("packages/member", "member", "1.0.0")
+                .unwrap();
+        let key = LockfilePackageKey::workspace(source.clone()).to_string();
+        let tool = package_key("tool", "1.0.0");
+        let lock = json!({
+            "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+            "rootManifestDigest":digest_bytes(root),
+            "workspaceManifestDigests":{"packages/member":digest_bytes(member)},
+            "declarations":[
+                {"workspace":null,"name":"member","kind":"required","target":key},
+                {"workspace":"packages/member","name":"tool","kind":"dev","target":tool}
+            ],
+            "packages":{
+                key.clone():{"sourceEvidence":{"state":"workspace","source":source},"dependencies":{},"peerProviders":{}},
+                tool.clone():{"sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/tool.tgz",
+                    "artifactIntegrity":format!("sha512-{}==", "A".repeat(86))},"dependencies":{},"peerProviders":{}}
+            }
+        }).to_string();
+        project.write("tapid.lock", lock.as_bytes()).unwrap();
+        let report = explain(project.path(), None, "tool").unwrap();
+        assert_eq!(report.paths.len(), 1);
+        assert_eq!(report.paths[0].steps.len(), 2);
+        assert_eq!(report.paths[0].steps[0].source_kind, "workspace");
+        assert_eq!(
+            report.paths[0].steps[1].edge_kind.as_deref(),
+            Some("devDependencies")
+        );
+        let report = explain(project.path(), Some("member"), "tool").unwrap();
+        assert_eq!(report.paths.len(), 1);
+        assert_eq!(report.paths[0].steps.len(), 1);
+        let report = explain(project.path(), Some("member"), "member").unwrap();
+        assert_eq!(report.paths.len(), 1);
+        assert_eq!(
+            report.paths[0].steps[0].edge_kind.as_deref(),
+            Some("workspace")
+        );
+        project
+            .write(
+                "packages/member/package.json",
+                br#"{"name":"member","version":"2.0.0"}"#,
+            )
+            .unwrap();
+        assert!(explain(project.path(), None, "tool").is_err());
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            lock
+        );
+    }
+
+    #[test]
+    fn native_why_uses_exact_peer_provider_instead_of_matching_all_contexts() {
+        use serde_json::json;
+        use tapid_core::{PeerContext, PlatformContext};
+        let project = tapid_test_support::TempProject::new("why-native-peers").unwrap();
+        let manifest = br#"{"name":"root","version":"1.0.0","dependencies":{"consumer":"1.0.0"}}"#;
+        project.write("package.json", manifest).unwrap();
+        let provider = package_key("provider", "1.0.0");
+        let other = LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "provider".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &PeerContext::default(),
+            &PlatformContext::new(Some("linux"), None, None).unwrap(),
+        )
+        .to_string();
+        let consumer = LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "consumer".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &PeerContext::default().with("provider".parse().unwrap(), "1.0.0".parse().unwrap()),
+            &PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string();
+        let package = |providers| {
+            json!({
+                "sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/pkg.tgz",
+                    "artifactIntegrity":format!("sha512-{}==", "A".repeat(86))},
+                "dependencies":{},"peerProviders":providers
+            })
+        };
+        let lock = json!({
+            "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+            "rootManifestDigest":digest_bytes(manifest),"workspaceManifestDigests":{},
+            "declarations":[{"workspace":null,"name":"consumer","kind":"required","target":consumer}],
+            "packages":{
+                consumer.clone():package(json!({"provider":provider})),
+                provider.clone():package(json!({})), other.clone():package(json!({}))
+            }
+        }).to_string();
+        project.write("tapid.lock", lock.as_bytes()).unwrap();
+        let report = explain(project.path(), None, "provider").unwrap();
+        assert_eq!(report.paths.len(), 1);
+        let step = report.paths[0].steps.last().unwrap();
+        assert_eq!(step.key, provider);
+        assert_eq!(step.edge_kind.as_deref(), Some("peer"));
+        assert_eq!(step.via.as_deref(), Some("provider"));
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            lock
+        );
+    }
 
     #[test]
     fn peer_edges_retain_all_matching_provider_contexts() {

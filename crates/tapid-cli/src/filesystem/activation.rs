@@ -72,6 +72,36 @@ pub(crate) fn activate_node_modules_with_preflight(
     if !staged.is_dir() {
         return Err("install transaction produced an empty node_modules layout".into());
     }
+    if fs::symlink_metadata(&staged)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_symlink()
+    {
+        return Err("refusing to activate a non-directory install staging tree".into());
+    }
+    // The generation travels in the same directory rename and rollback as the
+    // layout. It describes activation only; it is not package integrity evidence.
+    let generation_path = staged.join(".tapid-generation");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&generation_path)
+    {
+        Ok(mut file) => {
+            file.write_all(activation_lock.owner_line().as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|e| format!("cannot write layout generation: {e}"))?;
+            sync_directory(&staged)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let bytes = super::read::read_bounded_file(&generation_path, 128)
+                .map_err(|e| format!("cannot read staged layout generation: {e:?}"))?;
+            if bytes != activation_lock.owner_line().as_bytes() {
+                return Err("staged layout generation belongs to another activation".into());
+            }
+        }
+        Err(error) => return Err(format!("cannot create layout generation: {error}")),
+    }
     let destination = project.join("node_modules");
     let marker = project.join(".tapid-managed");
     let marker_exists = match fs::symlink_metadata(&marker) {
@@ -1150,6 +1180,8 @@ mod activation_tests {
         symlink(&external, stage.join("node_modules")).unwrap();
 
         let error = activate_node_modules(&project, &stage).unwrap_err();
+
+        assert_eq!(fs::read_dir(&external).unwrap().count(), 0);
 
         assert!(
             error

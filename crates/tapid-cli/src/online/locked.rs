@@ -52,11 +52,26 @@ pub(crate) fn hydrate_locked(
     fixture_path: Option<&Path>,
     project: &Path,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
+    with_locked_archive_fetch(config, fixture_path, project, |fetch| {
+        hydrate_with_fetch(lock, store, fetch)
+    })
+}
+
+// Share exact pinned archive routing, lazy fixture loading and credential scope
+// between legacy hydration and complete native-selection replay.
+fn with_locked_archive_fetch<T>(
+    config: &crate::registry::RegistryConfig,
+    fixture_path: Option<&Path>,
+    project: &Path,
+    operation: impl FnOnce(
+        &mut dyn FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
+    ) -> Result<T, OperationalError>,
+) -> Result<T, OperationalError> {
     let mut transports = BTreeMap::new();
     let allowed_origins = config.configured_origins();
     // Load fixtures only if an archive is actually missing.
     let mut fixture_packages = None;
-    hydrate_with_fetch(lock, store, |key, url| {
+    operation(&mut |key, url| {
         if let Some(source) = key.source.copied() {
             return copied::fetch_pinned(project, source, fixture_path);
         }
@@ -103,6 +118,29 @@ pub(crate) fn hydrate_locked(
                 })?;
             Ok(response.body)
         }
+    })
+}
+
+pub(crate) fn prepare_native_locked(
+    selection: &tapid_lockfile::NativeSelection,
+    store: &Store,
+    config: &crate::registry::RegistryConfig,
+    fixture_path: Option<&Path>,
+    project: &Path,
+    offline: bool,
+    profile: tapid_lockfile::InstallProfile,
+) -> Result<selection::PreparedNativeProfile, OperationalError> {
+    selection::validate_native_roots(selection, project, config)?;
+    with_locked_archive_fetch(config, fixture_path, project, |fetch| {
+        selection::prepare_native_replay(selection, config, store, profile, |key, url| {
+            if offline {
+                return Err(OperationalError::new(
+                    ErrorKind::Store,
+                    "offline native selection requires verified source evidence in the store",
+                ));
+            }
+            fetch(key, url)
+        })
     })
 }
 
@@ -256,6 +294,8 @@ pub(super) fn locked_records(
                 key.version.to_string(),
             );
             Ok(PackageRecord {
+            complete_dependency_kinds: false,
+            fixture_artifact_url: None,
                 git_reference: None,
                 copied_archive: None,
         dist_tags: BTreeSet::new(),
