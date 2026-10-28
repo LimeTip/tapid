@@ -1566,3 +1566,24 @@ fn all_excluded_long_versions_have_bounded_human_summary() {
         );
     }
 }
+
+#[test]
+fn metadata_route_mismatch_fails_before_transport_creation() {
+    let config = crate::registry::RegistryConfig::from_toml(
+        "[registries.'@acme']\nurl='https://private.example'\n",
+    )
+    .unwrap();
+    let mut transports = BTreeMap::new();
+    let error = metadata_transport_for_package(
+        &mut transports,
+        &config,
+        &NPM.parse().unwrap(),
+        &"@acme/target".parse().unwrap(),
+        &config.configured_origins(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.kind, ErrorKind::RegistryConfiguration);
+    assert!(error.to_string().contains("registry identity mismatch"));
+    assert!(transports.is_empty());
+}

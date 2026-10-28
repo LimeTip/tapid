@@ -295,3 +295,48 @@ fn json_outdated_limit_can_retrieve_entries_beyond_the_default() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn json_outdated_keeps_alias_ranges_and_overlapping_sections() {
+    let project = TempProject::new("json-outdated-cache-declarations").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"a":"npm:h3@^1","b":"npm:h3@^2"},"devDependencies":{"a":"npm:h3@^2"}}"#).unwrap();
+    project
+        .write(
+            "tapid.lock",
+            tapid_lockfile::Lockfile::new(&format!("sha256-{}", "a".repeat(64)))
+                .unwrap()
+                .to_json()
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    project.write("registry.json", br#"{"packages":[{"registry":"https://registry.npmjs.org","name":"h3","version":"2.0.0"},{"registry":"https://registry.npmjs.org","name":"h3","version":"1.9.0"}]}"#).unwrap();
+    let manifest_before = fs::read(project.path().join("package.json")).unwrap();
+    let lock_before = fs::read(project.path().join("tapid.lock")).unwrap();
+    let (output, report) = invoke(
+        &project,
+        &["--json", "outdated", "--registry-fixture", "registry.json"],
+    );
+    assert!(output.status.success(), "{report}");
+    let entries = report["data"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    for (entry, (identity, kind, range, compatible)) in entries.iter().zip([
+        ("a", "dependencies", "npm:h3@^1", "1.9.0"),
+        ("a", "devDependencies", "npm:h3@^2", "2.0.0"),
+        ("b", "dependencies", "npm:h3@^2", "2.0.0"),
+    ]) {
+        assert_eq!(entry["identity"], identity);
+        assert_eq!(entry["kind"], kind);
+        assert_eq!(entry["declared"], range);
+        assert_eq!(entry["newest_compatible"], compatible);
+        assert_eq!(entry["newest_available"], "2.0.0");
+    }
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_before
+    );
+}
