@@ -310,16 +310,38 @@ pub(crate) struct ActivationLock {
     pub(crate) recovered: bool,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RecoveryMode {
+    Activation,
+    None,
+    Metadata,
+}
+
 impl ActivationLock {
     pub(crate) fn acquire(project: &Path) -> Result<Self, OperationalError> {
-        Self::acquire_mode(project, true)
+        Self::acquire_checked(project, || Ok(()))
+    }
+
+    pub(crate) fn acquire_checked(
+        project: &Path,
+        preflight: impl FnOnce() -> Result<(), OperationalError>,
+    ) -> Result<Self, OperationalError> {
+        Self::acquire_mode(project, RecoveryMode::Activation, preflight)
     }
 
     pub(crate) fn acquire_without_recovery(project: &Path) -> Result<Self, OperationalError> {
-        Self::acquire_mode(project, false)
+        Self::acquire_mode(project, RecoveryMode::None, || Ok(()))
     }
 
-    fn acquire_mode(project: &Path, recover: bool) -> Result<Self, OperationalError> {
+    pub(crate) fn acquire_metadata(project: &Path) -> Result<Self, OperationalError> {
+        Self::acquire_mode(project, RecoveryMode::Metadata, || Ok(()))
+    }
+
+    fn acquire_mode(
+        project: &Path,
+        mode: RecoveryMode,
+        preflight: impl FnOnce() -> Result<(), OperationalError>,
+    ) -> Result<Self, OperationalError> {
         let path = project.join(".tapid-activation.lock");
         let mut file =
             open_lock_file(&path).map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
@@ -336,6 +358,7 @@ impl ActivationLock {
                     .context("cannot acquire node_modules activation lock")
             }
         })?;
+        preflight()?;
         let previous_owner = read_bounded_owner(&mut file).map_err(|error| {
             if error.kind() == io::ErrorKind::InvalidData {
                 OperationalError::new(
@@ -359,7 +382,7 @@ impl ActivationLock {
                 "refusing to recover a malformed node_modules activation lock",
             ));
         }
-        if !recover {
+        if mode != RecoveryMode::Activation {
             let pending = fs::read_dir(project)
                 .map_err(|e| OperationalError::from_source(ErrorKind::Recovery, e))?
                 .collect::<Result<Vec<_>, _>>()
@@ -368,7 +391,7 @@ impl ActivationLock {
                 .any(|entry| {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    name.starts_with(".tapid-lifecycle-journal")
+                    (mode == RecoveryMode::None && name.starts_with(".tapid-lifecycle-journal"))
                         || name.starts_with(".tapid-install-stage-")
                         || name.starts_with(".tapid-node-modules-old-")
                         || name.starts_with(".tapid-managed-old-")
@@ -376,16 +399,23 @@ impl ActivationLock {
             if pending {
                 return Err(OperationalError::new(
                     ErrorKind::Recovery,
-                    "import refuses interrupted install state; finish recovery with tapid install before importing",
+                    "operation refuses interrupted install state; finish recovery with tapid install first",
                 ));
             }
-            return Ok(Self {
-                file,
-                owner: previous_owner,
-                recovered: false,
-            });
+            if mode == RecoveryMode::None {
+                return Ok(Self {
+                    file,
+                    owner: previous_owner,
+                    recovered: false,
+                });
+            }
         }
-        let decision = crate::filesystem::lifecycle_journal::recover(
+        let recover = if mode == RecoveryMode::Metadata {
+            crate::filesystem::lifecycle_journal::recover_metadata_only
+        } else {
+            crate::filesystem::lifecycle_journal::recover
+        };
+        let decision = recover(
             project,
             (!previous_owner.is_empty()).then_some(previous_owner.as_str()),
         )
@@ -394,7 +424,10 @@ impl ActivationLock {
             .as_ref()
             .map(|decision| decision.owner.as_str())
             .unwrap_or(&previous_owner);
-        if !recovery_owner.is_empty() {
+        if mode == RecoveryMode::Activation
+            && !recovery_owner.is_empty()
+            && !decision.as_ref().is_some_and(|d| d.metadata_only)
+        {
             recover_owned_activation(project, recovery_owner, decision.clone())
                 .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
             recover_owned_stages(project, recovery_owner)
@@ -570,6 +603,9 @@ pub(crate) fn recover_owned_activation(
     decision: Option<crate::filesystem::lifecycle_journal::RecoveryDecision>,
 ) -> Result<(), String> {
     if let Some(decision) = decision {
+        if decision.metadata_only {
+            return Ok(());
+        }
         if decision.committed {
             return commit_owned_activation(project, owner);
         }
@@ -882,6 +918,7 @@ mod activation_tests {
         fs::write(destination.join("new"), b"uncommitted activation").unwrap();
 
         let decision = super::super::lifecycle_journal::RecoveryDecision {
+            metadata_only: false,
             owner: owner.to_owned(),
             committed: false,
             marker_existed: true,
@@ -921,6 +958,7 @@ mod activation_tests {
         fs::write(project.join(".tapid-managed"), MANAGED_MARKER).unwrap();
 
         let decision = super::super::lifecycle_journal::RecoveryDecision {
+            metadata_only: false,
             owner: owner.to_owned(),
             committed: true,
             marker_existed: true,

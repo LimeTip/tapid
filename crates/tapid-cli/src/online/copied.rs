@@ -86,7 +86,7 @@ pub(super) fn validate_declarations(
     Ok(())
 }
 
-pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
     let root =
         fs::canonicalize(project).map_err(|_| "cannot resolve project for file dependency")?;
     let mut path = root.clone();

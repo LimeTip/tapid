@@ -12,6 +12,8 @@ const MAX_JOURNAL_BYTES: u64 = 96 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<TransactionKind>,
     #[serde(default = "default_manifest_path")]
     manifest_path: String,
     owner: String,
@@ -25,6 +27,87 @@ struct Record {
     store_root: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberActivation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    metadata_outputs: Vec<MetadataOutput>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]
+enum TransactionKind {
+    Activation,
+    Metadata,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataOutput {
+    path: String,
+    before: Option<String>,
+    after: String,
+}
+
+impl Record {
+    fn validate_owner(&self, stale_owner: Option<&str>) -> Result<(), String> {
+        let supported_kind = match self.version {
+            1..=3 => self.kind.is_none(),
+            4 => self.kind.is_some(),
+            _ => false,
+        };
+        if !supported_kind
+            || (self.version == 1 && self.manifest_path != "package.json")
+            || !valid_owner(&self.owner)
+            || stale_owner.is_some_and(|owner| self.owner != owner)
+        {
+            return Err("refusing to recover a lifecycle journal with invalid ownership".into());
+        }
+        Ok(())
+    }
+}
+
+fn decode_snapshot(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES {
+        return Err("oversized metadata output".into());
+    }
+    let bytes = STANDARD.decode(value).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err("oversized metadata output".into());
+    }
+    Ok(bytes)
+}
+
+/// Read the lock bytes recovery would publish, without restoring a journal backup
+/// or changing project/store state. Replay preflight must classify these too.
+pub(crate) fn lock_after_recovery(project: &Path) -> Result<Option<Vec<u8>>, String> {
+    let (path, pending) = inspect_pending(project);
+    if !pending? {
+        return Ok(None);
+    }
+    let bytes = crate::filesystem::read::read_bounded_file(&path, MAX_JOURNAL_BYTES as usize)
+        .map_err(|e| format!("cannot inspect lifecycle journal: {e:?}"))?;
+    let record: Record = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("cannot inspect lifecycle journal: {e}"))?;
+    record.validate_owner(None)?;
+    if record.kind == Some(TransactionKind::Metadata) {
+        let mut locks = record
+            .metadata_outputs
+            .iter()
+            .filter(|o| o.path == "tapid.lock");
+        let output = locks.next();
+        if locks.next().is_some() {
+            return Err("duplicate metadata lock output".into());
+        }
+        let value = output.and_then(|o| {
+            if record.state == State::Committed {
+                Some(o.after.as_str())
+            } else {
+                o.before.as_deref()
+            }
+        });
+        value.map(decode_snapshot).transpose()
+    } else if record.state == State::Prepared && record.lock_existed {
+        decode_snapshot(&record.lock).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,6 +211,62 @@ fn relative_manifest_path(project: &Path, manifest_path: &Path) -> Result<String
 }
 
 impl LifecycleJournal {
+    pub(crate) fn prepare_metadata(
+        project: &Path,
+        owner: &str,
+        mut outputs: Vec<(String, Option<Vec<u8>>, Vec<u8>)>,
+    ) -> Result<Self, String> {
+        if !valid_owner(owner) || has_pending(project)? {
+            return Err(
+                "metadata preparation requires valid ownership and no pending journal".into(),
+            );
+        }
+        let total = outputs.iter().try_fold(0u64, |total, (_, before, after)| {
+            total
+                .checked_add(before.as_ref().map_or(0, |bytes| bytes.len() as u64))?
+                .checked_add(after.len() as u64)
+        });
+        if outputs.len() > 1024 || total.is_none_or(|total| total > MAX_SNAPSHOT_BYTES) {
+            return Err("metadata output set exceeds size limit".into());
+        }
+        // Callers provide an output set. Persist its canonical order here so
+        // every writer shares recovery's ordering and duplicate-path rules.
+        outputs.sort_by(|left, right| left.0.cmp(&right.0));
+        let record = Record {
+            version: 4,
+            kind: Some(TransactionKind::Metadata),
+            manifest_path: default_manifest_path(),
+            owner: owner.to_owned(),
+            state: State::Prepared,
+            manifest_existed: false,
+            manifest: String::new(),
+            lock_existed: false,
+            lock: String::new(),
+            marker_existed: false,
+            node_modules_existed: false,
+            store_root: None,
+            members: Vec::new(),
+            metadata_outputs: outputs
+                .into_iter()
+                .map(|(path, before, after)| MetadataOutput {
+                    path,
+                    before: before.map(|bytes| STANDARD.encode(bytes)),
+                    after: STANDARD.encode(after),
+                })
+                .collect(),
+        };
+        // Prepared validation never publishes. Use the recovery validator so
+        // preparation and interrupted recovery enforce precisely the same rules.
+        recover_metadata(project, &record)?;
+        write_record(project, &record)?;
+        Ok(Self {
+            project: project.to_owned(),
+            record,
+            finished: false,
+            settlement_attempted: false,
+        })
+    }
+
     pub(crate) fn begin(
         project: &Path,
         manifest_path: &Path,
@@ -152,7 +291,8 @@ impl LifecycleJournal {
         let marker_existed = exists(project.join(".tapid-managed"))?;
         let node_modules_existed = exists(project.join("node_modules"))?;
         let record = Record {
-            version: 2,
+            version: 4,
+            kind: Some(TransactionKind::Activation),
             manifest_path: relative_manifest_path(project, manifest_path)?,
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -164,6 +304,7 @@ impl LifecycleJournal {
             node_modules_existed,
             store_root: None,
             members: Vec::new(),
+            metadata_outputs: Vec::new(),
         };
         write_record(project, &record)?;
         Ok(Self {
@@ -178,6 +319,9 @@ impl LifecycleJournal {
         &mut self,
         roots: impl Iterator<Item = &'a std::path::PathBuf>,
     ) -> Result<(), String> {
+        if self.record.kind == Some(TransactionKind::Metadata) {
+            return Err("metadata transactions cannot activate member layouts".into());
+        }
         if !self.record.members.is_empty() {
             return Err("member activation roots already recorded".into());
         }
@@ -199,7 +343,7 @@ impl LifecycleJournal {
         members.sort_by(|a, b| a.path.cmp(&b.path));
         member_paths(&self.project, &members)?;
         if !members.is_empty() {
-            self.record.version = 3;
+            self.record.version = self.record.version.max(3);
             self.record.members = members;
             write_record(&self.project, &self.record)?;
         }
@@ -207,6 +351,9 @@ impl LifecycleJournal {
     }
 
     pub(crate) fn set_store_root(&mut self, store_root: &Path) -> Result<(), String> {
+        if self.record.kind == Some(TransactionKind::Metadata) {
+            return Err("metadata transactions cannot publish store content".into());
+        }
         let canonical = store_root
             .canonicalize()
             .map_err(|error| format!("cannot canonicalize store root for recovery: {error}"))?;
@@ -223,11 +370,33 @@ impl LifecycleJournal {
     }
 
     pub(crate) fn mark_committed(&mut self) -> Result<(), String> {
-        self.record.state = State::Committed;
-        write_record(&self.project, &self.record)
+        if self.record.kind == Some(TransactionKind::Metadata) {
+            if self.record.state != State::Prepared {
+                return Err("metadata transaction already committed".into());
+            }
+            recover_metadata(&self.project, &self.record)?;
+        }
+        let previous = std::mem::replace(&mut self.record.state, State::Committed);
+        if let Err(error) = write_record(&self.project, &self.record) {
+            // A failed write cannot authorize publication through this handle.
+            // Explicit settlement reads the durable record, including an
+            // uncertain decision whose final directory sync failed.
+            self.record.state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn finish(&mut self) -> Result<(), String> {
+        if self.record.kind == Some(TransactionKind::Metadata) {
+            if self.record.state != State::Committed {
+                return Err("metadata publication requires a durable commit decision".into());
+            }
+            recover_metadata(&self.project, &self.record)?;
+            remove_journal(&self.project)?;
+            self.finished = true;
+            return Ok(());
+        }
         for member in member_paths(&self.project, &self.record.members)? {
             crate::filesystem::activation::commit_owned_activation(&member, &self.record.owner)?;
         }
@@ -247,12 +416,14 @@ impl LifecycleJournal {
         self.settlement_attempted = true;
         let decision = recover(&self.project, Some(&self.record.owner))?
             .ok_or("lifecycle journal disappeared before recovery")?;
-        crate::filesystem::activation::recover_owned_activation(
-            &self.project,
-            &decision.owner,
-            Some(decision.clone()),
-        )?;
-        crate::filesystem::activation::recover_owned_stages(&self.project, &decision.owner)?;
+        if !decision.metadata_only {
+            crate::filesystem::activation::recover_owned_activation(
+                &self.project,
+                &decision.owner,
+                Some(decision.clone()),
+            )?;
+            crate::filesystem::activation::recover_owned_stages(&self.project, &decision.owner)?;
+        }
         remove_journal(&self.project)?;
         self.finished = true;
         Ok(decision.committed)
@@ -271,6 +442,7 @@ impl Drop for LifecycleJournal {
 #[derive(Clone, Debug)]
 pub(crate) struct RecoveryDecision {
     pub(crate) owner: String,
+    pub(crate) metadata_only: bool,
     pub(crate) committed: bool,
     pub(crate) marker_existed: bool,
     pub(crate) node_modules_existed: bool,
@@ -313,6 +485,21 @@ pub(crate) fn recover(
     project: &Path,
     stale_owner: Option<&str>,
 ) -> Result<Option<RecoveryDecision>, String> {
+    recover_mode(project, stale_owner, false)
+}
+
+pub(crate) fn recover_metadata_only(
+    project: &Path,
+    stale_owner: Option<&str>,
+) -> Result<Option<RecoveryDecision>, String> {
+    recover_mode(project, stale_owner, true)
+}
+
+fn recover_mode(
+    project: &Path,
+    stale_owner: Option<&str>,
+    metadata_only: bool,
+) -> Result<Option<RecoveryDecision>, String> {
     let path = project.join(JOURNAL);
     let backup = journal_backup_path(&path);
     let metadata = match fs::symlink_metadata(&path) {
@@ -352,12 +539,24 @@ pub(crate) fn recover(
         fs::read(&path).map_err(|error| format!("cannot read lifecycle journal: {error}"))?;
     let record: Record = serde_json::from_slice(&bytes)
         .map_err(|error| format!("refusing to recover a malformed lifecycle journal: {error}"))?;
-    if !matches!(record.version, 1..=3)
-        || (record.version == 1 && record.manifest_path != "package.json")
-        || !valid_owner(&record.owner)
-        || stale_owner.is_some_and(|owner| record.owner != owner)
-    {
-        return Err("refusing to recover a lifecycle journal with invalid ownership".into());
+    record.validate_owner(stale_owner)?;
+    if metadata_only && record.kind != Some(TransactionKind::Metadata) {
+        return Err(
+            "selection-only execution refuses activation recovery; run tapid install first".into(),
+        );
+    }
+    if record.kind == Some(TransactionKind::Metadata) {
+        recover_metadata(project, &record)?;
+        return Ok(Some(RecoveryDecision {
+            owner: record.owner,
+            metadata_only: true,
+            committed: record.state == State::Committed,
+            marker_existed: false,
+            node_modules_existed: false,
+        }));
+    }
+    if !record.metadata_outputs.is_empty() {
+        return Err("activation journal contains metadata outputs".into());
     }
     if record.version < 3 && !record.members.is_empty() {
         return Err("member activation requires lifecycle version 3".into());
@@ -389,6 +588,7 @@ pub(crate) fn recover(
             &record.owner,
             Some(RecoveryDecision {
                 owner: record.owner.clone(),
+                metadata_only: false,
                 committed: record.state == State::Committed,
                 marker_existed: member.marker_existed,
                 node_modules_existed: member.node_modules_existed,
@@ -397,6 +597,7 @@ pub(crate) fn recover(
         crate::filesystem::activation::recover_owned_stages(&path, &record.owner)?;
     }
     Ok(Some(RecoveryDecision {
+        metadata_only: false,
         owner: record.owner,
         committed: record.state == State::Committed,
         marker_existed: record.marker_existed,
@@ -425,6 +626,73 @@ fn clear_journal_backup(path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("cannot inspect lifecycle journal backup: {error}")),
     }
+}
+
+// Prepared metadata transactions have not published outputs. Committed recovery
+// accepts either recorded value so interrupted multi-file publication is resumable.
+fn recover_metadata(project: &Path, record: &Record) -> Result<(), String> {
+    if record.store_root.is_some()
+        || !record.members.is_empty()
+        || record.metadata_outputs.is_empty()
+        || record.metadata_outputs.len() > 1024
+    {
+        return Err("invalid metadata transaction effects".into());
+    }
+    let mut previous = "";
+    let mut total = 0u64;
+    let mut outputs = Vec::new();
+    for output in &record.metadata_outputs {
+        let relative = Path::new(&output.path);
+        if output.path.as_str() <= previous
+            || !(output.path == "tapid.lock"
+                || relative
+                    .file_name()
+                    .is_some_and(|name| name == "package.json"))
+            || output.path.split('/').any(|part| {
+                part.is_empty()
+                    || matches!(part, "." | ".." | "node_modules")
+                    || part.contains('\\')
+            })
+        {
+            return Err("unsafe or duplicate metadata output path".into());
+        }
+        previous = &output.path;
+        let path = recovery_manifest_path(project, &output.path)?;
+        if path.parent().and_then(|p| p.canonicalize().ok()).as_deref() != path.parent() {
+            return Err("metadata output parent is redirected".into());
+        }
+        let before = output.before.as_deref().map(decode_snapshot).transpose()?;
+        let after = decode_snapshot(&output.after)?;
+        total += before.as_ref().map_or(0, |b| b.len() as u64) + after.len() as u64;
+        if total > MAX_SNAPSHOT_BYTES {
+            return Err("metadata output set exceeds size limit".into());
+        }
+        let current =
+            match crate::filesystem::read::read_bounded_file(&path, MAX_SNAPSHOT_BYTES as usize) {
+                Ok(bytes) => Some(bytes),
+                Err(crate::filesystem::read::ReadError::Io(e))
+                    if e.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    None
+                }
+                Err(e) => return Err(format!("cannot read metadata output: {e:?}")),
+            };
+        if current != before
+            && (record.state != State::Committed || current.as_deref() != Some(after.as_slice()))
+        {
+            return Err("metadata output changed since preparation".into());
+        }
+        if current.as_deref() != Some(after.as_slice()) {
+            outputs.push((path, after));
+        }
+    }
+    if record.state == State::Committed {
+        for (path, bytes) in outputs {
+            atomic_replace(&path, &bytes)?;
+            crate::filesystem::activation::test_crash_at("metadata_output_published");
+        }
+    }
+    Ok(())
 }
 
 fn recover_record(project: &Path, record: &Record) -> Result<(), String> {
@@ -636,6 +904,442 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metadata_preparation_and_durable_decision_publish_without_activation() {
+        for committed in [false, true] {
+            let project = tapid_test_support::TempProject::new("metadata-publication").unwrap();
+            project.write("package.json", b"old manifest").unwrap();
+            project
+                .write("node_modules/sentinel", b"running application")
+                .unwrap();
+            let lock =
+                crate::filesystem::activation::ActivationLock::acquire_metadata(project.path())
+                    .unwrap();
+            let mut journal = LifecycleJournal::prepare_metadata(
+                project.path(),
+                lock.owner_line(),
+                vec![
+                    (
+                        "package.json".into(),
+                        Some(b"old manifest".to_vec()),
+                        b"new manifest".to_vec(),
+                    ),
+                    ("tapid.lock".into(), None, b"new lock".to_vec()),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                b"old manifest"
+            );
+            assert!(!project.path().join("tapid.lock").exists());
+            if committed {
+                journal.mark_committed().unwrap();
+            }
+            // Model process loss on either side of the durable decision.
+            std::mem::forget(journal);
+            drop(lock);
+            let lock =
+                crate::filesystem::activation::ActivationLock::acquire_metadata(project.path())
+                    .unwrap();
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                if committed {
+                    b"new manifest"
+                } else {
+                    b"old manifest"
+                }
+            );
+            assert_eq!(project.path().join("tapid.lock").exists(), committed);
+            assert_eq!(
+                fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+                b"running application"
+            );
+            assert!(!project.path().join(JOURNAL).exists());
+            drop(lock);
+        }
+    }
+
+    #[test]
+    fn metadata_publication_rechecks_inputs_and_finishes_without_layout_cleanup() {
+        let project = tapid_test_support::TempProject::new("metadata-finish").unwrap();
+        project.write("package.json", b"old").unwrap();
+        let lock = crate::filesystem::activation::ActivationLock::acquire_metadata(project.path())
+            .unwrap();
+        let mut journal = LifecycleJournal::prepare_metadata(
+            project.path(),
+            lock.owner_line(),
+            vec![(
+                "package.json".into(),
+                Some(b"old".to_vec()),
+                b"new".to_vec(),
+            )],
+        )
+        .unwrap();
+        assert!(journal.finish().unwrap_err().contains("durable commit"));
+        project.write("package.json", b"concurrent").unwrap();
+        assert!(
+            journal
+                .mark_committed()
+                .unwrap_err()
+                .contains("changed since preparation")
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"concurrent"
+        );
+        project.write("package.json", b"old").unwrap();
+        journal.mark_committed().unwrap();
+        // Metadata finishing must never clean activation backups, even if an
+        // unexpected uncoordinated writer created one after acquisition.
+        let backup = project
+            .path()
+            .join(format!(".tapid-managed-old-{}", lock.owner_line().trim()));
+        fs::write(&backup, b"untouched").unwrap();
+        journal.finish().unwrap();
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"new"
+        );
+        assert_eq!(fs::read(backup).unwrap(), b"untouched");
+        assert!(!project.path().join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn metadata_commit_record_failure_cannot_authorize_publication() {
+        let project = tapid_test_support::TempProject::new("metadata-decision-failure").unwrap();
+        project.write("package.json", b"old").unwrap();
+        let mut journal = LifecycleJournal::prepare_metadata(
+            project.path(),
+            "123-deadbeef\n",
+            vec![(
+                "package.json".into(),
+                Some(b"old".to_vec()),
+                b"new".to_vec(),
+            )],
+        )
+        .unwrap();
+        let path = project.path().join(JOURNAL);
+        let saved = project.path().join("saved-journal");
+        fs::rename(&path, &saved).unwrap();
+        fs::create_dir(&path).unwrap();
+        let obstruction = journal_backup_path(&path);
+        fs::create_dir(&obstruction).unwrap();
+        assert!(journal.mark_committed().is_err());
+        assert!(journal.finish().is_err());
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"old"
+        );
+        fs::remove_dir(obstruction).unwrap();
+        fs::remove_dir(&path).unwrap();
+        fs::rename(saved, path).unwrap();
+        assert!(!journal.settle().unwrap());
+    }
+
+    #[test]
+    fn metadata_acquisition_refuses_activation_recovery_without_mutation() {
+        let project = tapid_test_support::TempProject::new("metadata-refusal").unwrap();
+        project.write("package.json", b"before").unwrap();
+        project.write("node_modules/sentinel", b"running").unwrap();
+        let lock = crate::filesystem::activation::ActivationLock::acquire(project.path()).unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            lock.owner_line(),
+            b"before",
+            None,
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        drop(lock);
+        project.write("package.json", b"current").unwrap();
+        let before = fs::read(project.path().join(JOURNAL)).unwrap();
+        assert!(
+            crate::filesystem::activation::ActivationLock::acquire_metadata(project.path())
+                .is_err()
+        );
+        assert_eq!(fs::read(project.path().join(JOURNAL)).unwrap(), before);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"current"
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+            b"running"
+        );
+    }
+
+    #[test]
+    fn metadata_committed_recovery_preserves_root_and_member_installations() {
+        let project = tapid_test_support::TempProject::new("metadata-recovery").unwrap();
+        for (path, bytes) in [
+            ("package.json", "old root"),
+            ("member/package.json", "old member"),
+            ("tapid.lock", "old lock"),
+            ("node_modules/sentinel", "root application"),
+            ("member/node_modules/sentinel", "member application"),
+            (".tapid-managed", "unowned root"),
+            ("member/.tapid-managed", "unowned member"),
+        ] {
+            project.write(path, bytes.as_bytes()).unwrap();
+        }
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"old root",
+            Some(b"old lock"),
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["kind"] = serde_json::json!("Metadata");
+        record["state"] = serde_json::json!("Committed");
+        record["metadata_outputs"] = serde_json::json!([
+            {"path":"member/package.json", "before":STANDARD.encode(b"old member"), "after":STANDARD.encode(b"new member")},
+            {"path":"package.json", "before":STANDARD.encode(b"old root"), "after":STANDARD.encode(b"new root")},
+            {"path":"tapid.lock", "before":STANDARD.encode(b"old lock"), "after":STANDARD.encode(b"new lock")}
+        ]);
+        fs::write(&path, record.to_string()).unwrap();
+        let decision = recover(project.path(), Some("123-deadbeef\n"))
+            .unwrap()
+            .unwrap();
+        assert!(decision.metadata_only);
+        // Repeated recovery accepts already-published outputs. Ordinary acquisition
+        // must dispatch metadata recovery without treating it as layout recovery.
+        let lock = crate::filesystem::activation::ActivationLock::acquire(project.path()).unwrap();
+        assert!(!project.path().join(JOURNAL).exists());
+        drop(lock);
+        for (path, expected) in [
+            ("package.json", "new root"),
+            ("member/package.json", "new member"),
+            ("tapid.lock", "new lock"),
+            ("node_modules/sentinel", "root application"),
+            ("member/node_modules/sentinel", "member application"),
+            (".tapid-managed", "unowned root"),
+            ("member/.tapid-managed", "unowned member"),
+        ] {
+            assert_eq!(
+                fs::read(project.path().join(path)).unwrap(),
+                expected.as_bytes()
+            );
+        }
+        finish_recovery(project.path()).unwrap();
+    }
+
+    #[test]
+    fn metadata_recovery_validates_all_outputs_before_mutation() {
+        let project = tapid_test_support::TempProject::new("metadata-stale").unwrap();
+        project.write("package.json", b"old manifest").unwrap();
+        project.write("tapid.lock", b"concurrent lock").unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"old manifest",
+            Some(b"old lock"),
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["kind"] = serde_json::json!("Metadata");
+        record["state"] = serde_json::json!("Committed");
+        record["metadata_outputs"] = serde_json::json!([
+            {"path":"package.json", "before":STANDARD.encode(b"old manifest"), "after":STANDARD.encode(b"new manifest")},
+            {"path":"tapid.lock", "before":STANDARD.encode(b"old lock"), "after":STANDARD.encode(b"new lock")}
+        ]);
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(
+            recover(project.path(), None)
+                .unwrap_err()
+                .contains("changed since preparation")
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"old manifest"
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"concurrent lock"
+        );
+        project.write("tapid.lock", b"old lock").unwrap();
+        record["state"] = serde_json::json!("Prepared");
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(!recover(project.path(), None).unwrap().unwrap().committed);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"old manifest"
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"old lock"
+        );
+        record["state"] = serde_json::json!("Committed");
+        for mutation in [
+            serde_json::json!({"store_root":"/invalid-store"}),
+            serde_json::json!({"members":[{"path":"member", "marker_existed":false,"node_modules_existed":false}]}),
+            serde_json::json!({"metadata_outputs":[]}),
+        ] {
+            let mut invalid_record = record.clone();
+            for (key, value) in mutation.as_object().unwrap() {
+                invalid_record[key] = value.clone();
+            }
+            fs::write(&path, invalid_record.to_string()).unwrap();
+            assert!(recover(project.path(), None).is_err());
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                b"old manifest"
+            );
+        }
+        let mut malformed = record.clone();
+        malformed["metadata_outputs"][1]["after"] = serde_json::json!("not base64!");
+        fs::write(&path, malformed.to_string()).unwrap();
+        assert!(recover(project.path(), None).is_err());
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"old manifest"
+        );
+        for invalid in [
+            "../package.json",
+            "node_modules/package.json",
+            "member/tapid.lock",
+            "tapid.lock",
+        ] {
+            let mut invalid_record = record.clone();
+            invalid_record["metadata_outputs"][0]["path"] = serde_json::json!(invalid);
+            fs::write(&path, invalid_record.to_string()).unwrap();
+            assert!(recover(project.path(), None).is_err(), "{invalid}");
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                b"old manifest"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_recovery_rejects_redirected_parent() {
+        let project = tapid_test_support::TempProject::new("metadata-redirect").unwrap();
+        project.write("package.json", b"old").unwrap();
+        project.write("real/package.json", b"member").unwrap();
+        std::os::unix::fs::symlink(project.path().join("real"), project.path().join("alias"))
+            .unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"old",
+            None,
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["kind"] = serde_json::json!("Metadata");
+        record["state"] = serde_json::json!("Committed");
+        record["metadata_outputs"] = serde_json::json!([
+            {"path":"alias/package.json", "before":STANDARD.encode(b"member"), "after":STANDARD.encode(b"changed")}
+        ]);
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(
+            recover(project.path(), None)
+                .unwrap_err()
+                .contains("redirected")
+        );
+        assert_eq!(
+            fs::read(project.path().join("real/package.json")).unwrap(),
+            b"member"
+        );
+        record["metadata_outputs"][0]["path"] = serde_json::json!("real/./package.json");
+        fs::write(&path, record.to_string()).unwrap();
+        assert!(recover(project.path(), None).is_err());
+        assert_eq!(
+            fs::read(project.path().join("real/package.json")).unwrap(),
+            b"member"
+        );
+    }
+
+    #[test]
+    fn activation_journal_records_explicit_transaction_kind() {
+        let project = tapid_test_support::TempProject::new("activation-journal-kind").unwrap();
+        project.write("package.json", b"{}").unwrap();
+        let mut journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"{}",
+            None,
+        )
+        .unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.path().join(JOURNAL)).unwrap()).unwrap();
+        assert_eq!(record["version"], 4);
+        assert_eq!(record["kind"], "Activation");
+        assert!(!journal.settle().unwrap());
+        assert!(!project.path().join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn activation_recovery_rejects_missing_or_unsupported_transaction_kind_before_mutation() {
+        let project = tapid_test_support::TempProject::new("journal-kind-rejection").unwrap();
+        project.write("package.json", b"current manifest").unwrap();
+        project.write("tapid.lock", b"current lock").unwrap();
+        project
+            .write("node_modules/sentinel", b"running application")
+            .unwrap();
+        let journal = LifecycleJournal::begin(
+            project.path(),
+            Path::new("package.json"),
+            "123-deadbeef\n",
+            b"old manifest",
+            Some(b"old lock"),
+        )
+        .unwrap();
+        // Leave the journal as an interrupted transaction without running Drop settlement.
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for (version, kind) in [
+            (4, None),
+            (4, Some("Metadata")),
+            (4, Some("Unknown")),
+            (3, Some("Activation")),
+            (5, Some("Activation")),
+        ] {
+            let mut record = original.clone();
+            record["version"] = serde_json::json!(version);
+            if let Some(kind) = kind {
+                record["kind"] = serde_json::json!(kind);
+            } else {
+                record.as_object_mut().unwrap().remove("kind");
+            }
+            fs::write(&path, record.to_string()).unwrap();
+            assert!(
+                recover(project.path(), Some("123-deadbeef\n")).is_err(),
+                "version {version}, kind {kind:?}"
+            );
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                b"current manifest"
+            );
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                b"current lock"
+            );
+            assert_eq!(
+                fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+                b"running application"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_member_recovery_paths_fail_before_mutation() {
         let project = tapid_test_support::TempProject::new("journal-member-paths").unwrap();
         project.write("package.json", b"current manifest").unwrap();
@@ -663,6 +1367,7 @@ mod tests {
         ] {
             let mut record = original.clone();
             record["version"] = serde_json::json!(3);
+            record.as_object_mut().unwrap().remove("kind");
             record["members"] = serde_json::Value::Array(paths.iter().map(|path| serde_json::json!({"path":path,"marker_existed":false,"node_modules_existed":false})).collect());
             fs::write(&path, record.to_string()).unwrap();
             assert!(recover(project.path(), Some(owner)).is_err(), "{paths:?}");
@@ -699,6 +1404,7 @@ mod tests {
         let mut record: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         record["version"] = serde_json::json!(3);
+        record.as_object_mut().unwrap().remove("kind");
         record["members"] = serde_json::json!([{"path":"member","marker_existed":false,"node_modules_existed":false}]);
         fs::write(&path, record.to_string()).unwrap();
         assert!(recover(project.path(), Some(owner)).is_err());
@@ -794,6 +1500,7 @@ mod tests {
         let backup = project.join(JOURNAL).with_extension("lifecycle.bak");
         let record = Record {
             version: 1,
+            kind: None,
             manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -805,6 +1512,7 @@ mod tests {
             node_modules_existed: false,
             store_root: None,
             members: Vec::new(),
+            metadata_outputs: Vec::new(),
         };
         fs::write(&backup, serde_json::to_vec(&record).unwrap()).unwrap();
 
@@ -834,6 +1542,7 @@ mod tests {
         fs::write(project.join("package.json"), b"committed manifest").unwrap();
         let prepared = Record {
             version: 1,
+            kind: None,
             manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -845,9 +1554,11 @@ mod tests {
             node_modules_existed: false,
             store_root: None,
             members: Vec::new(),
+            metadata_outputs: Vec::new(),
         };
         let committed = Record {
             version: prepared.version,
+            kind: prepared.kind,
             manifest_path: prepared.manifest_path.clone(),
             owner: prepared.owner.clone(),
             state: State::Committed,
@@ -859,6 +1570,7 @@ mod tests {
             node_modules_existed: prepared.node_modules_existed,
             store_root: None,
             members: Vec::new(),
+            metadata_outputs: Vec::new(),
         };
         let path = project.join(JOURNAL);
         let backup = journal_backup_path(&path);
@@ -891,6 +1603,7 @@ mod tests {
         fs::write(project.join("package.json"), committed_manifest).unwrap();
         let prepared = Record {
             version: 1,
+            kind: None,
             manifest_path: "package.json".to_owned(),
             owner: owner.to_owned(),
             state: State::Prepared,
@@ -902,9 +1615,11 @@ mod tests {
             node_modules_existed: false,
             store_root: None,
             members: Vec::new(),
+            metadata_outputs: Vec::new(),
         };
         let mut committed = Record {
             version: prepared.version,
+            kind: prepared.kind,
             manifest_path: prepared.manifest_path.clone(),
             owner: prepared.owner.clone(),
             state: State::Committed,
@@ -916,6 +1631,7 @@ mod tests {
             node_modules_existed: prepared.node_modules_existed,
             store_root: None,
             members: Vec::new(),
+            metadata_outputs: Vec::new(),
         };
         committed.manifest = STANDARD.encode(committed_manifest);
         fs::write(

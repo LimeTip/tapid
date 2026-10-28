@@ -186,11 +186,12 @@ pub(super) fn can_replay_inspected(
         online::validate_locked_files(project, lock)?;
     }
     Ok(routes_match
-        && policy.approvals().is_empty()
-        && lock
-            .packages()
-            .values()
-            .all(|p| p.derived_hooks().is_empty())
+        && (lock.has_pending_receipts()
+            || (policy.approvals().is_empty()
+                && lock
+                    .packages()
+                    .values()
+                    .all(|p| p.derived_hooks().is_empty())))
         && digest_matches
         && online::workspace_matches_lock(workspace, lock))
 }
@@ -220,7 +221,7 @@ pub(crate) fn replay_input_with_publication(
         report_progress,
         |_, package| {
             let digest = package
-                .tree_digest()
+                .tree_digest()?
                 .parse()
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
             let snapshot = match publication {
@@ -291,7 +292,7 @@ pub(crate) fn replay_input_with_tree_source(
             id,
             peer_context: peer,
             platform_context: platform,
-            tree: VerifiedTreeReference::new(package.tree_digest(), &tree)
+            tree: VerifiedTreeReference::new(package.tree_digest()?, &tree)
                 .map_err(|e| e.to_string())?,
         };
         keys.insert(encoded.clone(), InstanceKey::from(&instance));

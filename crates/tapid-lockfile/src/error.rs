@@ -9,6 +9,8 @@ pub enum LockfileError {
     InvalidUrl(String),
     InvalidSha512(String),
     InvalidCopiedArtifactEvidence,
+    InvalidSourceTreeReceipt(String),
+    PendingSourceTreeReceipt(String),
     InvalidWorkspaceSource(String),
     UnsupportedVersion(u32),
     AliasMetadataInLegacySchema(u32),
@@ -50,6 +52,13 @@ impl fmt::Display for LockfileError {
                 write!(f, "lockfile URL is not an approved HTTPS origin: {value}")
             }
             Self::InvalidSha512(value) => write!(f, "invalid SHA-512 integrity: {value}"),
+            Self::InvalidSourceTreeReceipt(reason) => {
+                write!(f, "invalid source-tree receipt: {reason}")
+            }
+            Self::PendingSourceTreeReceipt(key) => write!(
+                f,
+                "pending source-tree receipt for {key}; hydrate with frozen install and retain the completed lock before ci or offline replay"
+            ),
             Self::InvalidCopiedArtifactEvidence => write!(
                 f,
                 "copied artifacts cannot carry registry authentication, download URLs, or derived hooks"

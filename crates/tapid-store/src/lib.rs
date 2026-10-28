@@ -1281,6 +1281,16 @@ const STORE_JOURNAL_MAX: u64 = 1024 * 1024;
 // Lifecycle coordinator embeds base64 manifest and lockfile snapshots (each <= 32 MiB).
 const COORDINATOR_MAX: u64 = 96 * 1024 * 1024;
 
+// Legacy coordinators exclusively describe activation. Version 4 makes the
+// transaction kind explicit; a metadata decision cannot authorize store effects.
+fn is_activation_coordinator(record: &serde_json::Value) -> bool {
+    match record.get("version").and_then(serde_json::Value::as_u64) {
+        Some(1..=3) => record.get("kind").is_none(),
+        Some(4) => record.get("kind").and_then(serde_json::Value::as_str) == Some("Activation"),
+        _ => false,
+    }
+}
+
 fn write_store_journal(
     root: &Path,
     coordinator: &Path,
@@ -1301,15 +1311,11 @@ fn write_store_journal(
                 format!("invalid lifecycle coordinator: {error}"),
             )
         })?;
-    if !matches!(
-        coordinator_record
-            .get("version")
-            .and_then(serde_json::Value::as_u64),
-        Some(1..=3)
-    ) || coordinator_record
-        .get("state")
-        .and_then(serde_json::Value::as_str)
-        != Some("Prepared")
+    if !is_activation_coordinator(&coordinator_record)
+        || coordinator_record
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            != Some("Prepared")
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1458,10 +1464,8 @@ fn recover_store_journal(root: &Path) -> io::Result<()> {
                     format!("malformed lifecycle coordinator: {error}"),
                 )
             })?;
-        if !matches!(
-            decision.get("version").and_then(serde_json::Value::as_u64),
-            Some(1..=3)
-        ) || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
+        if !is_activation_coordinator(&decision)
+            || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

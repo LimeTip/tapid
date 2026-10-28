@@ -21,6 +21,8 @@ mod command_support;
 mod explain_tests;
 #[path = "cli_cases/lifecycle_reporting.rs"]
 mod lifecycle_reporting_tests;
+#[path = "cli_cases/lockfile_only.rs"]
+mod lockfile_only_tests;
 #[path = "cli_cases/run_permissions.rs"]
 mod run_permission_tests;
 
@@ -6172,7 +6174,7 @@ fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
         .values()
     {
         tapid_store::Store::new(home.path().join("store"))
-            .verified_tree_path(&package.tree_digest().parse().unwrap())
+            .verified_tree_path(&package.tree_digest().unwrap().parse().unwrap())
             .unwrap();
     }
     assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
@@ -7699,15 +7701,19 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     }
     let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
     let source = lock.packages().values().next().unwrap();
-    assert_ne!(source.tree_digest(), source.install_tree_digest());
+    assert_ne!(
+        source.tree_digest().unwrap(),
+        source.install_tree_digest().unwrap()
+    );
     let source_tree = tapid_store::Store::new(home.path().join("store"))
-        .verified_tree_path(&source.tree_digest().parse().unwrap())
+        .verified_tree_path(&source.tree_digest().unwrap().parse().unwrap())
         .unwrap();
     assert!(!source_tree.join("package/generated.txt").exists());
     // Rehydrate the source while replaying an authenticated derived output.
     // Output verification must happen before store publication takes its lock.
     let store = tapid_store::Store::new(home.path().join("store"));
-    fs::remove_dir_all(store.artifact_path(&source.tree_digest().parse().unwrap())).unwrap();
+    fs::remove_dir_all(store.artifact_path(&source.tree_digest().unwrap().parse().unwrap()))
+        .unwrap();
     let hydrated = install(&["--frozen", "--registry-fixture", "registry.json"]);
     assert!(
         hydrated.status.success(),
@@ -7723,7 +7729,7 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
         b"generated"
     );
     store
-        .verified_tree_path(&source.tree_digest().parse().unwrap())
+        .verified_tree_path(&source.tree_digest().unwrap().parse().unwrap())
         .unwrap();
     let mut forged: serde_json::Value = serde_json::from_slice(&lock_bytes).unwrap();
     for package in forged["packages"].as_object_mut().unwrap().values_mut() {

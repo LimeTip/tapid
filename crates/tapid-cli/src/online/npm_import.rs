@@ -53,23 +53,7 @@ pub(crate) fn fetch_imported(
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
     for path in &selected {
         let package = &graph.packages[path];
-        let identity = DiagnosticPackage {
-            source: package.registry.to_string(),
-            name: package.name.to_string(),
-            version: Some(package.version.to_string()),
-        };
-        let origin = registry_config
-            .origin_for_name(&package.name)
-            .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
-        if origin != package.registry {
-            return Err(OperationalError::new(
-                ErrorKind::RegistryConfiguration,
-                format!(
-                    "registry identity mismatch for package {} at {path}: selected {origin}, imported {}",
-                    package.name, package.registry
-                ),
-            ).with_diagnostic(DiagnosticContext::comparison("registry_identity", None, origin, &package.registry)).for_package(identity));
-        }
+        validate_imported_registry(package, registry_config)?;
     }
     let fixture: Option<Fixture> = fixture_path
         .map(|path| {
@@ -225,35 +209,12 @@ pub(crate) fn fetch_imported(
                 (digest, ImportedTree::Extracted(temp))
             }
         };
-        let artifact_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.path().join("package/package.json")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        if artifact_manifest["name"].as_str() != Some(package.name.as_str())
-            || artifact_manifest["version"].as_str() != Some(&package.version.to_string())
-        {
-            let observed = artifact_manifest["name"]
-                .as_str()
-                .and_then(|value| value.parse::<PackageName>().ok())
-                .zip(
-                    artifact_manifest["version"]
-                        .as_str()
-                        .and_then(|value| value.parse::<PackageVersion>().ok()),
-                )
-                .map(|(name, version)| format!("{name}@{version}"))
-                .unwrap_or_else(|| "invalid_package_identity".into());
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                format!("archive identity disagrees with imported selection at {path}"),
-            )
-            .with_diagnostic(DiagnosticContext::comparison(
-                "artifact_identity",
-                None,
-                format!("{}@{}", package.name, package.version),
-                observed,
-            ))
-            .for_package(identity));
-        }
+        super::artifact::validate_archive_identity(temp.path(), &package.name, &package.version)
+            .map_err(|error| {
+                error
+                    .context(format!("imported selection at {path}"))
+                    .for_package(identity)
+            })?;
         let tree = transaction
             .stage_verified_tree(&digest, temp.path())
             .map_err(OperationalError::from)?;
@@ -562,4 +523,36 @@ fn pinned_layout(
             .cloned()
             .collect(),
     }
+}
+
+/// Enforce the same exact configured origin for imported selection and replay.
+pub(crate) fn validate_imported_registry(
+    package: &tapid_lockfile::ImportedNpmPackage,
+    registry_config: &crate::registry::RegistryConfig,
+) -> Result<(), OperationalError> {
+    let identity = DiagnosticPackage {
+        source: package.registry.to_string(),
+        name: package.name.to_string(),
+        version: Some(package.version.to_string()),
+    };
+    let origin = registry_config
+        .origin_for_name(&package.name)
+        .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
+    if origin != package.registry {
+        return Err(OperationalError::new(
+            ErrorKind::RegistryConfiguration,
+            format!(
+                "registry identity mismatch for package {} at {}: selected {origin}, imported {}",
+                package.name, package.path, package.registry
+            ),
+        )
+        .with_diagnostic(DiagnosticContext::comparison(
+            "registry_identity",
+            None,
+            origin,
+            &package.registry,
+        ))
+        .for_package(identity));
+    }
+    Ok(())
 }

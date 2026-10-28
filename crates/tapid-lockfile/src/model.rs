@@ -1,3 +1,4 @@
+use crate::receipt::TreeEvidence;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Component;
@@ -8,8 +9,9 @@ use tapid_core::{
 
 use crate::{
     COPIED_SOURCE_LOCKFILE_VERSION, LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION,
-    LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
-    REGISTRY_ONLY_LOCKFILE_VERSION, ROOTS_LEGACY_LOCKFILE_VERSION, validation,
+    LOCKFILE_VERSION, LockfileError, PENDING_RECEIPT_LOCKFILE_VERSION,
+    PROVENANCE_LEGACY_LOCKFILE_VERSION, REGISTRY_ONLY_LOCKFILE_VERSION,
+    ROOTS_LEGACY_LOCKFILE_VERSION, SourceTreeReceipt, validation,
 };
 
 fn encode(value: &str) -> String {
@@ -647,6 +649,12 @@ pub struct Lockfile {
 }
 
 impl Lockfile {
+    /// Creates a native selected graph which may contain pending source receipts.
+    pub fn new_selection(root_manifest_digest: &str) -> Result<Self, LockfileError> {
+        let mut lock = Self::new(root_manifest_digest)?;
+        lock.lockfile_version = PENDING_RECEIPT_LOCKFILE_VERSION;
+        Ok(lock)
+    }
     pub fn new(root_manifest_digest: &str) -> Result<Self, LockfileError> {
         let root_manifest_digest = canonical_artifact_digest(root_manifest_digest)?;
         Ok(Self {
@@ -676,6 +684,9 @@ impl Lockfile {
             .packages
             .get_mut(key)
             .ok_or_else(|| LockfileError::InvalidPackageKey(key.to_owned()))?;
+        if package.tree_evidence.is_pending() && !outputs.is_empty() {
+            return Err(LockfileError::PendingSourceTreeReceipt(key.into()));
+        }
         package.derived_hooks = outputs;
         if !package.derived_hooks.is_empty() {
             self.lockfile_version = self.lockfile_version.max(LIFECYCLE_LOCKFILE_VERSION);
@@ -713,12 +724,26 @@ impl Lockfile {
         R: IntoIterator<Item = LockedPackage>,
         W: IntoIterator<Item = LockedWorkspacePackage>,
     {
-        let registry_packages: Vec<_> = registry_packages.into_iter().collect();
+        let mut registry_packages: Vec<_> = registry_packages.into_iter().collect();
         let workspace_packages: Vec<_> = workspace_packages.into_iter().collect();
         let mut registry_batch = BTreeMap::new();
         let mut workspace_batch = BTreeMap::new();
-        for package in &registry_packages {
+        for package in &mut registry_packages {
             package.validate()?;
+            if self.lockfile_version == PENDING_RECEIPT_LOCKFILE_VERSION {
+                let receipt = package.source_tree_receipt();
+                if let Some(receipt) = &receipt {
+                    receipt.validate_binding(package)?;
+                }
+                package.source_receipt_binding = receipt;
+            }
+            if package.tree_evidence.is_pending()
+                && self.lockfile_version != PENDING_RECEIPT_LOCKFILE_VERSION
+            {
+                return Err(LockfileError::InvalidSourceTreeReceipt(
+                    "pending receipts require schema 11".into(),
+                ));
+            }
             let key = package.key();
             if self.packages.contains_key(&key)
                 || self.workspace_packages.contains_key(&key)
@@ -774,7 +799,7 @@ impl Lockfile {
                 .source()
                 .is_some_and(|source| source.registry().is_none())
         }) {
-            self.lockfile_version = COPIED_SOURCE_LOCKFILE_VERSION;
+            self.lockfile_version = self.lockfile_version.max(COPIED_SOURCE_LOCKFILE_VERSION);
         }
         self.packages.extend(
             registry_packages
@@ -800,6 +825,29 @@ impl Lockfile {
 
     pub fn packages(&self) -> &BTreeMap<String, LockedPackage> {
         &self.packages
+    }
+
+    pub fn has_pending_receipts(&self) -> bool {
+        self.packages
+            .values()
+            .any(|package| package.tree_evidence.is_pending())
+    }
+
+    /// Attaches source verification without changing selections or the schema.
+    pub fn attach_source_tree_receipt(
+        &mut self,
+        key: &str,
+        receipt: SourceTreeReceipt,
+    ) -> Result<(), LockfileError> {
+        if self.lockfile_version != PENDING_RECEIPT_LOCKFILE_VERSION {
+            return Err(LockfileError::InvalidSourceTreeReceipt(
+                "receipt attachment requires schema 11".into(),
+            ));
+        }
+        self.packages
+            .get_mut(key)
+            .ok_or_else(|| LockfileError::InvalidPackageKey(key.into()))?
+            .attach_source_tree_receipt(receipt)
     }
 
     pub fn workspace_packages(&self) -> &BTreeMap<String, LockedWorkspacePackage> {
@@ -897,6 +945,22 @@ impl Lockfile {
 
     /// Checks that this lockfile belongs to the current root manifest.
     pub fn validate_replay(&self, current_root_manifest_digest: &str) -> Result<(), LockfileError> {
+        if let Some(package) = self
+            .packages
+            .values()
+            .find(|package| package.tree_evidence.is_pending())
+        {
+            return Err(LockfileError::PendingSourceTreeReceipt(package.key()));
+        }
+        self.validate_selection(current_root_manifest_digest)
+    }
+
+    /// Validates pinned selection inputs without requiring completed tree receipts.
+    /// Callers must verify pending artifacts before store publication or activation.
+    pub fn validate_selection(
+        &self,
+        current_root_manifest_digest: &str,
+    ) -> Result<(), LockfileError> {
         let current_root_manifest_digest = canonical_artifact_digest(current_root_manifest_digest)?;
         if self.root_manifest_digest != current_root_manifest_digest {
             return Err(LockfileError::RootManifestDigestMismatch {
@@ -920,6 +984,21 @@ impl Lockfile {
     }
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        for package in self.packages.values() {
+            package.validate()?;
+            if self.lockfile_version == PENDING_RECEIPT_LOCKFILE_VERSION
+                && let Some(receipt) = package.source_tree_receipt()
+            {
+                receipt.validate_binding(package)?;
+            }
+            if package.tree_evidence.is_pending()
+                && self.lockfile_version != PENDING_RECEIPT_LOCKFILE_VERSION
+            {
+                return Err(LockfileError::InvalidSourceTreeReceipt(
+                    "pending receipts require schema 11".into(),
+                ));
+            }
+        }
         if self.lockfile_version < LIFECYCLE_LOCKFILE_VERSION
             && self
                 .packages
@@ -976,15 +1055,39 @@ impl Lockfile {
                 key.clone(),
             ));
         }
-        serde_json::to_string_pretty(self)
+        if self.lockfile_version != PENDING_RECEIPT_LOCKFILE_VERSION {
+            return serde_json::to_string_pretty(self)
+                .map(|json| format!("{json}\n"))
+                .map_err(LockfileError::Serialization);
+        }
+        let mut value = serde_json::to_value(self).map_err(LockfileError::Serialization)?;
+        if self.lockfile_version == PENDING_RECEIPT_LOCKFILE_VERSION {
+            for (key, package) in &self.packages {
+                let record = value["packages"][key]
+                    .as_object_mut()
+                    .expect("serialized package object");
+                record.remove("unpackedDigest");
+                record.remove("treeDigest");
+                record.insert(
+                    "sourceTreeReceipt".into(),
+                    serde_json::to_value(package.source_tree_receipt())
+                        .map_err(LockfileError::Serialization)?,
+                );
+            }
+        }
+        serde_json::to_string_pretty(&value)
             .map(|json| format!("{json}\n"))
             .map_err(LockfileError::Serialization)
     }
 
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
+        let mut value: serde_json::Value =
+            crate::json::parse(input).map_err(LockfileError::Serialization)?;
+        let receipts = crate::receipt::decode_receipts(&mut value)?;
         let mut lockfile: Self =
-            serde_json::from_str(input).map_err(LockfileError::Serialization)?;
-        if lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
+            serde_json::from_value(value).map_err(LockfileError::Serialization)?;
+        if lockfile.lockfile_version != PENDING_RECEIPT_LOCKFILE_VERSION
+            && lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LOCKFILE_VERSION
             && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
@@ -1032,11 +1135,21 @@ impl Lockfile {
             lockfile.set_root_bindings(lockfile.root_bindings.clone())?;
         }
         for (key, package) in &lockfile.packages {
+            if let Some(Some(receipt)) = receipts.get(key) {
+                receipt.validate_binding(package)?;
+            }
             key.parse::<LockfilePackageKey>()?;
             package.validate()?;
             if key != &package.key() {
                 return Err(LockfileError::PackageKeyMismatch(key.clone()));
             }
+        }
+        for (key, receipt) in receipts {
+            lockfile
+                .packages
+                .get_mut(&key)
+                .expect("parsed package")
+                .source_receipt_binding = receipt;
         }
         for (key, package) in &lockfile.workspace_packages {
             key.parse::<LockfilePackageKey>()?;
@@ -1075,15 +1188,16 @@ impl Lockfile {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LockedPackage {
+    #[serde(skip)]
+    source_receipt_binding: Option<SourceTreeReceipt>,
     registry: String,
     name: String,
     version: String,
     artifact_integrity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     registry_integrity_declared: Option<bool>,
-    unpacked_digest: String,
-    /// Explicit replay identity for the verified unpacked store tree.
-    tree_digest: String,
+    #[serde(flatten)]
+    tree_evidence: TreeEvidence,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     derived_hooks: Vec<DerivedHookOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1223,7 +1337,48 @@ impl LockedPackage {
         contexts: (&PeerContext, &PlatformContext),
         integrity_provenance: RegistryIntegrityProvenance,
     ) -> Result<Self, LockfileError> {
+        Self::with_source_evidence(
+            registry,
+            name,
+            version,
+            artifact_integrity,
+            Some(unpacked_digest),
+            contexts,
+            integrity_provenance,
+        )
+    }
+
+    /// Selects an exact artifact without claiming that its source tree was verified.
+    pub fn select_with_context_and_provenance(
+        registry: &str,
+        name: &str,
+        version: &str,
+        artifact_integrity: &str,
+        contexts: (&PeerContext, &PlatformContext),
+        integrity_provenance: RegistryIntegrityProvenance,
+    ) -> Result<Self, LockfileError> {
+        Self::with_source_evidence(
+            registry,
+            name,
+            version,
+            artifact_integrity,
+            None,
+            contexts,
+            integrity_provenance,
+        )
+    }
+
+    fn with_source_evidence(
+        registry: &str,
+        name: &str,
+        version: &str,
+        artifact_integrity: &str,
+        unpacked_digest: Option<&str>,
+        contexts: (&PeerContext, &PlatformContext),
+        integrity_provenance: RegistryIntegrityProvenance,
+    ) -> Result<Self, LockfileError> {
         let package = Self {
+            source_receipt_binding: None,
             registry: registry
                 .parse::<PackageSource>()
                 .map_err(LockfileError::Domain)?
@@ -1250,11 +1405,13 @@ impl LockedPackage {
                     })
                 },
             ),
-            unpacked_digest: unpacked_digest
-                .parse::<ArtifactDigest>()
-                .map_err(LockfileError::Domain)?
-                .to_string(),
-            tree_digest: unpacked_digest.to_owned(),
+            tree_evidence: match unpacked_digest {
+                Some(digest) => TreeEvidence::Verified {
+                    unpacked: canonical_artifact_digest(digest)?,
+                    tree: digest.to_owned(),
+                },
+                None => TreeEvidence::Pending,
+            },
             derived_hooks: Vec::new(),
             artifact_url: None,
             peer_context: canonical_peer_context(contexts.0),
@@ -1308,10 +1465,10 @@ impl LockedPackage {
         &self.derived_hooks
     }
     /// Tree activated for installation after policy validation by the caller.
-    pub fn install_tree_digest(&self) -> &str {
+    pub fn install_tree_digest(&self) -> Result<&str, LockfileError> {
         self.derived_hooks
             .last()
-            .map_or(&self.tree_digest, |output| output.tree_digest())
+            .map_or_else(|| self.tree_digest(), |output| Ok(output.tree_digest()))
     }
 
     /// Whether the producer verified registry-declared archive integrity.
@@ -1319,8 +1476,40 @@ impl LockedPackage {
         self.registry_integrity_declared
     }
 
-    pub fn tree_digest(&self) -> &str {
-        &self.tree_digest
+    pub fn tree_digest(&self) -> Result<&str, LockfileError> {
+        self.tree_evidence
+            .digests()
+            .map(|(_, tree)| tree)
+            .ok_or_else(|| LockfileError::PendingSourceTreeReceipt(self.key()))
+    }
+
+    pub fn source_tree_receipt(&self) -> Option<SourceTreeReceipt> {
+        if let Some(receipt) = &self.source_receipt_binding {
+            return Some(receipt.clone());
+        }
+        let (unpacked, tree) = self.tree_evidence.digests()?;
+        Some(SourceTreeReceipt::from_evidence(self, unpacked, tree))
+    }
+
+    fn attach_source_tree_receipt(
+        &mut self,
+        receipt: SourceTreeReceipt,
+    ) -> Result<(), LockfileError> {
+        receipt.validate_binding(self)?;
+        if !self.derived_hooks.is_empty()
+            && self.tree_evidence.digests()
+                != Some((receipt.unpacked_digest(), receipt.tree_digest()))
+        {
+            return Err(LockfileError::InvalidSourceTreeReceipt(
+                "cannot replace source evidence with retained lifecycle outputs".into(),
+            ));
+        }
+        self.tree_evidence = TreeEvidence::Verified {
+            unpacked: receipt.unpacked_digest().to_owned(),
+            tree: receipt.tree_digest().to_owned(),
+        };
+        self.source_receipt_binding = Some(receipt);
+        Ok(())
     }
 
     pub fn dependencies(&self) -> &BTreeMap<String, String> {
@@ -1350,12 +1539,21 @@ impl LockedPackage {
                 self.artifact_integrity.clone(),
             ));
         }
-        self.unpacked_digest
-            .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
-        self.tree_digest
-            .parse::<ArtifactDigest>()
-            .map_err(LockfileError::Domain)?;
+        match self.tree_evidence.digests() {
+            Some((unpacked, tree)) => {
+                unpacked
+                    .parse::<ArtifactDigest>()
+                    .map_err(LockfileError::Domain)?;
+                tree.parse::<ArtifactDigest>()
+                    .map_err(LockfileError::Domain)?;
+            }
+            None if self.derived_hooks.is_empty() => {}
+            _ => {
+                return Err(LockfileError::InvalidSourceTreeReceipt(
+                    "partial receipt or pending lifecycle evidence".into(),
+                ));
+            }
+        }
         let key = self.key();
         decode_peer_context(&self.peer_context, &key)?;
         decode_platform_context(&self.platform_context, &key)?;
@@ -1400,6 +1598,11 @@ impl LockedPackage {
 
     pub fn set_artifact_url(&mut self, url: &str) -> Result<(), LockfileError> {
         validation::validate_artifact_url(url)?;
+        if self.source_receipt_binding.is_some() && self.artifact_url.as_deref() != Some(url) {
+            return Err(LockfileError::InvalidSourceTreeReceipt(
+                "cannot change a receipted artifact URL".into(),
+            ));
+        }
         self.artifact_url = Some(url.to_owned());
         Ok(())
     }

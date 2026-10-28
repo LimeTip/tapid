@@ -32,7 +32,7 @@ pub(super) fn pointer(base: &str, field: &str) -> String {
     format!("{base}/{}", field.replace('~', "~0").replace('/', "~1"))
 }
 pub(super) fn json(input: &str) -> Result<Value, NpmImportError> {
-    super::json::parse(input).map_err(|e| error("/", "root", "JSON", &e.to_string()))
+    crate::json::parse(input).map_err(|e| error("/", "root", "JSON", &e.to_string()))
 }
 pub(super) fn object<'a>(
     value: &'a Value,
