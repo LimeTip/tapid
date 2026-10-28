@@ -410,7 +410,7 @@ The CLI uses `tapid-runner::ExecutionRequest` and checked execution exclusively 
 
 On successful contained execution, stderr receives a receipt after streamed child output. Human output starts with `sandbox receipt:` and pretty-printed JSON. `--receipt-json` emits the same data as one compact JSON line, preceded by a newline even when child stderr did not end with one. Child stdout and stderr are streamed once and are not embedded or replayed in the receipt. Child output can forge receipt text, so stderr receipts are unsuitable for trusted machine results.
 
-Use `--result-file PATH` for a separate schema-version-1 run result on both prelaunch failure and child completion. It suppresses the stderr receipt, conflicts with `--receipt-json`, and preserves child streams and exit codes. The destination must be a new file in an existing caller-controlled directory outside the canonical project root. Tapid rejects existing files and symlinks without overwriting them. Wait for Tapid to exit and require one complete newline-terminated JSON object; missing or partial results are transport failures. The result contains policy inputs when available and the existing checked receipt on completion. It adds no containment or cleanup guarantees. See the [result protocol](../../docs/json-results.md#run-child-output-and-receipts) for destination trust, failure codes, and interrupted-write handling.
+Use `--result-file PATH` for a separate schema-version-1 run result on both prelaunch failure and child completion. It suppresses the stderr receipt, conflicts with `--receipt-json`, and preserves child streams and exit codes. The destination must be a new file in an existing caller-controlled directory outside the canonical project root. Tapid rejects existing files and symlinks without overwriting them. Wait for Tapid to exit and require one complete newline-terminated JSON object; missing or partial results are transport failures. The result contains policy inputs when available and the existing checked receipt on completion. Supported graceful console cancellation on the experimental Windows backend can publish `Cancelled` after checked cleanup (exit 130); checked timeouts publish `TimedOut` (exit 1). Forced termination, supervisor death, unsupported signal handling such as Unix SIGINT, and interrupted publication may leave no complete result. It adds no containment or cleanup guarantees. See the [result protocol](../../docs/json-results.md#run-child-output-and-receipts) for destination trust, failure codes, and interrupted-write handling.
 
 Receipt schema version 1 contains `assurance`, `backend` with name/version/deprecation, `requested`, `declared`, `observed`, and `enforced` boolean dimension maps; `declared_evidence`, `observed_evidence`, and `established_evidence` arrays with dimension/scope/mechanism/limitations; `effective_filesystem`; `configured_limits`; `termination`; and `completion` with confirmed dimensions, evidence, and cleanup confidence. Each filesystem entry contains display `path`, lossless `native_path` with `encoding` and integer `units`, `access`, `kind`, `source`, and `binding`. Unix encoding is `unix-bytes`; Windows uses `windows-utf16`. Enum values use their Rust names. Project and runtime entries remain separate via `ProjectPolicy` and `BackendRuntime`. Limits use their configuration names and `null` for unconfigured values. No macOS configured limit is silently accepted. See [runner semantics](../tapid-runner/README.md) for exact directory data, global metadata, explicit devices, sampled probes, and cleanup limitations.
 
@@ -493,3 +493,20 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+Project-lock contention fails immediately as `PROJECT_BUSY`. Normal shared-store
+lock acquisition has a five-second budget per acquisition call, shared across
+recovery escalation and retries; expiry reports `STORE_BUSY`. Cache maintenance
+continues to refuse immediately as `CACHE_BUSY`. Separate acquisitions have
+separate budgets. This is not a command deadline: recovery already started,
+filesystem latency, network work, lifecycle execution, and lock ownership are not
+bounded. No attempt starts after expiry, but scheduling or an in-flight attempt can
+delay return. Long legitimate holders can cause failure; polling has no fairness
+guarantee. See [store locking](../tapid-store/README.md) for the acquisition policy.
+
+If a mutation response is lost, inspect expected state with `status` and follow
+pending-recovery guidance before another mutation. Current status and an
+`unchanged` result cannot prove whether a particular historical invocation
+committed, especially after cleanup or a later mutation. Operation IDs and durable
+completion records remain deferred. See [JSON results](../../docs/json-results.md#contention-and-lost-responses)
+and the [workflow evaluation](../../docs/testing.md#bounded-wait-and-lost-response-evaluation).
