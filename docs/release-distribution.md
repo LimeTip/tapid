@@ -104,7 +104,7 @@ The checksum detects corruption, truncation, and accidental asset substitution. 
 
 The new installers accept only stable `vX.Y.Z` versions and HTTPS release endpoints. They consume the record through `tapid.dev/releases/v1/latest.tsv`, or the corresponding `vVERSION.tsv` route for an explicit new version. They validate metadata and archive size, verify SHA-256, require exactly one expected regular executable in the archive, extract into a temporary directory, and stage the destination before replacement. The pinned bootstrap enforces its embedded version as a minimum for signed installs. Before replacement, it checks the installed managed executable's version, rejects changed executable bytes at the same version, and applies the durable archive digest and version floor in `.tapid-release-state.json`. It persists the verified archive and new state before replacement, so interruption retains the floor and permits retry or cached recovery of that exact release. An existing destination without a valid ownership marker or readable version fails closed. Explicit versions through 0.0.10 retain the historical GitHub archive and `SHA256SUMS` path unless `TAPID_RELEASE_RECORD_URL` is supplied. That historical path permits fresh installs and byte-identical reinstalls only, and refuses destinations with durable release state. Use `tapid upgrade` for existing managed installations.
 
-Released Tapid 0.0.10 first attempts signed discovery, then uses the canonical GitHub Releases API and `SHA256SUMS` when both default endpoints are unavailable. The next-release default upgrade path reads the same owned-domain release record as the installers, with no GitHub discovery fallback. `--release-url` or `TAPID_RELEASE_RECORD_URL` overrides the record URL; explicit `--endpoint` retains the legacy signed protocol. Invalid received metadata and mismatched downloads fail. Metadata unavailability may use last-known-good recovery but reports that the latest release could not be checked. Identical verified executable bytes leave the installation unchanged. Use `tapid upgrade --dry-run` to inspect the selected release without replacing the binary.
+Released Tapid 0.0.10 first attempts signed discovery, then uses the canonical GitHub Releases API and `SHA256SUMS` when both default endpoints are unavailable. The current default upgrade path reads the same owned-domain release record as the installers, with no GitHub discovery fallback. `--release-url` or `TAPID_RELEASE_RECORD_URL` overrides the record URL; explicit `--endpoint` retains the legacy signed protocol. Invalid received metadata and mismatched downloads fail. Metadata unavailability may use last-known-good recovery but reports that the latest release could not be checked. Identical verified executable bytes leave the installation unchanged. Use `tapid upgrade --dry-run` to inspect the selected release without replacing the binary.
 
 ## First release-record rollout
 
@@ -627,3 +627,194 @@ Never:
 - Historical checksum-only installers permit fresh installs or identical-byte reinstalls and cannot replace destinations with durable release state. Explicit development source installs remain separately selected operations.
 - Public smoke tests run after publication and can detect but cannot prevent a broken release from briefly being available.
 - macOS and Windows platform code signing are not part of this flow.
+
+## Administrator lifecycle contract
+
+This section reconciles [issue #3](https://github.com/LimeTip/tapid/issues/3).
+Required versions and deployment timing belong to Intune/Company Portal, macOS MDM,
+or Linux fleet management. Tapid does not implement enterprise policy or Entra
+integration. The scope here is the **executing user's installation context** with
+an explicit absolute destination. Elevation does not select another user's home
+or configure that user's shell. Local fixtures do not establish MDM certification,
+machine-wide installation, public availability, or production support.
+
+### Capability inventory
+
+| Requested capability | Current implementation or disposition |
+| --- | --- |
+| Versioned native releases | [Publication workflow](../.github/workflows/release-publication.yml): `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, `x86_64-pc-windows-msvc`. Each archive is `tapid-VERSION-TARGET.tar.gz`, including Windows. |
+| Stable installer and selected version | Generated [bootstrap installers](../tools/release/bootstrap.ts), `https://tapid.dev/install.sh` and `https://tapid.dev/install.ps1`; record routes `https://tapid.dev/releases/v1/latest.tsv` and `https://tapid.dev/releases/v1/vVERSION.tsv`, with matching `.sig` sidecars. Archive URLs use `https://github.com/LimeTip/tapid/releases/download/vVERSION/tapid-VERSION-TARGET.tar.gz`. Historical compatibility restrictions above still apply. |
+| Integrity and authenticity | `SHA256SUMS`, signed [release records](release-record-v1.md), embedded trusted keyring, bounded archive validation. Checksums alone do not authenticate the provider. [ADR 0006](adr/0006-immutable-release-signatures.md) explains why immutable signatures do not prove discovery freshness. macOS notarization/platform signing and Windows Authenticode are not provided by this flow. |
+| Installed version | Offline `tapid --version`; exact-path detection scripts below validate complete successful output. |
+| Available version | Explicit `tapid upgrade --dry-run` verifies metadata **and downloads/verifies the archive**. It is not a lightweight notification check. |
+| Upgrade and recovery | Existing [upgrade application](../crates/tapid-cli/src/application/upgrade.rs), ownership checks, durable release floors and verified recovery cache. No intentional downgrade workflow. |
+| Unattended deployment | Existing installers accept explicit versions and paths without an interactive prompt. No dedicated silent switch. Exit/PATH limitations and fixture coverage are below. |
+| Enterprise packages | MSI, PKG, DEB and RPM are deferred until a demonstrated deployment requirement identifies a gap in archives/installers. No fleet policy engine is planned. |
+| Notifications, prompts, automatic replacement | Notifications are proposed below; runtime implementation is deferred. Prompts and automatic replacement are outside this delivery. |
+| Release notes and runtime requirements | Reviewed [release notes](releases/) accompany releases. Installer prerequisites below are distinct from binary minimum OS/libc/runtime support, which remains unestablished without native evidence. Build-runner names do not establish runtime minimums. |
+| Developer source installs | Contributor `cargo install --path crates/tapid-cli --locked` / `cargo uninstall tapid` use Cargo ownership. They are separate from managed release installs; do not assume release self-update support or add an ownership marker manually. See [installation details](../README.md#installation-details). |
+
+Unix release installation requires a POSIX shell, HTTPS-capable `curl`, `tar` with
+gzip support, `shasum` or `sha256sum`, and standard filesystem/text utilities.
+Windows installation requires PowerShell with .NET HTTP support and `tar.exe`.
+The PowerShell detector uses PowerShell 7 (`pwsh`) and .NET process APIs. None of
+these prerequisites establishes minimum binary OS/libc support. The shell
+detector also requires the standard `od` utility for exact byte comparison.
+
+### Operations and exit behavior
+
+Download and review generated installer files before execution. The following
+forms use administrator-selected paths and version `1.2.3` as an example; select
+an actually published version. Run with stdin closed in automation. Installers
+need network access and writable destination/temp locations. They authenticate
+records and validate archives before replacement.
+
+```sh
+sh '/absolute/path/install.sh' --version 1.2.3 --install-dir '/absolute/path/Tapid bin' </dev/null
+'/absolute/path/Tapid bin/tapid' upgrade --dry-run </dev/null
+'/absolute/path/Tapid bin/tapid' upgrade </dev/null
+sh '/absolute/path/uninstall.sh' --install-dir '/absolute/path/Tapid bin' </dev/null
+sh '/absolute/path/detect-version.sh' '/absolute/path/Tapid bin/tapid' 1.2.3 </dev/null
+```
+
+```powershell
+pwsh -NoProfile -NonInteractive -File 'C:\Reviewed installers\install.ps1' -Version 1.2.3 -InstallDir 'C:\Tapid bin'
+& 'C:\Tapid bin\tapid.exe' upgrade --dry-run
+& 'C:\Tapid bin\tapid.exe' upgrade
+pwsh -NoProfile -NonInteractive -File 'C:\Reviewed installers\uninstall.ps1' -InstallDir 'C:\Tapid bin'
+pwsh -NoProfile -NonInteractive -File 'C:\Reviewed installers\detect-version.ps1' -ExecutablePath 'C:\Tapid bin\tapid.exe' -ExpectedVersion 1.2.3
+```
+
+| Operation | Scope, effects, and result |
+| --- | --- |
+| Install selected version | Executing user's context. Explicit absolute destination avoids reliance on PATH discovery. PATH persistence requires explicit `--configure-path` on Unix or `-ConfigurePath` on Windows, for default or custom destinations. Without consent, installers print activation guidance. Windows can report persistence failure after installing bytes. No input prompt or dedicated silent switch. |
+| Repeat install | Selected-version fixtures preserve managed executable and marker bytes. Native policy rejects changed bytes at the same version. This is not a universal package-manager idempotency guarantee. |
+| Upgrade / inspect | Invoke the installed executable by absolute path. Application success/failure is 0/1; argument parsing errors use the CLI parser's separate nonzero behavior. Dry-run does not replace the executable or persist recovery state. An unchanged verified upgrade reports already current. |
+| Uninstall | Existing [shell](../scripts/uninstall.sh) and [PowerShell](../scripts/uninstall.ps1) scripts require an owned marker for an installed binary. On Unix, a valid PATH receipt also permits cleanup after interrupted activation when both binary and marker are absent. Successful removal deletes the executable and marker, preserving durable release state and project files. Unix profile cleanup runs before binary removal; unsafe profile state preserves the installation and receipt; restore the exact receipted profile snapshot and retry cleanup. Conflicting edits retain the receipt and fail closed. After successful cleanup, another uninstall rejects the missing marker. Uninstall is not transactional. |
+| Detect selected version | Offline exact-path invocation only; no configuration/feed lookup or file creation. Exit 0 is an exact match; exit 1 covers invalid arguments, missing/relative path, failed invocation, nonzero native status, malformed output or mismatch. Diagnostics are stderr-only; success emits nothing. |
+| Downgrade | Running-version and durable release floors reject earlier releases. There is no supported administrator downgrade procedure. Removing durable state or uninstalling is not a supported bypass. |
+| Recover | Discovery unavailability may restore the exact verified cached release. Output reports inability to check latest; recovery does not claim freshness and is distinct from intentional downgrade. Invalid received metadata/artifacts fail closed instead of using recovery. |
+
+Shell installer/uninstaller validation failures return 1, while failures from
+host utilities may have other nonzero statuses. PowerShell exceptions under
+`-File` return nonzero; argument binding and host startup can fail separately.
+Deployment tools must treat any nonzero status as failure and perform explicit
+version detection afterwards. Exit 0 alone does not prove another user's PATH
+works. Version detection does not authenticate the invoked executable.
+
+The maintained [shell detector](../tools/release/detect-version.sh) takes exactly
+two positional arguments; the [PowerShell detector](../tools/release/detect-version.ps1)
+takes `-ExecutablePath` and `-ExpectedVersion`, rejecting unknown arguments.
+Both accept canonical stable decimal `X.Y.Z` with no leading zeroes except zero.
+They compare strings without numeric ordering. Complete stdout must be exactly
+`tapid X.Y.Z`, optionally followed by one LF or CRLF. Extra lines/terminators,
+whitespace, prefixes, suffixes, prerelease and build text are failures. They
+invoke only the selected absolute executable with `--version`.
+
+PowerShell applies one five-second monotonic deadline to execution and completion
+of both output reads. Expiry returns exit 1 with the existing detection diagnostic;
+cleanup attempts to terminate the live process tree and waits at most one additional
+second before closing redirected streams. A descendant retaining a pipe after the
+root exits also fails within that deadline; termination of an already orphaned
+descendant is not guaranteed. The POSIX detector has no internal deadline: its
+caller must impose an execution timeout for unattended inventory.
+
+### Evidence and ownership
+
+The [detection suite](../tools/release/detect_version_test.ts) executes success,
+argument, path, output and failure cases, including spaces, extra newlines and
+BOM-prefixed output. Both detectors compare stdout bytes without decoding.
+PowerShell deadline fixtures cover a hung executable and a root that exits while
+a descendant retains the output pipes, with finite fixture lifetimes and cleanup.
+The shared output matrix runs shell and PowerShell on Unix; Windows has native
+failure probes. PowerShell-on-macOS results do not establish native Windows
+compatibility. Full native Windows success/output evidence remains a platform
+limit of this delivery.
+
+The generated [installer fixtures](../tools/release/installers_test.ts) cover
+closed stdin, selected-version repetition and spaced destinations in
+`Unix unattended selected-version install repeats with closed stdin and a spaced destination`.
+`Unix preactivation failures preserve destination, marker, durable state and profile`
+covers signature/digest rejection, delegated ownership-policy failure and an
+invalid destination-parent shape. Native policy is stubbed there: the durable
+state is a sentinel, not proof of real verifier behavior. Existing malformed
+record, signature, rollback-policy and profile-validation cases complement it.
+`Unix uninstall preserves installation on profile cleanup failure and supports retry`
+proves installation preservation and receipt-backed retry after restoring the exact installed profile snapshot. Invalid filesystem shapes exercise write failure
+without depending on chmod behavior under privileged runners. Existing PowerShell
+parser/policy/uninstall fixtures do not prove end-to-end unattended Windows
+installation, user PATH persistence isolation, or MDM behavior; those need native
+Windows evidence before support claims.
+
+[Upgrade regressions](../crates/tapid-cli/tests/upgrade.rs) include
+`dry_run_leaves_executable_and_recovery_state_untouched`,
+`repeated_upgrade_reports_already_current_without_replacing_files`,
+`cached_recovery_does_not_claim_latest_or_upgrade`,
+`rejected_record_or_artifact_never_uses_existing_recovery_cache`, and
+`earlier_release_is_rejected_after_successful_upgrade`.
+`lifecycle_operations_preserve_project_state` snapshots manifest, lockfile,
+installed graph/store sentinels and directory entries across dry-run, upgrade,
+repeat, rejected metadata and cached restoration. CLI upgrades do not select or
+resolve project dependencies. Fixture results do not substitute for public smoke
+or native platform validation.
+
+The [upgrade application tests](../crates/tapid-cli/src/application/upgrade.rs)
+`failed_activation_does_not_persist_pending_release_state` and
+`persistence_failure_rolls_back_the_activated_executable` cover activation and
+persistence failure ordering. These failure-injection checks do not establish
+crash recovery under every native filesystem or power-loss condition.
+
+Release workflow/evidence remains owned by [#115](https://github.com/LimeTip/tapid/issues/115),
+[#117](https://github.com/LimeTip/tapid/issues/117),
+[#123](https://github.com/LimeTip/tapid/issues/123) and
+[#124](https://github.com/LimeTip/tapid/issues/124).
+[#37](https://github.com/LimeTip/tapid/issues/37) owns PATH follow-up;
+[#38](https://github.com/LimeTip/tapid/issues/38)'s synchronization proposal remains
+superseded. [#158](https://github.com/LimeTip/tapid/issues/158) owns production
+support and [#311](https://github.com/LimeTip/tapid/issues/311) sequencing.
+These ownership links do not assert refreshed issue status or close the umbrella.
+
+## Proposed opt-in notifications (not implemented)
+
+This is the selected future contract, not current CLI support. Runtime hooks,
+cache and transport require a separate implementation slice.
+
+- Process environment only: `TAPID_UPDATE_NOTIFICATIONS=1` opts in. Unset, `0`,
+  and every other value disable. `TAPID_DISABLE_UPDATE_CHECK=1` overrides opt-in.
+  Project configuration cannot authorize checks; persistent user settings are deferred.
+- Only a successful ordinary `tapid install` with stdout and stderr both attached
+  to terminals is eligible. Exclude nonempty `CI`, JSON, offline/frozen operation,
+  errors, help/version probes and all other commands. Default/disabled operation
+  makes zero automatic requests.
+- Run after success; preserve stdout and exit status. Emit at most one informative
+  stderr line for a strictly newer verified stable release. Never prompt, fetch
+  an archive, replace an executable or resolve dependencies through notifications.
+- Fetch production owned-domain metadata and signature only, using the embedded
+  production keyring and existing validation rules. Do not inherit registry
+  credentials or explicit-upgrade endpoint/keyring overrides.
+- Allow at most two seconds total added latency for cache/lock work, both requests,
+  verification, cleanup and rendering. Pass one remaining deadline throughout;
+  enforce it with monotonic time. No detached process. Failures are silent and
+  cannot fail the underlying command.
+- Successful verification permits another attempt after 24 hours; failed/timed-out
+  attempts impose 24 hours of backoff. An equal/older signed release is a successful
+  observation without a notification. Future-dated observations/attempts suppress
+  checks until wall time catches up.
+- Cache separately at `tapid/update-notifications-v1.json` under absolute
+  `XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library/Caches` on macOS, or
+  `LOCALAPPDATA` on Windows. Missing usable locations disable checks. Never use
+  project storage or durable upgrade state. Treat the cache as untrusted and cap
+  it at 16 KiB. Invalid data cannot influence release selection/floors.
+- Use private atomic writes and a nonblocking single-writer lock; losers skip
+  fetching. A lock older than five minutes may be reclaimed with ownership-safe
+  operations. Failure to persist an attempt/backoff marker prevents fetching.
+- During the 24-hour success interval, a verified newer cached observation may be
+  shown with its observation time. After that interval, failed refresh produces
+  no stale notification. Observation timestamps do not prove provider freshness.
+- Transmit no project paths, dependencies, credentials, persistent identifiers or
+  telemetry. Ordinary HTTP connection information remains visible to the provider.
+
+Future deterministic tests must cover configuration precedence and zero requests,
+all excluded contexts, 24-hour boundaries, rollback clocks, persistence failure,
+concurrent attempts, total deadlines, invalid signatures, no archive requests,
+dated cache output, stderr-only rendering and unchanged command exit/project state.
