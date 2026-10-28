@@ -234,6 +234,29 @@ A dry run never writes project files, creates an activation lock, recovers trans
 
 `tapid --json add PACKAGE --dry-run` uses the version 1 command envelope with unchanged project state. `data.preview_kind` is `resolved_graph`; `data.declarations` lists section/name/before/after edits, `data.packages` lists package changes and reasons, `data.root_changes` lists root binding changes, and `data.effects` describes this preview's effects. This is an inspection result, not a saved executable plan. A later command reads current inputs and may resolve different metadata.
 
+Each preview includes `data.starting_state` (receipt `schema_version: 1`), also
+shown in human output. `root_manifest` and `selected_manifest` retain both roles
+and report project-relative paths with SHA-256 identities of the original source
+bytes, including whitespace. `workspace` lists sorted discovered member paths
+and source identities, including unselected members. `lock` explicitly reports
+absence or the exact-byte identity of the native lock parsed for inspection.
+`registry` describes effective routing as semantic configuration, including
+credential environment names but excluding their values. Online metadata access
+may read those credentials. `operation` records mode, update selection/save policy
+and integrity compatibility; `target` records OS, architecture and libc.
+`lifecycle_policy` distinguishes absent/default-deny from a present policy's
+exact-source identity; approvals, environment values and raw policy are not emitted.
+
+Covered inputs and workspace membership are rechecked before success; observable
+changes fail with `PROJECT_CHANGED`. This is a non-atomic observation without an
+activation lock: rechecks cannot detect every edit-and-revert race. Credential
+values, mutable registry contents, artifact availability/bytes, installed/store
+state, hook outputs and runtime assurance are excluded. Fixture results describe
+fixture evidence, not live registry evidence. Network permission is separate from
+observed metadata lookup counts. Equal identities or an unchanged graph establish
+neither verification nor approval, and later resolution may differ. Saved/applyable
+plans remain deferred until a concrete review workflow demonstrates their value.
+
 Lifecycle edits validate the manifest they were planned against after acquiring the project lock. An intervening semantic manifest edit fails with `PROJECT_CHANGED` before writing the override. This protects the planning-to-lock interval for cooperating commands; it does not protect against an uncooperative writer changing files during the transaction.
 
 Install reads lifecycle policy and classifies the current lockfile after acquiring the project lock and completing recovery. If recovery restores a different lock format, replay and CI restrictions apply to that recovered lock.

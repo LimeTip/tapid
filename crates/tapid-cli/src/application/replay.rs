@@ -166,12 +166,25 @@ pub(super) fn can_replay_online(
     config: &crate::registry::RegistryConfig,
     policy: &tapid_runner::DependencyLifecyclePolicy,
 ) -> Result<bool, OperationalError> {
+    let root_digest = online::root_digest(project)?;
+    let workspace = online::workspace_materialization(project, config)?;
+    can_replay_inspected(project, lock, config, policy, &root_digest, &workspace)
+}
+
+pub(super) fn can_replay_inspected(
+    project: &Path,
+    lock: &Lockfile,
+    config: &crate::registry::RegistryConfig,
+    policy: &tapid_runner::DependencyLifecyclePolicy,
+    root_digest: &str,
+    workspace: &online::WorkspaceMaterialization,
+) -> Result<bool, OperationalError> {
     let routes_match = online::validate_locked_routes(lock, config)?;
-    let digest_matches = lock.root_manifest_digest() == online::root_digest(project)?;
+
+    let digest_matches = lock.root_manifest_digest() == root_digest;
     if digest_matches {
         online::validate_locked_files(project, lock)?;
     }
-    let workspace = online::workspace_materialization(project, config)?;
     Ok(routes_match
         && policy.approvals().is_empty()
         && lock
@@ -179,7 +192,7 @@ pub(super) fn can_replay_online(
             .values()
             .all(|p| p.derived_hooks().is_empty())
         && digest_matches
-        && online::workspace_matches_lock(&workspace, lock))
+        && online::workspace_matches_lock(workspace, lock))
 }
 
 pub(crate) struct ReplayInput {
