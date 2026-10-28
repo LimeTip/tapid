@@ -20,6 +20,12 @@
   <a href="#contributing">Contribute</a>
 </p>
 
+## Development status
+
+Tapid is for application maintainers evaluating a bounded npm-compatible package workflow in a disposable checkout. The project is **development; production support pending**. Experimental execution has separate platform limits; see the [support states and gates](docs/production-adoption.md#support-states).
+
+As reviewed on 2026-10-28, the latest published release is [v0.0.13](https://github.com/LimeTip/tapid/releases/tag/v0.0.13). This README also describes unreleased main behavior. Start with the [release/checkout summary](docs/compatibility.md#release-and-checkout-scope) and retain an [npm rollback path](docs/npm-lockfile-import.md#rollback). Do not infer released support from a checkout example.
+
 ## Install Tapid
 
 macOS and Linux:
@@ -34,9 +40,32 @@ Windows PowerShell:
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-These install the latest published development release. On Unix, run the activation command printed by the installer before using `tapid`; persistent PATH changes require `--configure-path`. On Windows, persistent user PATH changes require `-ConfigurePath`; run the printed activation command for the current PowerShell session.
+These install the latest published development release. PATH behavior depends on the installer revision: tagged v0.0.13 scripts attempt persistent PATH configuration automatically; checkout scripts require `--configure-path` on Unix or `-ConfigurePath` on Windows. Follow the downloaded installer's output to activate the current shell, then verify the version. A subprocess cannot activate its parent shell.
 
-For specific versions, source builds, verification, upgrades, and uninstall instructions, see the [installation details](#installation-details). For release readiness, see [Development status](#development-status).
+Run `tapid --version` after activation and select the matching versioned guide. For specific versions, source builds, verification, upgrades, and uninstall instructions, see the [installation details](#installation-details). For release readiness, see [Development status](#development-status).
+
+## Evaluate an existing project
+
+Tapid releases are available for development and compatibility evaluation; production support has not been declared. It manages packages and lockfiles, not application execution: keep Node.js (or your existing runtime), build/test tools, and deployment workflow unchanged during evaluation. Start with the [supported compatibility subset](docs/compatibility.md), then follow the [existing-project npm lock migration and rollback guide](docs/npm-lockfile-import.md) in a disposable checkout. Keep the npm lock and known-good install path until your application passes its own checks; dependency lifecycle scripts are disabled by default. A successful import or fixture run is not a production-support claim.
+
+Follow the version-eligible workflow in that guide:
+
+1. Import the supported npm v3 lock, then perform the first frozen install of its pinned artifacts.
+2. Read skipped-hook warnings and [available installation evidence](docs/dependency-lifecycle.md#reading-installation-results). Check imported-lock restrictions and host eligibility before choosing an execution option or writing policy.
+3. Review the selected graph, run the same application build/test/start checks as the npm baseline, and rehearse rollback before switching.
+
+Standalone commands can use `tapid tool install <package>` without a project. Each tool has an isolated lock and dependency environment, with managed commands exposed from the reported bin directory. See the [tool workflow](crates/tapid-cli/README.md#standalone-cli-tools) for PATH setup, runtime requirements, and update/removal behavior.
+
+## Why evaluate Tapid?
+
+Evaluate explicit verification and execution boundaries against your application's needs:
+
+- **Reject changed artifacts before activation.** Archive integrity and tree digests bind bytes to recorded inputs; they do not authenticate package publishers or detect malware or vulnerabilities.
+- **Approve an exact hook.** Package version, archive and original script bytes must match the approval. Permission does not prove code safety. Script denial alone is not a unique product claim.
+- **Replay authenticated derived output.** Eligible policy/toolchain and store-local attestations allow reuse without running hooks. Copied output bytes alone are insufficient; replay does not prove output correctness.
+- **Recover interrupted activation.** Durable decisions coordinate manifests, locks, store and sequential tree replacements. Recovery must finish before project use; rollback cannot contain arbitrary host mutation.
+
+The [reproducible source demonstrations](docs/adoption-claims-audit.md#reproducible-guarantees) identify tests, commands and host prerequisites. They are separate from published-binary evidence. No external pilot success or reproducible speed advantage is established by this onboarding: see [pilots #307](https://github.com/LimeTip/tapid/issues/307) and [benchmarks #308](https://github.com/LimeTip/tapid/issues/308).
 
 ## Quick start
 
@@ -54,51 +83,13 @@ tapid install --offline --frozen
 
 See the [CLI guide](crates/tapid-cli/README.md) for adding, removing, updating, and inspecting dependencies.
 
-## Evaluate an existing project
-
-Tapid releases are available for development and compatibility evaluation; production support has not been declared. It manages packages and lockfiles, not application execution: keep Node.js (or your existing runtime), build/test tools, and deployment workflow unchanged during evaluation. Start with the [supported compatibility subset](docs/compatibility.md), then follow the [existing-project npm lock migration and rollback guide](docs/npm-lockfile-import.md) in a disposable checkout. Keep the npm lock and known-good install path until your application passes its own checks; dependency lifecycle scripts are disabled by default. A successful import or fixture run is not a production-support claim.
-
-Standalone commands can use `tapid tool install <package>` without a project. Each tool has an isolated lock and dependency environment, with managed commands exposed from the reported bin directory. See the [tool workflow](crates/tapid-cli/README.md#standalone-cli-tools) for PATH setup, runtime requirements, and update/removal behavior.
-
-## Development status
-
-Tapid is under active development. Releases are available for evaluation and compatibility testing; production support is not yet available. The current target is a bounded subset of the Node.js/npm ecosystem. Deno and Bun compatibility remains a future goal.
-
-Download verification checks package bytes against registry-declared integrity. It does not authenticate publishers or detect malicious or vulnerable packages. Experimental `tapid run` is a separate Node.js-only script launcher with platform-specific containment limits.
-
-See the [supported subset and limitations](#supported-subset-and-limitations) and [production adoption gate](docs/production-adoption.md) before evaluating Tapid for a production project.
-
 ## What Tapid manages
 
 Tapid focuses on safer dependency selection and installation: it uses explicit package identities and integrity checks, and makes installs deterministic and recoverable. Vulnerability intelligence, publisher/provenance signals, and human audit attestations are product goals—not capabilities to assume are implemented today. Check [Supported subset and limitations](#supported-subset-and-limitations) for current guarantees.
 
 Tapid does not replace Node.js, Deno, Bun, or another JavaScript runtime. The installed `node_modules` layout is intended for Node.js-compatible projects. Runtime-specific compatibility with other runtimes must be validated rather than assumed.
 
-A `tapid.lock` records the root manifest digest, exact selected package identities, registry-declared artifact integrity, unpacked tree digests, and dependency edges. For example, a package entry is shaped like this (digest values shortened for readability):
-
-```json
-{
-  "lockfile_version": 7,
-  "root_manifest_digest": "sha256-…",
-  "resolver_version": "0",
-  "linker_version": "0",
-  "roots": ["https://registry.npmjs.org|is-char@1.0.0|peer=-|platform=-"],
-  "packages": {
-    "https://registry.npmjs.org|is-char@1.0.0|peer=-|platform=-": {
-      "registry": "https://registry.npmjs.org",
-      "name": "is-char",
-      "version": "1.0.0",
-      "artifact_integrity": "sha512-…",
-      "registry_integrity_declared": true,
-      "unpacked_digest": "sha256-…",
-      "tree_digest": "sha256-…",
-      "dependencies": {}
-    }
-  }
-}
-```
-
-The lockfile pins what was selected and supports verified replay; registry integrity verifies downloaded bytes against registry metadata, not publisher identity or package safety.
+See [lock formats and verification](docs/compatibility.md#compatibility-matrix), [architecture](docs/architecture.md), and [execution threat-model limits](docs/production-adoption.md#what-tapid-run-does-and-does-not-establish) for focused technical references.
 
 ## Current package-management implementation
 
@@ -106,34 +97,7 @@ The consumer workflow exercises deterministic dependency resolution, npm metadat
 
 ### Synthetic news-site compatibility fixture
 
-`examples/news-site-consumer` is a public, synthetic server-rendered Next.js/React/TypeScript application for evaluating package-manager compatibility on a representative news-site workload. The route at `/acceptance` returns the unique marker `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Its npm-generated `package-lock.json` (lockfile v3) is the reference install. Direct dependencies and every floating transitive dependency are pinned to that reference through exact manifest versions and flat `overrides`; Tapid's native online resolver does not import the npm lock. This prevents later registry publications (including `caniuse-lite`) from changing just the Tapid side. Update those pins and the npm reference together deliberately, not during CI. `tests/news_site_fixture_test.ts` verifies the entire locked dependency/optional-dependency closure and proves that the strict comparator rejects version/edge drift. Install that reference in a separate directory with `npm ci`, then run a clean Tapid install and frozen/offline replay in the fixture. `scripts/compare-news-site-package-graphs.ts` compares reachable names/versions and dependency/peer edges, source origins, integrity, and platform-optional selections; it also reports physical-only packages even when unreachable. Tapid—not npm or a direct Node command—runs the fixture's `build`, `test`, and `start` scripts. Lockfile generation used Node.js v26.10.0 / npm 11.19.1; CI uses Ubuntu 24.04 / Node.js 22 and records its toolchain versions. The fixture contains no private code, customer information, credentials, or proprietary assets. From the repository root:
-
-```bash
-cargo build --locked --bin tapid
-cd examples/news-site-consumer
-npm_reference="$(mktemp -d)"
-cp package.json package-lock.json "$npm_reference/"
-npm ci --prefix "$npm_reference"
-mkdir -p .next .tmp
-tapid() { ../../target/debug/tapid "$@"; }
-tapid install
-tapid install --frozen
-tapid install --offline --frozen
-node --experimental-strip-types ../../scripts/compare-news-site-package-graphs.ts \
-  --npm-root "$npm_reference" \
-  --tapid-root "$PWD" \
-  --json .tmp/package-graph.json \
-  --text .tmp/package-graph.txt
-export NEXT_TELEMETRY_DISABLED=1
-export TMPDIR="$PWD/.tmp"
-tapid run build
-tapid run test
-tapid run start
-# In another terminal:
-curl --fail http://127.0.0.1:3000/acceptance
-```
-
-The expected response is `TAPID_NEWS_SITE_ACCEPTANCE_V1`. Next.js production output is stored in the ignored `.next/` directory; `.tmp/` and `node_modules/` are also generated and ignored. The checked-in `tapid.toml` requests Restricted execution, with build output and temporary files limited to fixture-local paths and networking disabled by default. CI installs the npm baseline in a separate directory, performs Tapid online/frozen/offline-frozen install, fails on reachable graph, dependency/peer-edge, source, integrity, or platform-optional drift, and retains the deterministic graph report. Physical-only packages are reported even when unreachable. The app scripts are executed through Tapid after its managed install.
+See the [focused fixture procedure](docs/news-site-fixture.md) for graph comparison and build/test/start commands. This synthetic source fixture does not establish external application acceptance.
 
 The package-management toolchain also includes:
 
@@ -148,6 +112,8 @@ These controls improve repeatability and reject certain mismatches, but they do 
 The non-fixture online path requests abbreviated npm install metadata and requires registry-declared SHA-512 integrity by default. Unsupported npm range syntax and malformed historical metadata are filtered or rejected fail-closed according to their scope. Live JSR installation remains unverified. Do not treat fixture replay or one successful npm project as evidence of complete npm compatibility.
 
 ## Installation details
+
+Installer options below describe the checkout scripts. For published v0.0.13 use the [tagged installer instructions](https://github.com/LimeTip/tapid/blob/v0.0.13/README.md#installation-details); the tagged scripts attempt automatic PATH configuration and do not expose the newer opt-in flags. Do not assume the live website serves this checkout revision.
 
 The public installers at `tapid.dev` install the latest published release:
 
@@ -208,9 +174,9 @@ Windows uninstall:
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 ```
 
-The next-release installers and upgrade command, expected for 0.0.11, select immutable HTTPS archives through `https://tapid.dev/releases/v1/latest.tsv`. They verify the release record's size and SHA-256, require exactly the expected regular executable in the archive, and stage the destination before replacement. GitHub remains the initial archive host; the owned discovery address permits a future provider change. The [release-record contract](docs/release-record-v1.md) and [release runbook](docs/release-distribution.md) describe the coordinated first rollout. This source documentation does not establish that the new routes or release are public.
+Published v0.0.13 installers and upgrade command select immutable HTTPS archives through `https://tapid.dev/releases/v1/latest.tsv`. They authenticate the release record signature through its verifier and check archive size and SHA-256, require exactly the expected regular executable in the archive, and stage the destination before replacement. GitHub remains the initial archive host; the owned discovery address permits a future provider change. The [release-record contract](docs/release-record-v1.md) and [release runbook](docs/release-distribution.md) describe the coordinated first rollout. See the [recorded v0.0.13 upgrade evidence](docs/documentation-contracts.md#running-the-unix-lanes) for exact tested journeys and limits.
 
-Use `tapid upgrade --dry-run` to inspect the selected release. The new default has no GitHub discovery fallback. Invalid received metadata or mismatched downloads fail; unavailable discovery can use local recovery while reporting that the latest release could not be checked. Verified identical executable bytes produce an already-up-to-date result without replacement. `--release-url` or `TAPID_RELEASE_RECORD_URL` selects another release record; explicit `--endpoint` retains the historical signed protocol. These HTTPS and checksum paths do not provide independent release authentication.
+Use `tapid upgrade --dry-run` to inspect the selected release. The v0.0.13 default has no GitHub discovery fallback. Invalid received metadata or mismatched downloads fail; unavailable discovery can use local recovery while reporting that the latest release could not be checked. Verified identical executable bytes produce an already-up-to-date result without replacement. `--release-url` or `TAPID_RELEASE_RECORD_URL` selects another release record; explicit `--endpoint` retains the historical signed protocol. Checksums alone do not authenticate a release; signed release records are separate from npm package integrity and publisher authentication.
 
 Released 0.0.10 clients still use signed discovery followed by GitHub checksum fallback and can reach the next release that way. Explicit installer versions through 0.0.10 use the historical GitHub assets and `SHA256SUMS` unless a record override is supplied. Clients older than 0.0.10 require rerunning the installer. Alternate repositories remain explicit through `--repo` or `TAPID_REPO`; their release controls are the operator's responsibility. Source installation remains the development path. Uninstall scripts never remove project-local `.tapid-store`, `tapid.lock`, or `node_modules` data.
 
@@ -249,8 +215,8 @@ Cleaning refuses competing replay or publication operations. Installed projects 
 ## Supported subset and limitations
 
 - npm package metadata with semver versions, package dependencies, and HTTPS tarball URLs is supported.
-- npm aliases such as `"h3-v2": "npm:h3@2.0.1-rc.20"` preserve the local import name and the actual registry identity through install and frozen/offline replay. Alias targets accept supported semver ranges; dist-tags remain unsupported. See [alias behavior](docs/compatibility.md#npm-aliases).
-- Range satisfaction is differentially tested against pinned `node-semver` 7.8.5 for exact and partial versions, `x`/`*` wildcards, comparators and intersections, caret/tilde (including zero-major bounds), hyphen ranges, `||` alternatives, prerelease eligibility, and ignored build metadata. This is not a claim of complete npm CLI or package-specifier compatibility; tags and git/file dependencies remain unsupported, and workspace declarations are limited to the documented forms.
+- npm aliases such as `"h3-v2": "npm:h3@2.0.1-rc.20"` preserve the local import name and the actual registry identity through install and frozen/offline replay. Published v0.0.13 alias targets accept supported semver ranges; main also supports [dist-tags](docs/compatibility.md#registry-dist-tags). See [alias behavior](docs/compatibility.md#npm-aliases).
+- Range satisfaction is differentially tested against pinned `node-semver` 7.8.5 for exact and partial versions, `x`/`*` wildcards, comparators and intersections, caret/tilde (including zero-major bounds), hyphen ranges, `||` alternatives, prerelease eligibility, and ignored build metadata. This is not a claim of complete npm CLI or package-specifier compatibility; published v0.0.13 rejects tags and Git/file dependencies; main supports only the [documented copied-source forms](docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies). Workspace declarations remain bounded.
 - `add`, `remove`, and range-preserving `update` are available for the current package, with `--dev`, `--optional`, `--peer`, and explicit `--latest` mutation modes. `add --peer` records only a declaration; registry package peer requirements are validated against compatible direct project roots and recorded in peer contexts in lockfile/materialization identities. Missing or incompatible providers fail closed transactionally. Nested/ancestor peer-provider lookup and multiple contexts for one exact package instance remain unsupported. `outdated` reports direct lockfile selections, compatible and available versions, SemVer changes, and direct pin and declared range impact. It is read-only and stops with recovery guidance if an interrupted transaction is pending. Registry access is explicit in help; `--offline` reports unchecked registry versions as unknown. `prune` replays the validated workspace-root lockfile atomically, including with `--workspace`, to remove unreachable managed output; it does not mutate the selected member manifest. `add`, `remove`, `update`, and `outdated` use the `--project-dir` manifest by default, or a named member selected with `--workspace <name>` where applicable. npm-style workspaces support bounded discovery/globs, local package links, and root or selected-member operations with root-owned lockfile, store, and activation; scripts require explicit `tapid run`. Unsupported layouts and protocols fail closed before mutation. See the [compatibility matrix](docs/compatibility.md#compatibility-matrix).
 - Lifecycle mutations are all-or-nothing across the manifest, lockfile, verified store, and managed `node_modules` activation. Resolution, integrity, archive, peer, workspace, and materialization failures preserve the prior state; verified trees are not committed to the shared store until project activation succeeds. Durable recovery journals let the next mutating lifecycle command restore the prior state after a crash before commit or finish cleanup after a committed operation.
 - The live npm path requires registry-declared SHA-512 integrity by default and verifies downloaded bytes against that digest. This integrity check matches bytes to registry metadata; it does not authenticate the publisher, prove the user intended that package, or establish the archive's package identity independently of the metadata. The explicit `--allow-unverified-registry-artifacts` compatibility exception permits missing integrity and is online-only.
@@ -258,7 +224,7 @@ Cleaning refuses competing replay or publication operations. Installed projects 
 - Dependency lifecycle scripts are denied by default. Exact checked-in approvals can run supported hooks through Linux ManagedTree; see [policy and platform requirements](docs/dependency-lifecycle.md).
 - JSR support is experimental. Live JSR installation is not verified. A JSR artifact is accepted only when metadata supplies an HTTPS npm tarball URL and a valid SHA-512 SRI value. Tapid does not derive or trust integrity from transport bytes.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu, macOS, and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform is not evidence for another.
-- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree and resource-limit profiles require delegated cgroup v2 and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending. Package-level malware scanning, package provenance verification, and independently authenticated client release metadata also remain unavailable.
+- ADR 0005 default-on, fail-closed CLI wiring and configuration parsing are integrated. macOS 26 Restricted execution is experimental and uses deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock and seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree and resource-limit profiles require delegated cgroup v2 and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending. Package-level malware scanning and package provenance verification remain unavailable. Client release-record authentication is a separate implemented mechanism; see the versioned audit.
 
 ## Contributing
 

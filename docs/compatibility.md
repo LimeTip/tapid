@@ -1,10 +1,28 @@
+# Compatibility matrix
+
+## Release and checkout scope
+
+Reviewed 2026-10-28: latest published [v0.0.13](https://github.com/LimeTip/tapid/releases/tag/v0.0.13), source `a6e109b65b5835c8bd6e023ca283488bd67512bf`. The detailed rules below describe **main**, audited at `99c2bffa2418cc49551db8ce64fe82c9c479b1ca`, and include unreleased behavior. Use the [tagged matrix](https://github.com/LimeTip/tapid/blob/v0.0.13/docs/compatibility.md) and [tagged migration guide](https://github.com/LimeTip/tapid/blob/v0.0.13/docs/npm-lockfile-import.md) with that binary. Older tagged guides remain applicable to their versions.
+
+| Capability | Published v0.0.13 | Main at audited revision |
+| --- | --- | --- |
+| Dist-tags | Unsupported | Online resolution pins exact versions; update refreshes tags |
+| Copied Git / file sources | Unsupported | Bounded pinned Git HTTPS archives / contained file tarballs; schema 10 |
+| npm v3 import | Registry-only subset; no workspace links | Includes supported workspace links and coordinated member recovery |
+| ci | Verified native graph, no hook execution; rejects schema 8 | Same boundary; see detailed source rules |
+| Lifecycle | Exact Linux approvals; frozen replay needs authenticated output | Adds reporting and invocation overrides; host eligibility still applies |
+| Lock formats | Ordinary 7, imported 8, derived 9; controlled older reads | Adds copied-source 10; no general backward compatibility promise |
+| Upgrade verification | Signed release record and archive checks; bounded published receipts | Same signed-record boundary; source implementation is separate evidence |
+
+This is development evaluation, not production support. See [migration and rollback](npm-lockfile-import.md), [support states](production-adoption.md#support-states), and the [surface audit and website handoff](adoption-claims-audit.md) for evidence and ownership.
+
 ## Peer dependency behavior
 
 Manifest and registry parsing preserve `peerDependencies` separately from regular dependencies. `tapid add --peer <name>@<range>` records only a manifest declaration; it is not itself installed or checked as an ordinary dependency. Registry-package peers are checked against compatible direct project roots from the same registry. Workspace member peers are checked against either a matching local workspace member or a compatible direct project root; missing or incompatible providers fail before project mutation and are revalidated during frozen/offline replay. Registry peer provider versions are stored in the lockfile and linker peer context; workspace peer providers are validated against persisted workspace or root identities.
 
 This bounded model does not implement nested/ancestor peer lookup, multiple placements of the same package under different peer contexts, or full npm/pnpm automatic peer placement. The consuming project's own `peerDependencies` remain declarations and are not installed as roots; their presence does not prove that the consuming runtime supplies them.
 
-# Compatibility matrix
+## Detailed capability contracts
 
 This matrix distinguishes current implemented behavior from accepted target contracts that are explicitly marked pending. Supported means covered by relevant local contract or runtime tests; an ADR or configured CI job alone is not support evidence. It does not mean full npm compatibility or production readiness.
 
