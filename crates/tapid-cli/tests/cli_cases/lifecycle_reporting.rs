@@ -378,16 +378,30 @@ fn lifecycle_rebuild_never_turns_default_denial_into_success_or_accepts_unsafe_m
 fn lifecycle_rebuild_impact_excludes_dependants_without_readable_generated_inputs() {
     let fixture = command_support::CliFixture::new("rebuild-readable-impact");
     fixture.project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0","consumer":"1.0.0"}}"#).unwrap();
-    write_dependency_script_fixture(&fixture.project, "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=");
-    let mut registry: serde_json::Value = serde_json::from_slice(&fs::read(fixture.project.path().join("registry.json")).unwrap()).unwrap();
+    write_dependency_script_fixture(
+        &fixture.project,
+        "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
+    );
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.project.path().join("registry.json")).unwrap())
+            .unwrap();
     let mut consumer = registry["packages"][0].clone();
     consumer["name"] = "consumer".into();
     consumer["dependencies"] = serde_json::json!({"native-demo":"1.0.0"});
     registry["packages"].as_array_mut().unwrap().push(consumer);
-    fixture.project.write("registry.json", &serde_json::to_vec(&registry).unwrap()).unwrap();
-    let installed = fixture.command(&["install", "--registry-fixture", "registry.json"]).output().unwrap();
+    fixture
+        .project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let installed = fixture
+        .command(&["install", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
     assert!(installed.status.success(), "{installed:?}");
-    let result = fixture.command(&["rebuild", "native-demo", "--json"]).output().unwrap();
+    let result = fixture
+        .command(&["rebuild", "native-demo", "--json"])
+        .output()
+        .unwrap();
     assert!(!result.status.success());
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(report["lifecycle"]["explicitly_selected_packages"], 1);
