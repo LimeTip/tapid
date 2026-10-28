@@ -1,7 +1,7 @@
 use crate::filesystem::read::{ReadError, read_bounded_file};
 use clap::Args as ClapArgs;
-mod permissions;
-mod result;
+pub(super) mod permissions;
+pub(super) mod result;
 use result::RunFailure;
 use std::{
     env,
@@ -396,7 +396,7 @@ fn forward_child_output_for_cli(
     }
 }
 
-fn render_outcome(
+pub(super) fn render_outcome(
     outcome: &tapid_runner::ExecutionOutcome,
     machine: Option<bool>,
     provenance: Option<serde_json::Value>,

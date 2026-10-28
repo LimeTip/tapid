@@ -20,8 +20,7 @@ const MAX_EXPANSION: usize = 65536;
 /// Retained existing-state coordination plus bounded project observations.
 /// Consumers must still authenticate and recheck the complete live layout,
 /// lifecycle provenance and runtime before launch. No recovery is performed.
-#[allow(dead_code)] // Awaiting execution composition; not launch authority.
-pub(super) struct ProjectEvidence {
+pub(crate) struct ProjectEvidence {
     pub root: PathBuf,
     pub workspace: Workspace,
     pub lock: Lockfile,
@@ -57,11 +56,49 @@ fn observe_file(
     }
 }
 
-#[allow(dead_code)]
 impl ProjectEvidence {
+    pub(crate) fn run_config(&self) -> Result<tapid_runner::RunConfig, tapid_runner::ConfigError> {
+        tapid_runner::RunConfig::parse_toml_bytes(
+            self.observations[&self.root.join("tapid.toml")]
+                .as_deref()
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn select_command(
+        &self,
+        member: Option<&str>,
+        package: Option<&str>,
+        command: &str,
+    ) -> Result<super::live::LiveCommand, super::selection::SelectionError> {
+        if self.imported.is_some() {
+            self.select_imported_command(member, package, command)
+        } else {
+            self.select_native_command(member, package, command)
+        }
+    }
+    /// Reconstruct all evidence immediately before checked execution and retain
+    /// the originally selected owner and entry. Coordination does not exclude
+    /// malicious host pathname races after this final observation.
+    pub(crate) fn revalidate_command(
+        &self,
+        member: Option<&str>,
+        package: Option<&str>,
+        command: &str,
+        expected: &super::live::LiveCommand,
+    ) -> Result<(), super::selection::SelectionError> {
+        let current = self.select_command(member, package, command)?;
+        if current.selection != expected.selection || current.entry != expected.entry {
+            return Err(super::selection::SelectionError::InconsistentInstallation(
+                "selected command changed before launch".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Verify native-lock materialization, including all owned member layouts.
-    /// This authenticates content only; lifecycle approval and execution policy
-    /// must be established separately before any checked launch.
+    /// Authenticates content and lifecycle provenance; execution policy and
+    /// runtime binding must still be established before checked launch.
     pub(super) fn verify_native_layout(
         &self,
     ) -> Result<
@@ -135,6 +172,7 @@ impl ProjectEvidence {
         input: &tapid_linker::NamedLayoutInput,
         workspace_plan: &crate::online::WorkspaceInstallPlan,
     ) -> Result<(), OperationalError> {
+        self.verify_lifecycle_provenance()?;
         // Even an unowned member tree can affect Node lookup from mutable
         // workspace source. Never let it escape verification through omission.
         for member in self.workspace.members() {
@@ -177,6 +215,26 @@ impl ProjectEvidence {
         }
         self.revalidate()?;
         Ok(())
+    }
+
+    fn verify_lifecycle_provenance(&self) -> Result<(), OperationalError> {
+        self.revalidate()?;
+        let policy = self.observations[&self.root.join("tapid.lifecycle.toml")]
+            .as_deref()
+            .map(tapid_runner::DependencyLifecyclePolicy::parse)
+            .transpose()
+            .map_err(|e| failure(ErrorKind::InvalidRequest, e))?
+            .unwrap_or_else(tapid_runner::DependencyLifecyclePolicy::denied);
+        crate::application::dependency_scripts::provenance::verify_installed_provenance(
+            &self.lock,
+            &policy,
+            &self.store,
+            || {
+                tapid_runner::dependency_toolchain_identity()
+                    .map_err(|e| failure(ErrorKind::InvalidRequest, e))
+            },
+        )?;
+        self.revalidate()
     }
 
     /// Select against the same root/member composition used by imported replay.
@@ -412,7 +470,7 @@ impl ProjectEvidence {
         Ok(selected)
     }
 
-    pub(super) fn observe(
+    pub(crate) fn observe(
         project: &Path,
         store: &tapid_store::Store,
     ) -> Result<Self, OperationalError> {
@@ -604,6 +662,69 @@ mod imported_tests;
 mod tests {
     use super::*;
     use tapid_test_support::{TempHome, TempProject};
+
+    #[test]
+    fn command_preparation_rejects_revoked_lifecycle_approval_before_layout() {
+        let project = TempProject::new("exec-revoked-policy").unwrap();
+        let home = TempHome::new("exec-revoked-store").unwrap();
+        let source = TempProject::new("exec-revoked-source").unwrap();
+        source
+            .write(
+                "package.json",
+                br#"{"name":"demo","version":"1.0.0","scripts":{"postinstall":"echo approved"}}"#,
+            )
+            .unwrap();
+        let digest = tapid_archive::canonical_tree_digest(source.path()).unwrap();
+        let store = tapid_store::Store::new(home.path().join("store"));
+        let mut transaction = store.transaction();
+        transaction
+            .stage_verified_tree(&digest.parse().unwrap(), source.path())
+            .unwrap();
+        transaction.publish().unwrap().commit().unwrap();
+        let recipe = format!("sha256-{}", "b".repeat(64));
+        let attestation = store
+            .attest_lifecycle_output(&recipe.parse().unwrap(), &digest.parse().unwrap())
+            .unwrap();
+        let manifest = br#"{"name":"root","version":"1.0.0","dependencies":{"demo":"1.0.0"}}"#;
+        project.write("package.json", manifest).unwrap();
+        let package = tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org", "demo", "1.0.0",
+            "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==", &digest,
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        ).unwrap();
+        let key = package.key();
+        let mut lock = Lockfile::new(&crate::filesystem::atomic::digest_bytes(manifest)).unwrap();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([key.clone()]).unwrap();
+        lock.set_derived_hooks(
+            &key,
+            vec![
+                tapid_lockfile::DerivedHookOutput::new(
+                    "postinstall",
+                    &recipe,
+                    &digest,
+                    &attestation,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", bytes.as_bytes()).unwrap();
+        drop(ActivationLock::acquire(project.path()).unwrap());
+        let evidence = ProjectEvidence::observe(project.path(), &store).unwrap();
+        let failure = evidence.verify_native_layout().err().unwrap();
+        assert!(
+            failure.to_string().contains("approval was removed"),
+            "{failure}"
+        );
+        assert_eq!(
+            std::fs::read(project.path().join("tapid.lock")).unwrap(),
+            bytes.as_bytes()
+        );
+        assert!(!project.path().join("node_modules").exists());
+        assert!(!project.path().join("tapid.lifecycle.toml").exists());
+    }
 
     #[test]
     fn root_coordinated_workspace_observation_never_creates_member_lock_and_rechecks_state() {
@@ -914,6 +1035,30 @@ mod tests {
         let selected = evidence
             .select_native_command(None, Some("alias"), "tool")
             .unwrap();
+        evidence
+            .revalidate_command(None, Some("alias"), "tool", &selected)
+            .unwrap();
+        let mut redirected = evidence
+            .select_native_command(None, Some("alias"), "tool")
+            .unwrap();
+        redirected.entry = evidence.root.join("node_modules/alias/runtime.js");
+        assert!(
+            evidence
+                .revalidate_command(None, Some("alias"), "tool", &redirected)
+                .is_err()
+        );
+        project
+            .write("tapid.lifecycle.toml", b"schema = 1\n")
+            .unwrap();
+        assert!(
+            evidence
+                .revalidate_command(None, Some("alias"), "tool", &selected)
+                .is_err()
+        );
+        std::fs::remove_file(project.path().join("tapid.lifecycle.toml")).unwrap();
+        evidence
+            .revalidate_command(None, Some("alias"), "tool", &selected)
+            .unwrap();
         assert!(matches!(
             evidence.select_native_command(Some("unknown"), Some("alias"), "tool"),
             Err(super::super::selection::SelectionError::InvalidProjectSelection(_))
@@ -959,6 +1104,11 @@ mod tests {
             )
             .unwrap();
         assert!(bind().is_err(), "the entry alone is insufficient evidence");
+        assert!(
+            evidence
+                .revalidate_command(None, Some("alias"), "tool", &selected)
+                .is_err()
+        );
         assert!(evidence.verify_native_layout().is_err());
         evidence.revalidate().unwrap();
     }

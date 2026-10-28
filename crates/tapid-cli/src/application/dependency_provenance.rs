@@ -4,7 +4,6 @@ use super::*;
 /// The caller retains the store guard and must separately validate observations
 /// and the live layout. The identity provider must use the runner's checked
 /// dependency toolchain identity; it is evaluated only for approved hooks.
-#[allow(dead_code)] // Pending installed-command launch composition.
 pub(in crate::application) fn verify_installed_provenance(
     lock: &Lockfile,
     policy: &DependencyLifecyclePolicy,

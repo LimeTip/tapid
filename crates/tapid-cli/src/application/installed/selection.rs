@@ -8,7 +8,7 @@ use tapid_manifest::PackageManifest;
 /// Exact command ownership, with authenticated instances kept separate from
 /// mutable workspace identities. Neither variant confers launch authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum CommandOwner {
+pub(crate) enum CommandOwner {
     Authenticated(InstanceKey),
     /// Identity and placement only: workspace source bytes remain mutable.
     Workspace(tapid_linker::WorkspaceLink),
@@ -16,14 +16,14 @@ pub(super) enum CommandOwner {
 
 /// Selection facts; bind the relative entry to a verified live placement before launch.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct SelectedCommand {
+pub(crate) struct SelectedCommand {
     pub install_name: PackageName,
     pub owner: CommandOwner,
     pub relative_entry: PathBuf,
 }
 
 #[derive(Debug)]
-pub(super) enum SelectionError {
+pub(crate) enum SelectionError {
     InvalidProjectSelection(String),
     ProjectEvidence(crate::application::outcome::OperationalError),
     InvalidPackageSelection(String),
@@ -61,7 +61,6 @@ impl std::error::Error for SelectionError {}
 
 /// Restrict command eligibility to one selected manifest while retaining every
 /// instance and edge for the caller's complete-layout verification.
-#[allow(dead_code)] // Used by live binding; CLI composition remains pending.
 pub(super) fn select_manifest_command(
     input: &NamedLayoutInput,
     links: &tapid_linker::WorkspaceLinkPlan,
@@ -118,7 +117,6 @@ pub(super) fn select_manifest_command(
 /// Only root bindings are eligible; instances reachable solely by dependency
 /// edges are deliberately excluded. Each binding is planned independently so
 /// qualification can disambiguate aliases without weakening bin validation.
-#[allow(dead_code)] // Project snapshot and launch composition is still pending.
 pub(super) fn select_command(
     input: &NamedLayoutInput,
     links: &tapid_linker::WorkspaceLinkPlan,

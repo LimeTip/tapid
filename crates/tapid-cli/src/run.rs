@@ -169,7 +169,6 @@ pub fn prepare_execution_request_with_policy(
 /// Prepare direct argv execution after installed-command authentication.
 /// This does not establish package identity or authorize a dependency selection.
 /// Policy is explicit; no script-name profile lookup is performed.
-#[allow(dead_code)] // Awaiting the installed-command selection caller.
 pub fn prepare_node_execution_request_with_policy(
     project_dir: &Path,
     working_directory: &Path,

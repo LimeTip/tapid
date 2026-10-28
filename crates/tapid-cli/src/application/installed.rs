@@ -11,12 +11,13 @@ mod project;
 mod selection;
 #[cfg(test)]
 use live::bind_live_command;
+pub(crate) use project::ProjectEvidence;
+pub(crate) use selection::{CommandOwner, SelectionError};
 
 /// Reconstruct locked instances from existing authenticated store evidence.
 /// The caller must retain `guard` while consuming these paths and separately
 /// validate project observations, workspace topology and the materialized layout.
 /// This is evidence preparation, never launch authorization or lifecycle approval.
-#[allow(dead_code)] // Installed-command composition is not yet exposed by the CLI.
 pub(crate) fn installed_input(
     lock: &Lockfile,
     manifest: &PackageManifest,

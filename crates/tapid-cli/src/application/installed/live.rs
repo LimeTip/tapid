@@ -5,14 +5,12 @@ use tapid_linker::{MaterializationPlan, NamedLayoutInput, WorkspaceLinkPlan};
 /// Observed live placement. This does not retain project/store coordination or
 /// confer launch authority; callers must retain guards and revalidate at launch.
 #[derive(Debug)]
-#[allow(dead_code)] // Consumed by project execution composition once integrated.
-pub(super) struct LiveCommand {
+pub(crate) struct LiveCommand {
     pub selection: SelectedCommand,
     pub entry: PathBuf,
 }
 
 /// Bind reference selection to one exact, completely verified live layout.
-#[allow(dead_code)] // Project snapshot composition is not yet exposed by the CLI.
 pub(super) fn bind_live_command(
     project: &Path,
     workspace_root: &Path,
