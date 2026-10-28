@@ -13,6 +13,14 @@ The crate validates required `name` and `version`, optional `private`, `descript
 
 `PackageManifest::parse` accepts document text and `to_json` emits stable JSON with sorted map keys. Archive extraction, link creation, and process execution are owned by other crates and the CLI.
 
+`overrides` retains string replacements and nested objects as
+`OverrideDeclaration` values, including passive declarations from fetched package
+manifests. Dependency edits preserve these declarations. Parsing rejects duplicate
+keys throughout the override subtree and duplicate top-level `overrides` fields.
+Preservation does not activate policy. `parse_override_selector` validates local
+binding syntax and separates an optional parent range, retaining scoped names.
+The CLI compiles range semantics and validates active root declaration shape.
+
 `ManifestError::diagnostic` accepts the same input and returns the failed field,
 map key, expected constraint, and observed JSON type. It does not copy arbitrary
 field values. `Workspace::discover_typed` preserves this evidence and the

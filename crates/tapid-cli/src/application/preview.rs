@@ -36,6 +36,10 @@ pub(crate) struct Reason {
     parent: Option<String>,
     dependency: String,
     requirement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_requirement: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    override_rules: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,6 +415,8 @@ fn reasons_by_target(graph: &GraphSnapshot, phase: &'static str) -> BTreeMap<Str
             parent: None,
             dependency: name.clone(),
             requirement: None,
+            original_requirement: None,
+            override_rules: Vec::new(),
         });
     }
     for (parent, package) in &graph.packages {
@@ -424,6 +430,15 @@ fn reasons_by_target(graph: &GraphSnapshot, phase: &'static str) -> BTreeMap<Str
                     .requirements
                     .get(&(parent.clone(), name.clone()))
                     .cloned(),
+                original_requirement: graph
+                    .overrides
+                    .get(&(parent.clone(), name.clone()))
+                    .and_then(|(original, _)| original.clone()),
+                override_rules: graph
+                    .overrides
+                    .get(&(parent.clone(), name.clone()))
+                    .map(|(_, rules)| rules.clone())
+                    .unwrap_or_default(),
             });
         }
     }

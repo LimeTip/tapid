@@ -7,7 +7,9 @@ use crate::application::outcome::{
 };
 
 mod exclusions;
+mod policy;
 use exclusions::{candidate_exclusions, with_exclusions};
+pub(crate) use policy::compile_override_rules;
 
 fn resolution_error(
     error: ResolveError,
@@ -37,6 +39,8 @@ fn resolution_error(
             .map(|root| RequirementDiagnostic {
                 local_name: Some(root.name.to_string()),
                 requirement: root.requirement.raw.clone(),
+                original_requirement: None,
+                override_rules: Vec::new(),
                 package: None,
                 declaration: None,
             })
@@ -194,75 +198,25 @@ type ResolvedRecords = (
 thread_local! {
     pub(super) static RESOLVER_METADATA_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static RESOLVER_METADATA_VERSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(super) static RESOLVER_METADATA_PARENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn insert_records<F>(
+fn insert_records(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
     metadata: &mut Vec<RegistryMetadata>,
-    overrides: &BTreeMap<PackageName, Requirement>,
     packages: Vec<PackageRecord>,
-    registry_for_dependency: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
-{
+) -> Result<(), String> {
     let mut inserted_keys = BTreeSet::new();
-    let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
-    for mut package in packages {
-        if package.registry.to_string() == NPM {
-            for (name, requirement) in overrides {
-                if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-                if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-            }
-        }
-        let registry = package.registry.to_string();
+    for package in packages {
         let key = (
-            registry.clone(),
+            package.registry.to_string(),
             package.name.to_string(),
             package.version.to_string(),
         );
-        inserted_names
-            .entry(registry)
-            .or_default()
-            .insert(package.name.clone());
         normalized.insert(key.clone(), normalize_record(&package));
         records.insert(key.clone(), package);
         inserted_keys.insert(key);
     }
-
-    let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecordKey>>::new();
-    for key in records.keys() {
-        candidates
-            .entry((key.0.clone(), key.1.clone()))
-            .or_default()
-            .push(key);
-    }
-    let candidate_matches = |registry: &PackageSource,
-                             name: &PackageName,
-                             requirement: &Requirement| {
-        candidates
-            .get(&(registry.to_string(), name.to_string()))
-            .into_iter()
-            .flatten()
-            .any(|key| {
-                normalized
-                    .get(*key)
-                    .and_then(|record| record.as_ref().ok())
-                    .is_some()
-                    && records.get(*key).is_some_and(|candidate| {
-                        current_platform_matches(&candidate.platform)
-                            && requirement
-                                .matches_tagged_version(&candidate.version, &candidate.dist_tags)
-                    })
-            })
-    };
-
     let mut additions = BTreeMap::<PackageSource, Vec<PackageVersionMetadata>>::new();
     for key in &inserted_keys {
         let Some(record) = normalized.get(key).and_then(|record| record.as_ref().ok()) else {
@@ -271,22 +225,11 @@ where
         #[cfg(test)]
         RESOLVER_METADATA_VERSION_VISITS.set(RESOLVER_METADATA_VERSION_VISITS.get() + 1);
         let package = records.get(key).expect("record inserted before metadata");
-        let mut package_metadata = record.metadata.clone();
-        for (name, requirement) in &record.optional_dependencies {
-            let actual_name = requirement.package_name(name);
-            let target_registry = registry_for_dependency(&package.registry, actual_name)?;
-            if candidate_matches(&target_registry, actual_name, requirement) {
-                package_metadata
-                    .dependencies
-                    .insert(name.clone(), requirement.clone());
-            }
-        }
         additions
             .entry(package.registry.clone())
             .or_default()
-            .push(package_metadata);
+            .push(record.metadata.clone());
     }
-
     for (registry, additions) in additions {
         let registry_index =
             if let Some(index) = metadata.iter().position(|entry| entry.registry == registry) {
@@ -315,104 +258,37 @@ where
             RegistryMetadata::normalize(registry, combined).map_err(|error| error.to_string())?;
     }
 
-    for registry_metadata in metadata {
-        let parent_registry = registry_metadata.registry.clone();
-        for parent in &mut registry_metadata.packages {
-            #[cfg(test)]
-            RESOLVER_METADATA_PARENT_VISITS.set(RESOLVER_METADATA_PARENT_VISITS.get() + 1);
-            let parent_key = (
-                parent_registry.to_string(),
-                parent.name.to_string(),
-                parent.version.to_string(),
-            );
-            let Some(parent_record) = normalized
-                .get(&parent_key)
-                .and_then(|record| record.as_ref().ok())
-            else {
-                continue;
-            };
-            for (name, requirement) in &parent_record.optional_dependencies {
-                let actual_name = requirement.package_name(name);
-                let target_registry = registry_for_dependency(&parent_registry, actual_name)?;
-                if inserted_names
-                    .get(&target_registry.to_string())
-                    .is_some_and(|names| names.contains(actual_name))
-                    && candidate_matches(&target_registry, actual_name, requirement)
-                {
-                    parent
-                        .dependencies
-                        .insert(name.clone(), requirement.clone());
-                }
-            }
-        }
-    }
     Ok(())
 }
 
-fn overridden_requirement(name: &PackageName, previous: &str, replacement: &Requirement) -> String {
-    if previous.trim().starts_with("npm:") {
-        return match previous.parse::<Requirement>() {
-            Ok(alias) => format!("npm:{}@{}", alias.package_name(name), replacement.raw),
-            // Keep malformed aliases invalid rather than changing their source.
-            Err(_) => previous.to_owned(),
-        };
-    }
-    replacement.raw.clone()
-}
-
-/// Locate effective ranges using the same override rules as metadata and workspace roots.
+/// Locate actual resolver matches and the separately prepared workspace roots.
 pub(super) fn locate_override_requirements(
     context: &mut crate::application::outcome::DiagnosticContext,
-    declarations: &[RequirementDiagnostic],
-    manifest: &PackageManifest,
     path: &Path,
-    overrides: &BTreeMap<PackageName, Requirement>,
+    workspace_matches: &[RequirementDiagnostic],
 ) {
     use crate::application::outcome::Declaration;
     let mut located = Vec::new();
     for requirement in &context.requirements {
-        let mut origins = Vec::new();
-        for selector in manifest.overrides().keys() {
-            let Ok((_, name)) = dep_parts(selector) else {
-                continue;
-            };
-            let Some(replacement) = overrides.get(&name) else {
-                continue;
-            };
-            let metadata_override = requirement.package.as_ref().is_some_and(|package| {
-                package.source == NPM
-                    && requirement.local_name.as_deref() == Some(name.as_str())
-                    && overridden_requirement(&name, &requirement.requirement, replacement)
-                        == requirement.requirement
-            });
-            let workspace_override = requirement.package.is_none()
-                && requirement.declaration.as_ref().is_none_or(|declaration| {
-                    declaration.workspace.is_some() && declaration.selects_resolver_root()
-                })
-                && declarations.iter().any(|candidate| {
-                    candidate.local_name == requirement.local_name
-                        && candidate.declaration.as_ref().is_some_and(|declaration| {
-                            declaration.workspace.is_some() && declaration.selects_resolver_root()
-                        })
-                        && candidate
-                            .requirement
-                            .parse::<Requirement>()
-                            .is_ok_and(|original| {
-                                candidate.local_name.as_deref().is_some_and(|local| {
-                                    local
-                                        .parse::<PackageName>()
-                                        .is_ok_and(|local| original.package_name(&local) == &name)
-                                })
-                            })
-                        && requirement.requirement == replacement.raw
-                });
-            if metadata_override || workspace_override {
+        if !requirement.override_rules.is_empty() {
+            for rule in &requirement.override_rules {
                 let mut effective = requirement.clone();
-                effective.declaration = Some(Declaration::manifest(
-                    path,
-                    Declaration::pointer("overrides", selector),
-                ));
-                origins.push(effective);
+                effective.declaration = Some(Declaration::manifest(path, rule.clone()));
+                located.push(effective);
+            }
+            continue;
+        }
+        let mut origins = Vec::new();
+        if requirement.package.is_none() {
+            for matched in workspace_matches.iter().filter(|matched| {
+                matched.local_name == requirement.local_name
+                    && matched.requirement == requirement.requirement
+            }) {
+                for rule in &matched.override_rules {
+                    let mut effective = matched.clone();
+                    effective.declaration = Some(Declaration::manifest(path, rule.clone()));
+                    origins.push(effective);
+                }
             }
         }
         if origins.is_empty() {
@@ -535,10 +411,49 @@ pub(super) fn preserve_pinned_record(
     preserved
 }
 
+#[cfg(test)]
 pub(super) fn resolve_with_preferences<R, F>(
     roots: &[Dependency],
-    mut registry_for_dependency: R,
+    registry_for_dependency: R,
     overrides: &BTreeMap<PackageName, Requirement>,
+    fetch: F,
+    preferred: &tapid_resolver::ResolutionPreferences,
+    seed: Vec<PackageRecord>,
+    progress: impl FnMut(usize),
+) -> Result<ResolvedRecords, OperationalError>
+where
+    R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
+{
+    let policy = tapid_resolver::OverridePolicy::new_for_registry(
+        overrides
+            .iter()
+            .map(|(name, replacement)| tapid_resolver::OverrideRule {
+                id: crate::application::outcome::Declaration::pointer("overrides", name.as_str()),
+                parent: None,
+                dependency: name.clone(),
+                replacement: replacement.clone(),
+            })
+            .collect(),
+        NPM.parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+    )
+    .map_err(OperationalError::from)?;
+    resolve_with_policy(
+        roots,
+        registry_for_dependency,
+        &policy,
+        fetch,
+        preferred,
+        seed,
+        progress,
+    )
+}
+
+pub(super) fn resolve_with_policy<R, F>(
+    roots: &[Dependency],
+    mut registry_for_dependency: R,
+    policy: &tapid_resolver::OverridePolicy,
     mut fetch: F,
     preferred: &tapid_resolver::ResolutionPreferences,
     seed: Vec<PackageRecord>,
@@ -586,25 +501,38 @@ where
                 .collect()
         })
     };
-    insert_records(
-        &mut records,
-        &mut normalized,
-        &mut metadata,
-        overrides,
-        seed,
-        &mut registry_for_dependency,
-    )?;
+    insert_records(&mut records, &mut normalized, &mut metadata, seed)?;
 
     loop {
         #[cfg(test)]
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
-        match tapid_resolver::resolve_graph_with_preferences(
+        let optional = normalized
+            .iter()
+            .filter_map(|(key, record)| {
+                let record = record.as_ref().ok()?;
+                if record.optional_dependencies.is_empty() {
+                    return None;
+                }
+                let package = records.get(key).expect("normalized package record");
+                Some((
+                    tapid_core::PackageInstanceId::from_source(
+                        package.registry.clone(),
+                        package.name.clone(),
+                        package.version.clone(),
+                    ),
+                    record.optional_dependencies.clone(),
+                ))
+            })
+            .collect();
+        match tapid_resolver::resolve_graph_with_optional_policy(
             &roots,
             &metadata,
             ResolutionOptions::default(),
             |parent, dependency| registry_for_dependency(parent, dependency),
             &preferred,
+            policy,
+            &optional,
         ) {
             Ok(resolution) => {
                 let mut optional_frontier = BTreeSet::<(PackageSource, PackageName)>::new();
@@ -642,9 +570,7 @@ where
                             &mut records,
                             &mut normalized,
                             &mut metadata,
-                            overrides,
                             fetch(&registry, &name)?,
-                            &mut registry_for_dependency,
                         )?;
                     }
                     continue;
@@ -676,9 +602,7 @@ where
                         &mut records,
                         &mut normalized,
                         &mut metadata,
-                        overrides,
                         fetch(&registry, &name)?,
-                        &mut registry_for_dependency,
                     )?;
                 }
             }
@@ -713,9 +637,7 @@ where
                     &mut records,
                     &mut normalized,
                     &mut metadata,
-                    overrides,
                     fetch(&registry, &name)?,
-                    &mut registry_for_dependency,
                 )?;
             }
             Err(error @ ResolveError::PeerDependency { .. }) => {
@@ -742,9 +664,7 @@ where
                             &mut records,
                             &mut normalized,
                             &mut metadata,
-                            overrides,
                             fetch(&provider.registry, actual_name)?,
-                            &mut registry_for_dependency,
                         )?;
                         continue;
                     }
@@ -778,9 +698,7 @@ where
                         &mut records,
                         &mut normalized,
                         &mut metadata,
-                        overrides,
                         fetch(&registry, &name)?,
-                        &mut registry_for_dependency,
                     )?;
                 } else {
                     let removed = preferred.versions.remove(&(
@@ -854,45 +772,20 @@ where
 pub(crate) fn manifest_overrides(
     manifest: &PackageManifest,
 ) -> Result<BTreeMap<PackageName, Requirement>, String> {
+    let rules = compile_override_rules(manifest)?;
     let mut overrides = BTreeMap::new();
-    for (name, range) in manifest.overrides() {
-        if name.starts_with("jsr:") {
-            return Err(format!(
-                "unsupported override target '{name}': npm registry package names only are supported"
-            ));
-        }
-        let selector_name = name.strip_prefix("npm:").unwrap_or(name);
-        let has_version_selector = if let Some(scoped) = selector_name.strip_prefix('@') {
-            scoped.contains('@')
-        } else {
-            selector_name.contains('@')
-        };
-        if has_version_selector {
-            return Err(format!(
-                "unsupported override selector '{name}': version-qualified selectors are not supported"
-            ));
-        }
-        let (registry, package) = dep_parts(name)?;
-        if registry.to_string() != NPM {
-            return Err(format!(
-                "unsupported override target '{name}': npm registry package names only are supported"
-            ));
-        }
-        let requirement = range
-            .parse::<Requirement>()
-            .map_err(|error| format!("invalid override '{name}' range '{range}': {error}"))?;
-        if requirement.is_alias() {
-            return Err(format!(
-                "unsupported alias override '{name}': override values must be version ranges"
-            ));
-        }
-        match overrides.insert(package.clone(), requirement.clone()) {
-            Some(previous) if previous != requirement => {
-                return Err(format!("conflicting override declarations for '{package}'"));
+    for rule in rules.iter().filter(|rule| rule.parent.is_none()) {
+        match overrides.insert(rule.dependency.clone(), rule.replacement.clone()) {
+            Some(previous) if previous != rule.replacement => {
+                return Err(format!(
+                    "conflicting override declarations for '{}'",
+                    rule.dependency
+                ));
             }
             _ => {}
         }
     }
+    tapid_resolver::OverridePolicy::new(rules).map_err(|error| error.to_string())?;
     Ok(overrides)
 }
 

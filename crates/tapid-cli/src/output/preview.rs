@@ -82,6 +82,20 @@ pub(crate) fn report(report: &PreviewReport, operation: &str, json: bool) -> Exi
                 )
             };
             println!("    {}", super::json::text(detail).0);
+            if let Some(rules) = reason["override_rules"].as_array() {
+                println!(
+                    "      {}",
+                    super::json::text(format!(
+                        "override {}: {} -> {}",
+                        rules.iter().map(&value).collect::<Vec<_>>().join(", "),
+                        reason["original_requirement"]
+                            .as_str()
+                            .unwrap_or("original range unavailable"),
+                        value(&reason["requirement"])
+                    ))
+                    .0
+                );
+            }
         }
         if package["change"] == "changed" {
             println!(

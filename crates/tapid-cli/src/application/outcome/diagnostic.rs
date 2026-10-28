@@ -82,6 +82,10 @@ impl Declaration {
 pub(crate) struct RequirementDiagnostic {
     pub(crate) local_name: Option<String>,
     pub(crate) requirement: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) original_requirement: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) override_rules: Vec<String>,
     pub(crate) package: Option<DiagnosticPackage>,
     pub(crate) declaration: Option<Declaration>,
 }
@@ -91,6 +95,15 @@ impl RequirementDiagnostic {
         Self {
             local_name: Some(origin.name.to_string()),
             requirement: requirement.to_owned(),
+            original_requirement: origin
+                .override_match
+                .as_ref()
+                .map(|matched| matched.original.raw.clone()),
+            override_rules: origin
+                .override_match
+                .as_ref()
+                .map(|matched| matched.rules.clone())
+                .unwrap_or_default(),
             package: origin.package.as_deref().map(Into::into),
             declaration: origin
                 .package
@@ -237,6 +250,8 @@ impl DiagnosticContext {
                 RequirementDiagnostic {
                     local_name: Some(local_name),
                     requirement: requirement.clone(),
+                    original_requirement: None,
+                    override_rules: Vec::new(),
                     package: None,
                     declaration: Some(declaration),
                 }
