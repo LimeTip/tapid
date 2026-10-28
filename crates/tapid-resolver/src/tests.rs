@@ -5,6 +5,284 @@ fn req(s: &str) -> Requirement {
 }
 
 #[test]
+fn independent_owners_select_incompatible_registry_ranges() {
+    let source = "https://registry.npmjs.org";
+    let first = BindingOwner::Workspace("news".parse().unwrap());
+    let second = BindingOwner::Workspace("admin".parse().unwrap());
+    let declarations = vec![
+        (first.clone(), dep(source, "external", "^1")),
+        (second.clone(), dep(source, "external", "^2")),
+    ];
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("external", "1.2.0", &[]),
+            package("external", "2.3.0", &[]),
+        ],
+    )];
+    let result = resolve_owned_graph_with_preferences(
+        &declarations,
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+    )
+    .unwrap();
+    let key = |owner| (owner, source.parse().unwrap(), "external".parse().unwrap());
+    assert_eq!(result.bindings[&key(first)].version.to_string(), "1.2.0");
+    assert_eq!(result.bindings[&key(second)].version.to_string(), "2.3.0");
+    assert_eq!(result.graph.selected.len(), 2);
+}
+
+#[test]
+fn owner_refresh_preserves_unrelated_exact_bindings() {
+    let source = "https://registry.npmjs.org";
+    let news = BindingOwner::Workspace("news".parse().unwrap());
+    let admin = BindingOwner::Workspace("admin".parse().unwrap());
+    let key = |owner| {
+        (
+            owner,
+            source.parse().unwrap(),
+            "external".parse().unwrap(),
+            "external".parse().unwrap(),
+        )
+    };
+    let declarations = vec![
+        (news.clone(), dep(source, "external", "^1")),
+        (admin.clone(), dep(source, "external", "^1")),
+    ];
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("external", "1.0.0", &[]),
+            package("external", "1.1.0", &[]),
+            package("external", "1.2.0", &[]),
+        ],
+    )];
+    let preferences = OwnedResolutionPreferences {
+        roots: BTreeMap::from([
+            (key(news.clone()), "1.0.0".parse().unwrap()),
+            (key(admin.clone()), "1.1.0".parse().unwrap()),
+        ]),
+        refresh_roots: BTreeSet::from([key(news.clone())]),
+        ..Default::default()
+    };
+    let result = resolve_owned_graph_with_preferences(
+        &declarations,
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &preferences,
+    )
+    .unwrap();
+    let binding = |owner| (owner, source.parse().unwrap(), "external".parse().unwrap());
+    assert_eq!(result.bindings[&binding(news)].version.to_string(), "1.2.0");
+    assert_eq!(
+        result.bindings[&binding(admin)].version.to_string(),
+        "1.1.0"
+    );
+    let shared = resolve_owned_graph_with_preferences(
+        &declarations,
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(shared.graph.selected.len(), 1);
+    assert!(
+        shared
+            .bindings
+            .values()
+            .all(|id| id.version.to_string() == "1.2.0")
+    );
+}
+
+#[test]
+fn all_owners_share_one_declaration_limit() {
+    let source = "https://registry.npmjs.org";
+    let mut declarations = vec![(BindingOwner::Root, dep(source, "external", "1")); 50_000];
+    declarations.extend(vec![
+        (
+            BindingOwner::Workspace("news".parse().unwrap()),
+            dep(source, "external", "2")
+        );
+        50_001
+    ]);
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("external", "1.0.0", &[]),
+            package("external", "2.0.0", &[]),
+        ],
+    )];
+    assert_eq!(
+        resolve_owned_graph_with_preferences(
+            &declarations,
+            &metadata,
+            Default::default(),
+            |parent, _| Ok(parent.clone()),
+            &Default::default(),
+        ),
+        Err(ResolveError::MetadataLimitExceeded)
+    );
+}
+
+#[test]
+fn owner_constraints_still_intersect_and_preferences_cannot_weaken_ranges() {
+    let source = "https://registry.npmjs.org";
+    let owner = BindingOwner::Workspace("news".parse().unwrap());
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("external", "1.0.0", &[]),
+            package("external", "2.0.0", &[]),
+        ],
+    )];
+    let declarations = vec![
+        (owner.clone(), dep(source, "external", "^1")),
+        (owner.clone(), dep(source, "external", "^2")),
+    ];
+    let preferences = OwnedResolutionPreferences {
+        roots: BTreeMap::from([(
+            (
+                owner,
+                source.parse().unwrap(),
+                "external".parse().unwrap(),
+                "external".parse().unwrap(),
+            ),
+            "2.0.0".parse().unwrap(),
+        )]),
+        ..Default::default()
+    };
+    let error = resolve_owned_graph_with_preferences(
+        &declarations,
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &preferences,
+    )
+    .unwrap_err();
+    assert!(matches!(error, ResolveError::Conflict { requirements, .. }
+        if requirements == ["^1", "^2"]));
+}
+
+#[test]
+fn owner_bindings_preserve_aliases_origins_transitives_and_order() {
+    let public = "https://registry.npmjs.org";
+    let private = "https://registry.example";
+    let mut declarations = vec![
+        (
+            BindingOwner::Root,
+            dep(public, "local", "npm:@scope/external@^1"),
+        ),
+        (
+            BindingOwner::Workspace("news".parse().unwrap()),
+            dep(private, "local", "npm:@scope/external@^2"),
+        ),
+    ];
+    let mut metadata = vec![
+        registry(
+            public,
+            vec![
+                package("@scope/external", "1.0.0", &[("child", "^1")]),
+                package("child", "1.0.0", &[]),
+            ],
+        ),
+        registry(
+            private,
+            vec![
+                package("@scope/external", "2.0.0", &[("child", "^2")]),
+                package("child", "2.0.0", &[]),
+            ],
+        ),
+    ];
+    let resolve = |declarations: &[_], metadata: &[_]| {
+        resolve_owned_graph_with_preferences(
+            declarations,
+            metadata,
+            Default::default(),
+            |parent, _| Ok(parent.clone()),
+            &Default::default(),
+        )
+        .unwrap()
+    };
+    let result = resolve(&declarations, &metadata);
+    declarations.reverse();
+    metadata.reverse();
+    assert_eq!(result, resolve(&declarations, &metadata));
+    assert_eq!(result.graph.dependencies.len(), 2);
+    for ((owner, source, local), target) in &result.bindings {
+        assert_eq!(local.as_str(), "local");
+        assert_eq!(target.name.as_str(), "@scope/external");
+        assert_eq!(&target.registry, source);
+        let expected = if owner == &BindingOwner::Root {
+            "1.0.0"
+        } else {
+            "2.0.0"
+        };
+        assert_eq!(target.version.to_string(), expected);
+        let edge = result
+            .graph
+            .dependencies
+            .iter()
+            .find(|edge| &edge.parent == target)
+            .unwrap();
+        assert_eq!(edge.child.registry, *source);
+        assert_eq!(edge.child.version.to_string(), expected);
+    }
+}
+
+#[test]
+fn member_bindings_do_not_become_global_peer_providers() {
+    let source = "https://registry.npmjs.org";
+    let mut consumer = package("consumer", "1.0.0", &[]);
+    consumer
+        .peer_dependencies
+        .insert("provider".parse().unwrap(), req("^1"));
+    let metadata = vec![registry(
+        source,
+        vec![consumer, package("provider", "1.0.0", &[])],
+    )];
+    let mut declarations = vec![
+        (
+            BindingOwner::Workspace("news".parse().unwrap()),
+            dep(source, "consumer", "^1"),
+        ),
+        (
+            BindingOwner::Workspace("admin".parse().unwrap()),
+            dep(source, "provider", "^1"),
+        ),
+    ];
+    assert!(matches!(
+        resolve_owned_graph_with_preferences(
+            &declarations,
+            &metadata,
+            Default::default(),
+            |parent, _| Ok(parent.clone()),
+            &Default::default(),
+        ),
+        Err(ResolveError::PeerDependency { .. })
+    ));
+    declarations.push((BindingOwner::Root, dep(source, "provider", "^1")));
+    let result = resolve_owned_graph_with_preferences(
+        &declarations,
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+    )
+    .unwrap();
+    let consumer = result
+        .graph
+        .selected
+        .iter()
+        .find(|id| id.name.as_str() == "consumer")
+        .unwrap();
+    assert_ne!(result.graph.peer_contexts[consumer], PeerContext::default());
+}
+
+#[test]
 fn npm_aliases_validate_actual_names_and_ranges() {
     let local: PackageName = "local".parse().unwrap();
     for (spec, target) in [

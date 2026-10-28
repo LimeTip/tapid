@@ -535,6 +535,38 @@ pub struct ResolutionPreferences {
     pub roots: BTreeMap<(PackageSource, PackageName, PackageName), PackageVersion>,
 }
 
+/// Declaring project identity for a direct registry binding. The caller supplies
+/// workspace names after validating its workspace; these are not filesystem paths.
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BindingOwner {
+    /// The project root, including its supported peer providers.
+    #[default]
+    Root,
+    /// A named local workspace package.
+    Workspace(PackageName),
+}
+
+/// Owner-qualified exact preferences. Range and source checks still apply.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OwnedResolutionPreferences {
+    /// Previously selected versions, including transitive versions.
+    pub versions: BTreeSet<(PackageSource, PackageName, PackageVersion)>,
+    /// Direct bindings to refresh without releasing other owners' preferences.
+    pub refresh_roots: BTreeSet<(BindingOwner, PackageSource, PackageName, PackageName)>,
+    /// Exact direct selections, ahead of other compatible locked versions.
+    pub roots: BTreeMap<(BindingOwner, PackageSource, PackageName, PackageName), PackageVersion>,
+}
+
+/// One combined graph with exact direct bindings for each declaring owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedResolution {
+    /// Combined reachable graph. Its root bindings contain only project roots;
+    /// its roots include all owners' entry points.
+    pub graph: Resolution,
+    /// Exact local import names within each owner and registry.
+    pub bindings: BTreeMap<(BindingOwner, PackageSource, PackageName), RegistryPackageId>,
+}
+
 /// Exact package identities, root selections, and parent-to-child edges for a graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
@@ -669,9 +701,79 @@ pub fn resolve_graph_with_preferences<F>(
     ds: &[Dependency],
     metadata: &[RegistryMetadata],
     options: ResolutionOptions,
-    mut registry_for_dependency: F,
+    registry_for_dependency: F,
     preferred: &ResolutionPreferences,
 ) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+{
+    let declarations = ds
+        .iter()
+        .map(|dependency| (&BindingOwner::Root, dependency));
+    let preferences = OwnedResolutionPreferences {
+        versions: preferred.versions.clone(),
+        refresh_roots: preferred
+            .refresh_roots
+            .iter()
+            .cloned()
+            .map(|(source, local, actual)| (BindingOwner::Root, source, local, actual))
+            .collect(),
+        roots: preferred
+            .roots
+            .iter()
+            .map(|((source, local, actual), version)| {
+                (
+                    (
+                        BindingOwner::Root,
+                        source.clone(),
+                        local.clone(),
+                        actual.clone(),
+                    ),
+                    version.clone(),
+                )
+            })
+            .collect(),
+    };
+    resolve_owned_graph(
+        declarations,
+        metadata,
+        options,
+        registry_for_dependency,
+        &preferences,
+    )
+    .map(|resolved| resolved.graph)
+}
+
+/// Resolves all owners in one metadata budget and transitive walk. Direct ranges
+/// intersect only within the same owner. Peers retain the direct project-root
+/// provider contract: workspace selections are never pooled as peer providers.
+pub fn resolve_owned_graph_with_preferences<F>(
+    ds: &[(BindingOwner, Dependency)],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
+    registry_for_dependency: F,
+    preferred: &OwnedResolutionPreferences,
+) -> Result<OwnedResolution, ResolveError>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+{
+    let declarations = ds.iter().map(|(owner, dependency)| (owner, dependency));
+    resolve_owned_graph(
+        declarations,
+        metadata,
+        options,
+        registry_for_dependency,
+        preferred,
+    )
+}
+
+fn resolve_owned_graph<'a, F>(
+    ds: impl ExactSizeIterator<Item = (&'a BindingOwner, &'a Dependency)> + Clone,
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
+    mut registry_for_dependency: F,
+    preferred: &OwnedResolutionPreferences,
+) -> Result<OwnedResolution, ResolveError>
 where
     F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
 {
@@ -693,8 +795,12 @@ where
     if ds.len() > 100_000 {
         return Err(ResolveError::MetadataLimitExceeded);
     }
-    for dependency in ds {
+    for (owner, dependency) in ds.clone() {
         bytes = bytes
+            .saturating_add(match owner {
+                BindingOwner::Root => 0,
+                BindingOwner::Workspace(name) => name.as_str().len(),
+            })
             .saturating_add(dependency.registry.as_str().len())
             .saturating_add(dependency.name.as_str().len())
             .saturating_add(dependency.requirement.retained_bytes());
@@ -704,12 +810,13 @@ where
     }
     let candidate_index = candidate_index(metadata);
     let mut root_constraints: BTreeMap<
-        (PackageSource, PackageName, PackageName),
+        (BindingOwner, PackageSource, PackageName, PackageName),
         BTreeSet<Requirement>,
     > = BTreeMap::new();
-    for dependency in ds {
+    for (owner, dependency) in ds {
         root_constraints
             .entry((
+                owner.clone(),
                 dependency.registry.clone(),
                 dependency.name.clone(),
                 dependency
@@ -725,28 +832,30 @@ where
     let mut selected_packages = BTreeMap::new();
     let mut roots = Vec::new();
     let mut root_bindings = BTreeMap::new();
+    let mut bindings = BTreeMap::new();
     let mut queue = Vec::new();
     let mut missing_metadata = BTreeSet::new();
-    let fresh = ResolutionPreferences::default();
-    for ((registry, local_name, name), requirements) in root_constraints {
-        let preferred = if preferred.refresh_roots.contains(&(
+    let fresh = BTreeSet::new();
+    for ((owner, registry, local_name, name), requirements) in root_constraints {
+        let key = (
+            owner.clone(),
             registry.clone(),
             local_name.clone(),
             name.clone(),
-        )) {
-            &fresh
-        } else {
-            preferred
-        };
+        );
+        let refresh = preferred.refresh_roots.contains(&key);
+        let selection_preferences = if refresh { &fresh } else { &preferred.versions };
         let package = match select_package(
             &registry,
             &name,
             &requirements,
             &candidate_index,
-            preferred,
-            preferred
-                .roots
-                .get(&(registry.clone(), local_name.clone(), name.clone())),
+            selection_preferences,
+            if refresh {
+                None
+            } else {
+                preferred.roots.get(&key)
+            },
             || RequirementOrigin {
                 name: local_name.clone(),
                 package: None,
@@ -765,12 +874,17 @@ where
         selected.insert(id.clone());
         selected_packages.insert(id.clone(), package);
         roots.push(id.clone());
-        if let Some(previous) = root_bindings.insert((registry, local_name.clone()), id.clone())
-            && previous != id
+        if let Some(previous) = bindings.insert(
+            (owner.clone(), registry.clone(), local_name.clone()),
+            id.clone(),
+        ) && previous != id
         {
             return Err(ResolveError::RegistryRouting(format!(
                 "conflicting root binding for {local_name}"
             )));
+        }
+        if owner == BindingOwner::Root {
+            root_bindings.insert((registry, local_name), id.clone());
         }
         queue.push(id);
     }
@@ -796,7 +910,7 @@ where
                 &actual_name,
                 &requirements,
                 &candidate_index,
-                preferred,
+                &preferred.versions,
                 None,
                 || RequirementOrigin {
                     name: dependency.clone(),
@@ -899,12 +1013,15 @@ where
         peer_contexts.insert(id.clone(), context);
     }
 
-    Ok(Resolution {
-        selected: selected.into_iter().collect(),
-        roots,
-        root_bindings,
-        dependencies: dependencies.into_iter().collect(),
-        peer_contexts,
+    Ok(OwnedResolution {
+        bindings,
+        graph: Resolution {
+            selected: selected.into_iter().collect(),
+            roots,
+            root_bindings,
+            dependencies: dependencies.into_iter().collect(),
+            peer_contexts,
+        },
     })
 }
 
@@ -973,7 +1090,7 @@ fn select_package(
     name: &PackageName,
     requirements: &BTreeSet<Requirement>,
     candidates: &CandidateIndex<'_>,
-    preferred: &ResolutionPreferences,
+    preferred: &BTreeSet<(PackageSource, PackageName, PackageVersion)>,
     preferred_root: Option<&PackageVersion>,
     origin: impl FnOnce() -> RequirementOrigin,
 ) -> Result<PackageVersionMetadata, ResolveError> {
@@ -992,11 +1109,7 @@ fn select_package(
         .max_by_key(|package| {
             (
                 preferred_root == Some(&package.version),
-                preferred.versions.contains(&(
-                    registry.clone(),
-                    name.clone(),
-                    package.version.clone(),
-                )),
+                preferred.contains(&(registry.clone(), name.clone(), package.version.clone())),
                 &package.version,
             )
         })
