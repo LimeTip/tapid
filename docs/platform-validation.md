@@ -457,6 +457,18 @@ Native Windows execution of these controls remains required.
 
 ## Private Windows dependency write and key validation
 
+Declared executable request validation now also checks Windows PATH precedence.
+It rejects existing or newly introduced earlier same-named candidates, and an
+extensionless candidate before a declared `.exe` in its own PATH directory,
+before capture setup or backend preparation. The checks reuse bounded executable
+identity verification and platform path comparison; they do not open candidate
+files. The construction control runs on Unix and Windows; the extensionless
+mutation control is nonignored and Windows-only. Native execution of the new
+Windows assertions remains required. This is a pathname preflight, not retained
+resolution authority: current/system-directory searches, shell resolution,
+registry, brokers, dynamic libraries and post-check host races are outside this
+check. Authenticated Windows dependency builds remain gated.
+
 The suspended launcher now supplies
 `PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON` through
 the process attribute list. Its boxed policy storage survives `CreateProcessW`.

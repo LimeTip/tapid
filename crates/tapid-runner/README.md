@@ -105,4 +105,8 @@ Existing candidates must resolve to that exact canonical tool; uninspectable or
 dangling candidates fail closed without opening them. Absolute-only tools retain
 their existing byte binding. This checks PATH precedence at validation time;
 it does not reserve names against later writes, cover shell aliases/functions,
-or identify dynamic libraries and Windows loader resolution.
+or identify dynamic libraries and Windows loader resolution. Windows applies the
+same preflight to declared tools exposed through PATH, including extensionless
+candidates preceding `.exe` in the approved directory. Case comparisons reuse
+the platform path rules. These checks do not constrain current-directory,
+system-directory, shell, or DLL searches, or reserve directory entries.

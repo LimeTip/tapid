@@ -3286,6 +3286,69 @@ fn declared_executable_retains_windows_pins_until_last_request_clone_drops() {
     fs::rename(&tool, project.path().join("moved.exe")).unwrap();
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn declared_executable_rejects_existing_earlier_path_candidate_at_construction() {
+    let project = tapid_test_support::TempProject::new("declared-tool-existing-shadow").unwrap();
+    project.write("approved/tool.exe", b"abc").unwrap();
+    project.write("earlier/tool.exe", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("approved/tool.exe")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let earlier = fs::canonicalize(project.path().join("earlier")).unwrap();
+    let build = || {
+        ExecutionRequest::builder(&tool)
+            .executable_search_paths([earlier.clone(), tool.parent().unwrap().to_owned()])
+            .verified_executable(
+                &tool,
+                "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            )
+            .build()
+    };
+    assert_eq!(
+        build().unwrap_err().category(),
+        ExecutionErrorCategory::PolicyViolation
+    );
+    fs::remove_file(earlier.join("tool.exe")).unwrap();
+    build().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn declared_executable_rejects_windows_search_variants_before_capture() {
+    let project =
+        tapid_test_support::TempProject::new("declared-tool-extensionless-shadow").unwrap();
+    project.write("approved/tool.exe", b"abc").unwrap();
+    fs::create_dir(project.path().join("earlier")).unwrap();
+    let tool = fs::canonicalize(project.path().join("approved/tool.exe")).unwrap();
+    let earlier = fs::canonicalize(project.path().join("earlier")).unwrap();
+    let request = ExecutionRequest::builder(&tool)
+        .executable_search_paths([earlier, tool.parent().unwrap().to_owned()])
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    // The native adapter tries an extensionless name before appending .exe.
+    for shadow in ["earlier/tool.exe", "earlier/tool", "approved/tool"] {
+        project.write(shadow, b"abd").unwrap();
+        let capture = project.path().join("capture");
+        let error = execute_uncontained(&request, &capture).unwrap_err();
+        assert_eq!(
+            error.category(),
+            ExecutionErrorCategory::PolicyViolation,
+            "{shadow}"
+        );
+        assert!(!capture.exists());
+        fs::remove_file(project.path().join(shadow)).unwrap();
+        request.validate().unwrap();
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn declared_executable_rejects_new_earlier_path_candidate_before_execution() {

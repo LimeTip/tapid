@@ -289,27 +289,45 @@ impl ExecutionRequest {
         // Check secondary tools even when macOS uses a reserved Node binding.
         for executable in &self.verified_executables {
             executable.validate_identity()?;
-            #[cfg(unix)]
-            if let Some(index) = self
-                .executable_search_paths
-                .iter()
-                .position(|directory| Some(directory.as_path()) == executable.path.parent())
-            {
+            if let Some(index) = self.executable_search_paths.iter().position(|directory| {
+                executable
+                    .path
+                    .parent()
+                    .is_some_and(|parent| platform_paths_semantically_equal(directory, parent))
+            }) {
                 // Absolute-only tools need no PATH contract. For tools exposed
-                // through PATH, reject newly introduced earlier candidates. Do
-                // not open them: a hostile candidate may be a FIFO or device.
-                for directory in &self.executable_search_paths[..index] {
-                    let candidate = directory.join(executable.path.file_name().unwrap());
-                    match fs::symlink_metadata(&candidate) {
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Ok(_)
-                            if fs::canonicalize(&candidate).ok().as_ref()
-                                == Some(&executable.path) => {}
-                        _ => {
-                            return Err(ExecutionError::new(
-                                ExecutionErrorCategory::PolicyViolation,
-                                "declared executable is shadowed or its earlier PATH candidate cannot be inspected",
-                            ));
+                // through PATH, reject earlier candidates without opening them:
+                // a hostile candidate may be a FIFO or device. Include the
+                // approved directory because Windows resolves `tool` before
+                // `tool.exe`, even within that directory.
+                let names = vec![executable.path.file_name().unwrap()];
+                #[cfg(windows)]
+                let names = {
+                    let mut names = names;
+                    if executable
+                        .path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+                    {
+                        names.push(executable.path.file_stem().unwrap());
+                    }
+                    names
+                };
+                for directory in &self.executable_search_paths[..=index] {
+                    for name in &names {
+                        let candidate = directory.join(name);
+                        match fs::symlink_metadata(&candidate) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Ok(_)
+                                if fs::canonicalize(&candidate).ok().is_some_and(|path| {
+                                    platform_paths_semantically_equal(&path, &executable.path)
+                                }) => {}
+                            _ => {
+                                return Err(ExecutionError::new(
+                                    ExecutionErrorCategory::PolicyViolation,
+                                    "declared executable is shadowed or its earlier PATH candidate cannot be inspected",
+                                ));
+                            }
                         }
                     }
                 }
