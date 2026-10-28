@@ -334,7 +334,7 @@ jobs:
           test "$actual" = "tapid ${RELEASE_TAG#v}"
       - name: Run latest discovery consumer contract
         id: latest_consumer
-        if: steps.install_latest.outcome == 'success'
+        if: ${{ !cancelled() && steps.install_latest.outcome == 'success' }}
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
@@ -348,7 +348,7 @@ jobs:
             --expected-version "tapid ${RELEASE_TAG#v}" --release-tag "$RELEASE_TAG" --release-source-sha "$RELEASE_SHA" \
             --report "$RUNNER_TEMP/doc-contract-latest.json"
       - name: Retain latest consumer evidence
-        if: always()
+        if: ${{ always() && steps.latest_consumer.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: doc-contract-latest-${{ runner.os }}
@@ -618,7 +618,7 @@ jobs:
           if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
       - name: Run latest discovery consumer contract
         id: latest_consumer
-        if: steps.install_latest.outcome == 'success'
+        if: ${{ !cancelled() && steps.install_latest.outcome == 'success' }}
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.latest_tag }}
@@ -629,7 +629,7 @@ jobs:
           & ./scripts/check-doc-examples.ps1 -AllowNetwork -Binary $binary -ExpectedSha256 $digest -ExpectedVersion ('tapid ' + $env:RELEASE_TAG.Substring(1)) -ReleaseTag $env:RELEASE_TAG -ReportPath (Join-Path $env:RUNNER_TEMP 'doc-contract-latest.json')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain latest consumer evidence
-        if: always()
+        if: ${{ always() && steps.latest_consumer.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: doc-contract-latest-Windows

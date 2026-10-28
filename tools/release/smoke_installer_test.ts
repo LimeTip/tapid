@@ -7,6 +7,34 @@ import { promisify } from 'node:util';
 import { test } from 'node:test';
 
 const run = promisify(execFile);
+test('native latest consumers survive supplemental failures and retain only attempted evidence', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
+  for (const job of ['unix', 'windows']) {
+    const body = workflow.split(`\n  ${job}:`)[1].split(/\n  [a-z][a-z-]*:/)[0];
+    const consumer = body.split('name: Run latest discovery consumer contract')[1].split('\n      - name:')[0];
+    const upload = body.split('name: Retain latest consumer evidence')[1].split('\n      - name:')[0];
+    const condition = (step: string) => step.match(/\n        if: (.+)/)![1].replace(/^\$\{\{\s*|\s*\}\}$/g, '');
+    // Model Actions' implicit success() guard when no status function is present.
+    const scheduled = (expression: string, priorSuccess: boolean, cancelled: boolean, install: string, outcome: string) => {
+      const hasStatus = /\b(success|failure|always|cancelled)\(/.test(expression);
+      const evaluate = new Function('cancelled', 'always', 'steps', `return (${expression});`);
+      return (hasStatus || priorSuccess) && evaluate(() => cancelled, () => true, {
+        install_latest: { outcome: install }, latest_consumer: { outcome },
+      });
+    };
+    for (const priorSuccess of [true, false]) {
+      for (const cancelled of [true, false]) {
+        for (const install of ['success', 'failure', 'skipped']) {
+          strictEqual(scheduled(condition(consumer), priorSuccess, cancelled, install, 'skipped'), !cancelled && install === 'success', `${job}: consumer scheduling`);
+        }
+        for (const outcome of ['success', 'failure', 'skipped']) {
+          strictEqual(scheduled(condition(upload), priorSuccess, cancelled, 'success', outcome), outcome !== 'skipped', `${job}: evidence retention`);
+        }
+      }
+    }
+    strictEqual(upload.includes('if-no-files-found: error'), true, `${job}: attempted evidence is required`);
+  }
+});
 test('previous-release installer selection preserves the legacy version boundary', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
   const block = workflow.split(`if node - "$previous_tag" <<'JAVASCRIPT'\n`)[1].split('          JAVASCRIPT')[0];
