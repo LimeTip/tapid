@@ -79,6 +79,7 @@ fn recorded_omissions_preserve_selected_artifacts_across_cold_replay_and_failure
             },
             profile: SelectionProfile::Development,
             declarations: vec![RetainedDeclaration {
+                original_requirement: None,
                 origin: OmissionOrigin::Root,
                 section: if optional {
                     DeclarationSection::OptionalDependencies
@@ -90,6 +91,7 @@ fn recorded_omissions_preserve_selected_artifacts_across_cold_replay_and_failure
                 target: foo,
             }],
             omissions: vec![AcceptedOmission {
+                original_requirement: None,
                 origin: OmissionOrigin::Root,
                 name: "native".into(),
                 requirement: "^1".into(),

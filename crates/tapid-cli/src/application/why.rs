@@ -556,6 +556,7 @@ mod tests {
             profile: tapid_lockfile::SelectionProfile::Development,
             declarations: vec![],
             omissions: vec![tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Root,
                 name: "local".into(),
                 requirement: "npm:@vendor/native@^1".into(),
@@ -599,6 +600,7 @@ mod tests {
             let name = format!("alias-{index:03}");
             optional.insert(name.clone(), "npm:native@^1");
             omissions.push(tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Root,
                 name,
                 requirement: "npm:native@^1".into(),
@@ -657,6 +659,7 @@ mod tests {
                     .unwrap();
             bindings.insert(name.to_owned(), package.key());
             declarations.push(tapid_lockfile::RetainedDeclaration {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Root,
                 section: tapid_lockfile::DeclarationSection::Dependencies,
                 name: name.into(),
@@ -664,6 +667,7 @@ mod tests {
                 target: package.key(),
             });
             omissions.push(tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Workspace { key: package.key() },
                 name: "native".into(),
                 requirement: "^1".into(),

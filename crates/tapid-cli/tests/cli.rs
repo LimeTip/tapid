@@ -9365,6 +9365,7 @@ fn recorded_optional_omissions_replay_offline_and_remain_visible() {
         profile: SelectionProfile::Development,
         declarations: vec![],
         omissions: vec![AcceptedOmission {
+            original_requirement: None,
             origin: OmissionOrigin::Root,
             name: "native".into(),
             requirement: "^1".into(),
@@ -9472,6 +9473,7 @@ fn why_reports_recorded_omissions_in_human_and_json_output_without_mutation() {
         profile: SelectionProfile::Development,
         declarations: vec![],
         omissions: vec![AcceptedOmission {
+            original_requirement: None,
             origin: OmissionOrigin::Root,
             name: "native".into(),
             requirement: "^1".into(),
@@ -9851,7 +9853,7 @@ fn workspace_optional_candidate_pruning_keeps_other_declaration_origins() {
 }
 
 #[test]
-fn workspace_overridden_optional_omission_fails_before_publication() {
+fn workspace_overridden_optional_omission_preserves_original_requirement() {
     let project = tapid_test_support::TempProject::new("workspace-override-omission").unwrap();
     project
         .write(
@@ -9873,14 +9875,99 @@ fn workspace_overridden_optional_omission_fails_before_publication() {
         &["install", "--registry-fixture", "registry.json"],
     );
     assert!(
-        !output.status.success(),
-        "overridden provenance must be rejected until both original and effective requirements can be retained"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("overridden workspace declarations"),
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!project.path().join("tapid.lock").exists());
-    assert!(!project.path().join(".tapid-managed").exists());
+    let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        wire["selection"]["omissions"][0]["originalRequirement"],
+        "npm:h3@^1"
+    );
+    assert_eq!(
+        wire["selection"]["omissions"][0]["requirement"],
+        "npm:h3@^9"
+    );
+    for args in [vec!["ci", "--offline"], vec!["install", "--frozen"]] {
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn workspace_overridden_selected_alias_replays_and_rejects_forged_effective_requirement() {
+    let project = tapid_test_support::TempProject::new("workspace-selected-override").unwrap();
+    project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["member"],"overrides":{"h3":"^1"},"optionalDependencies":{"missing":"1"}}"#).unwrap();
+    project
+        .write(
+            "member/package.json",
+            br#"{"name":"member","version":"1.0.0","dependencies":{"local":"npm:h3@^2"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let output = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let declaration = &wire["selection"]["declarations"][0];
+    assert_eq!(declaration["name"], "local");
+    assert_eq!(declaration["originalRequirement"], "npm:h3@^2");
+    assert_eq!(declaration["requirement"], "npm:h3@^1");
+    assert!(
+        project
+            .path()
+            .join("node_modules/local/package.json")
+            .is_file()
+    );
+    for args in [
+        vec!["ci", "--offline", "--registry-fixture", "registry.json"],
+        vec!["install", "--frozen"],
+    ] {
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+    }
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    for (field, value) in [
+        ("requirement", "npm:h3@*"),
+        ("originalRequirement", "npm:h3@^3"),
+        ("originalRequirement", "npm:other@^2"),
+    ] {
+        let mut changed = wire.clone();
+        changed["selection"]["declarations"][0][field] = value.into();
+        let changed = serde_json::to_vec(&changed).unwrap();
+        project.write("tapid.lock", &changed).unwrap();
+        let output = run(
+            project.path(),
+            &["ci", "--offline", "--registry-fixture", "registry.json"],
+        );
+        assert!(!output.status.success(), "forged {field}={value} must fail");
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            changed
+        );
+        assert_eq!(
+            fs::read(project.path().join(".tapid-managed")).unwrap(),
+            marker
+        );
+    }
 }

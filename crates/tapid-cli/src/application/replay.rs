@@ -57,6 +57,53 @@ pub(super) fn validate_workspace_dependency_edges(
     lock: &Lockfile,
     config: &crate::registry::RegistryConfig,
 ) -> Result<(), String> {
+    // Effective workspace requirements must match current root overrides as well
+    // as the original member declarations checked below.
+    if let Some(selection) = lock.selection() {
+        for dependency in registry_dependencies {
+            let origin = tapid_lockfile::OmissionOrigin::Workspace {
+                key: dependency.member_key.clone(),
+            };
+            let section = match dependency.section {
+                tapid_resolver::EntryPointSection::Dependencies => {
+                    tapid_lockfile::DeclarationSection::Dependencies
+                }
+                tapid_resolver::EntryPointSection::DevDependencies => {
+                    tapid_lockfile::DeclarationSection::DevDependencies
+                }
+                tapid_resolver::EntryPointSection::OptionalDependencies => {
+                    tapid_lockfile::DeclarationSection::OptionalDependencies
+                }
+            };
+            let retained = selection
+                .declarations
+                .iter()
+                .filter(|fact| {
+                    fact.origin == origin
+                        && fact.name == dependency.manifest_name
+                        && fact.section == section
+                })
+                .map(|fact| fact.requirement.as_str());
+            let omitted = selection
+                .omissions
+                .iter()
+                .filter(|fact| {
+                    fact.origin == origin
+                        && fact.name == dependency.manifest_name
+                        && section == tapid_lockfile::DeclarationSection::OptionalDependencies
+                })
+                .map(|fact| fact.requirement.as_str());
+            if retained
+                .chain(omitted)
+                .any(|requirement| requirement != dependency.requirement.raw)
+            {
+                return Err(
+                    "recorded effective workspace requirement does not match current overrides"
+                        .into(),
+                );
+            }
+        }
+    }
     for (key, manifest) in &workspace.manifests {
         validate_recorded_declarations(
             lock,
@@ -696,7 +743,10 @@ fn validate_recorded_declarations(
         if &declaration.origin == origin {
             recorded.insert(
                 (declaration.section, declaration.name.clone()),
-                declaration.requirement.as_str(),
+                declaration
+                    .original_requirement
+                    .as_deref()
+                    .unwrap_or(&declaration.requirement),
             );
         }
     }
@@ -726,7 +776,10 @@ fn validate_recorded_declarations(
                 DeclarationSection::OptionalDependencies,
                 omission.name.clone(),
             ),
-            omission.requirement.as_str(),
+            omission
+                .original_requirement
+                .as_deref()
+                .unwrap_or(&omission.requirement),
         );
     }
     if expected != recorded {
@@ -875,6 +928,7 @@ mod replay_tests {
             profile: tapid_lockfile::SelectionProfile::Development,
             declarations: vec![],
             omissions: vec![tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Workspace { key },
                 name: "native".into(),
                 requirement: "^1".into(),
@@ -951,6 +1005,7 @@ mod replay_tests {
             ]
             .into_iter()
             .map(|section| RetainedDeclaration {
+                original_requirement: None,
                 origin: OmissionOrigin::Root,
                 section,
                 name: "native".into(),
@@ -991,6 +1046,7 @@ mod replay_tests {
             profile: tapid_lockfile::SelectionProfile::Development,
             declarations: vec![],
             omissions: vec![tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Root,
                 name: "native".into(),
                 requirement: "^1".into(),
@@ -1039,6 +1095,7 @@ mod replay_tests {
             profile: tapid_lockfile::SelectionProfile::Development,
             declarations: vec![],
             omissions: vec![tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
                 origin: tapid_lockfile::OmissionOrigin::Root,
                 name: "local".into(),
                 requirement: "npm:@vendor/native@^1".into(),

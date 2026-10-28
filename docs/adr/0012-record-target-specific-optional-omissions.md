@@ -40,8 +40,10 @@ transactions. Neither an optional flag nor a warm cache relaxes verification.
 Imported schema 12 uses a separate placement-keyed ledger because ordinary keys
 cannot preserve npm placement identity. Normal import generation still emits
 schema 8. Copied-source ledger generation, complete imported generation, and
-broader reporting remain separate implementation work. Workspace overrides with
-omissions currently fail before publication: one requirement field cannot
-preserve both the original declaration and its effective override. No support
+broader reporting remain separate implementation work. Workspace registry
+overrides retain the effective `requirement` and, when different, the member's
+`originalRequirement`. Replay validates both the original member declaration and
+the effective root override. The two requirements must preserve package identity;
+local workspace links cannot carry an overridden requirement. No support
 claim for complete npm optional-failure semantics follows from these formats;
 pinned npm comparisons and expanded recovery evidence remain required.

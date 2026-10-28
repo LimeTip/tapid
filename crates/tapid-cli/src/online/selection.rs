@@ -89,6 +89,7 @@ pub(super) fn record_registry_selection(
                 OmissionReason::NoUsableCandidate
             };
             omissions.push(AcceptedOmission {
+                original_requirement: None,
                 origin: OmissionOrigin::Package { key: key.clone() },
                 name: name.clone(),
                 requirement: raw.clone(),
@@ -101,14 +102,15 @@ pub(super) fn record_registry_selection(
     if omissions.is_empty() {
         return Ok(());
     }
-    for omission in &omissions {
-        if let OmissionOrigin::Workspace { key } = &omission.origin
-            && workspace_manifests[key]
+    for omission in &mut omissions {
+        if let OmissionOrigin::Workspace { key } = &omission.origin {
+            let original = workspace_manifests[key]
                 .optional_dependencies()
                 .get(&omission.name)
-                != Some(&omission.requirement)
-        {
-            return Err("recording optional omissions with overridden workspace declarations is unsupported".into());
+                .ok_or("missing original workspace omission declaration")?;
+            if original != &omission.requirement {
+                omission.original_requirement = Some(original.clone());
+            }
         }
     }
     let mut declarations = Vec::new();
@@ -135,18 +137,6 @@ pub(super) fn record_registry_selection(
                 .entry_point
                 .as_ref()
                 .ok_or("missing manifest declaration origin")?;
-            if let Some(key) = &entry.workspace {
-                let manifest = &workspace_manifests[key];
-                let dependencies = match entry.section {
-                    EntryPointSection::Dependencies => manifest.dependencies(),
-                    EntryPointSection::DevDependencies => manifest.dev_dependencies(),
-                    EntryPointSection::OptionalDependencies => manifest.optional_dependencies(),
-                };
-                if dependencies.get(declaration.name.as_str()) != Some(&declaration.requirement.raw)
-                {
-                    return Err("recording optional omissions with overridden workspace declarations is unsupported".into());
-                }
-            }
             (
                 entry
                     .workspace
@@ -163,7 +153,22 @@ pub(super) fn record_registry_selection(
                 },
             )
         };
+        let original_requirement = if let OmissionOrigin::Workspace { key } = &origin {
+            let manifest = &workspace_manifests[key];
+            let dependencies = match section {
+                DeclarationSection::Dependencies => manifest.dependencies(),
+                DeclarationSection::DevDependencies => manifest.dev_dependencies(),
+                DeclarationSection::OptionalDependencies => manifest.optional_dependencies(),
+            };
+            let original = dependencies
+                .get(declaration.name.as_str())
+                .ok_or("missing original workspace declaration")?;
+            (original != &declaration.requirement.raw).then(|| original.clone())
+        } else {
+            None
+        };
         declarations.push(RetainedDeclaration {
+            original_requirement,
             origin,
             section,
             name: declaration.name.to_string(),
@@ -204,6 +209,7 @@ pub(super) fn record_registry_selection(
                 };
                 if let Some(target) = target {
                     declarations.push(RetainedDeclaration {
+                        original_requirement: None,
                         origin: origin.clone(),
                         section,
                         name: name.clone(),

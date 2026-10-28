@@ -94,8 +94,11 @@ replay through `validate_replay` still fails explicitly. The opt-in
 ledger, and retains manifest-digest and integrity-provenance checks;
 the CLI emits this schema for ordinary registry graphs, including workspace
 members and local links, when optional metadata/candidate omissions are recorded.
-Overridden workspace declarations with omissions fail before publication until
-original and effective requirements can both be retained. Copied-source selection
+Overridden workspace registry declarations retain an optional `originalRequirement`
+alongside the effective `requirement`. This field is limited to workspace origins,
+must differ from the effective requirement, and must preserve package identity.
+Local workspace targets cannot carry it. CLI replay compares both the original
+member declaration and the current effective root override. Copied-source selection
 generation remains pending. This persistence API alone
 does not establish complete optional-dependency failure support.
 

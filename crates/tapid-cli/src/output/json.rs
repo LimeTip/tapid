@@ -365,6 +365,7 @@ mod tests {
             declarations: vec![],
             omissions: (0..51)
                 .map(|index| AcceptedOmission {
+                    original_requirement: None,
                     origin: OmissionOrigin::Root,
                     name: format!("optional-{index:02}"),
                     requirement: "^1".into(),

@@ -21,6 +21,9 @@ pub struct RetainedDeclaration {
     pub section: DeclarationSection,
     pub name: String,
     pub requirement: String,
+    /// Original workspace manifest range when a root override changes selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_requirement: Option<String>,
     pub target: String,
 }
 
@@ -54,6 +57,9 @@ pub struct AcceptedOmission {
     pub origin: OmissionOrigin,
     pub name: String,
     pub requirement: String,
+    /// Original workspace manifest range when a root override changes selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_requirement: Option<String>,
     pub registry: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -108,8 +114,15 @@ impl LockedSelection {
                 .name
                 .parse::<PackageName>()
                 .map_err(|_| invalid())?;
+            validate_original_requirement(
+                &declaration.origin,
+                &declaration.name,
+                &declaration.requirement,
+                declaration.original_requirement.as_deref(),
+            )?;
             let target = declaration.target.parse::<LockfilePackageKey>()?;
-            if declaration.requirement.len() > 4096
+            if (declaration.original_requirement.is_some() && target.source.workspace().is_some())
+                || declaration.requirement.len() > 4096
                 || declaration.requirement.trim() != declaration.requirement
                 || !retained.insert((&declaration.origin, declaration.section, &declaration.name))
             {
@@ -186,6 +199,12 @@ impl LockedSelection {
         }
         let mut declarations = std::collections::BTreeSet::new();
         for omission in &self.omissions {
+            validate_original_requirement(
+                &omission.origin,
+                &omission.name,
+                &omission.requirement,
+                omission.original_requirement.as_deref(),
+            )?;
             let registry = omission
                 .registry
                 .parse::<tapid_core::RegistryOrigin>()
@@ -249,4 +268,34 @@ impl SelectionTarget {
         };
         token(&self.os) && token(&self.cpu) && self.libc.as_ref().is_none_or(|s| token(s))
     }
+}
+
+fn validate_original_requirement(
+    origin: &OmissionOrigin,
+    name: &str,
+    effective: &str,
+    original: Option<&str>,
+) -> Result<(), LockfileError> {
+    let Some(original) = original else {
+        return Ok(());
+    };
+    let invalid = || LockfileError::InvalidSelection;
+    if !matches!(origin, OmissionOrigin::Workspace { .. })
+        || original == effective
+        || original.len() > 4096
+        || original.trim() != original
+    {
+        return Err(invalid());
+    }
+    let name = name.parse::<PackageName>().map_err(|_| invalid())?;
+    let original = original
+        .parse::<tapid_resolver::Requirement>()
+        .map_err(|_| invalid())?;
+    let effective = effective
+        .parse::<tapid_resolver::Requirement>()
+        .map_err(|_| invalid())?;
+    if original.package_name(&name) != effective.package_name(&name) {
+        return Err(invalid());
+    }
+    Ok(())
 }

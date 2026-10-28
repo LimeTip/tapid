@@ -1144,6 +1144,7 @@ fn omission_ledger_updates_are_atomic_and_revalidate_on_serialization() {
         profile: crate::SelectionProfile::Production,
         declarations: vec![],
         omissions: vec![crate::AcceptedOmission {
+            original_requirement: None,
             origin: crate::OmissionOrigin::Root,
             name: "tapid".into(),
             requirement: "^1".into(),
@@ -1394,6 +1395,7 @@ fn recorded_workspace_membership_and_local_protocols_keep_exact_targets() {
             omissions: vec![],
             declarations: vec![
                 crate::RetainedDeclaration {
+                    original_requirement: None,
                     origin: crate::OmissionOrigin::Root,
                     section: crate::DeclarationSection::Dependencies,
                     name: "app".into(),
@@ -1401,6 +1403,7 @@ fn recorded_workspace_membership_and_local_protocols_keep_exact_targets() {
                     target: app_key.clone(),
                 },
                 crate::RetainedDeclaration {
+                    original_requirement: None,
                     origin: crate::OmissionOrigin::Workspace {
                         key: app_key.clone(),
                     },
@@ -1414,6 +1417,12 @@ fn recorded_workspace_membership_and_local_protocols_keep_exact_targets() {
         .unwrap();
         let bytes = lock.to_json().unwrap();
         assert_eq!(Lockfile::from_json(&bytes).unwrap(), lock);
+        let mut overridden_local: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        overridden_local["selection"]["declarations"][1]["originalRequirement"] = "^9".into();
+        assert!(
+            Lockfile::from_json(&overridden_local.to_string()).is_err(),
+            "workspace overrides cannot change local member selection"
+        );
         let mut aliased_local: serde_json::Value = serde_json::from_str(&bytes).unwrap();
         aliased_local["selection"]["declarations"][0]["name"] = "alias".into();
         aliased_local["selection"]["declarations"][0]["requirement"] = "npm:app@*".into();

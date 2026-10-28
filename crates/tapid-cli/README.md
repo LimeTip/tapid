@@ -370,8 +370,10 @@ origins even when they share a local name. Local workspace links retain their
 original sections and requirements; automatic member roots describe membership.
 Metadata transport errors remain fatal. Existing transitive
 candidate/platform exclusions retain their reasons in the ledger. Selection with
-omissions and overridden workspace declarations is rejected before publication:
-the ledger cannot yet retain both original and effective requirements.
+omissions and overridden workspace declarations retains the effective requirement
+and an `originalRequirement` when they differ. Replay checks the original member
+section and requirement as well as the current root override. Alias overrides
+preserve the actual package name; overrides cannot redirect local workspace links.
 Copied-source selection generation, imported schema 12 generation, artifact/hook
 omission selection and complete optional-failure semantics remain unfinished.
 Preview and status integration is not established by this replay API.

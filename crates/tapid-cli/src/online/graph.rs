@@ -421,6 +421,7 @@ pub(super) fn resolve_package_graph(
                     dependency.name.clone(),
                 ));
                 omissions.push(tapid_lockfile::AcceptedOmission {
+                    original_requirement: None,
                     origin: entry
                         .workspace
                         .as_ref()

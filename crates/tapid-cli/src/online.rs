@@ -913,10 +913,15 @@ fn workspace_root_resolution(
             local_name,
             format!("registry:{}|{}", dependency.registry, dependency.package),
         )?;
-        let requirement = overrides
+        let mut requirement = overrides
             .get(&dependency.package)
             .cloned()
             .unwrap_or_else(|| dependency.requirement.clone());
+        if dependency.requirement.is_alias() && !requirement.is_alias() {
+            requirement = format!("npm:{}@{}", dependency.package, requirement.raw)
+                .parse::<Requirement>()
+                .map_err(|error| error.to_string())?;
+        }
         roots.push(Dependency::new(
             dependency.registry.clone(),
             dependency
