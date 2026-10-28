@@ -185,7 +185,7 @@ fn inspect(
     }
     let mut replayable = true;
     if let Some(lock) = &previous {
-        match lock.validate_replay(lock.root_manifest_digest()) {
+        match super::replay::validate_install_selection(lock, lock.root_manifest_digest()) {
             Ok(()) => {}
             Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
                 if allow_unverified && !offline && !frozen =>
@@ -232,7 +232,7 @@ fn inspect(
                 "a dry-run replay requires tapid.lock",
             )
         })?;
-        lock.validate_replay(inputs.root_digest())
+        super::replay::validate_install_selection(lock, inputs.root_digest())
             .map_err(OperationalError::from)?;
         let workspace = inputs.materialize(config, None)?;
         if !online::workspace_matches_lock(&workspace, lock) {
@@ -332,6 +332,9 @@ fn inspect(
         })
         .collect();
     let mut outcome = OperationOutcome::unchanged(project);
+    if metadata_source == "lockfile" {
+        outcome.record_selection(previous.as_ref().expect("reused lockfile"));
+    }
     if allow_unverified {
         outcome
             .warnings

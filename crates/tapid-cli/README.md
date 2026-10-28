@@ -233,6 +233,8 @@ Lockfile impact describes selecting the shown direct version. An unchanged direc
 
 A dry run never writes project files, creates an activation lock, recovers transactions, reads or writes the package store, downloads package artifacts, or runs lifecycle scripts. Pending recovery stops the preview. Live resolution may request registry metadata; `--registry-fixture` resolves entirely from local fixture metadata. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without checking whether its artifacts are cached. Output states the network permission, package metadata lookup count, and cache/artifact effects explicitly. A resolved graph does not attest artifact availability, archive validity, generated lifecycle outputs, or the success of a later install. Copied file/Git sources and imported npm locks currently require an ordinary install rather than a resolved preview.
 
+When a preview reuses a native recorded selection, it requires the current host target and development profile and reports accepted optional omissions in human output and the JSON envelope's `selection`.
+
 `tapid --json add PACKAGE --dry-run` uses the version 1 command envelope with unchanged project state. `data.preview_kind` is `resolved_graph`; `data.declarations` lists section/name/before/after edits, `data.packages` lists package changes and reasons, `data.root_changes` lists root binding changes, and `data.effects` describes this preview's effects. This is an inspection result, not a saved executable plan. A later command reads current inputs and may resolve different metadata.
 
 Each preview includes `data.starting_state` (receipt `schema_version: 1`), also

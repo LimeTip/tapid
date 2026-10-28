@@ -6,6 +6,9 @@ pub(crate) fn report(report: &PreviewReport, operation: &str, json: bool) -> Exi
         return super::json::preview(report, operation);
     }
     super::report_warnings(&report.outcome.warnings);
+    for line in super::install::Reporter::selection_lines(report.outcome.selection.as_ref()) {
+        println!("{line}");
+    }
     println!("Dry run: resolved dependency graph. Artifacts are not prepared.");
     let data = serde_json::to_value(report).expect("preview serialization");
     let value = |value: &serde_json::Value| value.as_str().unwrap_or("absent").to_owned();
