@@ -451,9 +451,66 @@ fn info_keeps_tapid_interpretation_out_of_registry_fact_records() {
     project.write("metadata.json", br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0","peerDependencies":{"host":"^1"},"engines":{"custom":"next"}}}}"#).unwrap();
     let output = run(&project, "foo@1.0.0", &[]);
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(result["data"]["facts"]["peers"]["entries"][0].get("requirement_status").is_none());
-    assert!(result["data"]["facts"]["engines"]["entries"][0].get("check").is_none());
-    assert_eq!(result["data"]["checks"]["engine_requirements"][0]["fact_index"], 0);
-    assert_eq!(result["data"]["checks"]["engine_requirements"][0]["status"], "unsupported");
-    assert_eq!(result["data"]["checks"]["peer_requirements"][0]["status"], "supported");
+    assert!(
+        result["data"]["facts"]["peers"]["entries"][0]
+            .get("requirement_status")
+            .is_none()
+    );
+    assert!(
+        result["data"]["facts"]["engines"]["entries"][0]
+            .get("check")
+            .is_none()
+    );
+    assert_eq!(
+        result["data"]["checks"]["engine_requirements"][0]["fact_index"],
+        0
+    );
+    assert_eq!(
+        result["data"]["checks"]["engine_requirements"][0]["status"],
+        "unsupported"
+    );
+    assert_eq!(
+        result["data"]["checks"]["peer_requirements"][0]["status"],
+        "supported"
+    );
+}
+
+#[test]
+fn info_live_private_route_requires_credentials_before_network() {
+    let project = TempProject::new("info-live-auth").unwrap();
+    let home = TempHome::new("info-live-auth").unwrap();
+    project.write("tapid.toml", b"[registries.'@scope']\nurl='https://private.example'\ntoken-env='TAPID_TEST_INFO_MISSING_TOKEN'\n").unwrap();
+    let output = super::command_support::command_in_home(
+        project.path(),
+        home.path(),
+        &["info", "@scope/foo", "--json"],
+        true,
+    )
+    .env_remove("TAPID_TEST_INFO_MISSING_TOKEN")
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["errors"][0]["code"], "REGISTRY_AUTH_MISSING");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert!(result["data"].is_null());
+    assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn info_malformed_winning_record_fails_without_selecting_a_lower_version() {
+    let project = TempProject::new("info-malformed-winner").unwrap();
+    project.write("metadata.json", br#"{"name":"foo","versions":{"1.0.0":{"name":"foo","version":"1.0.0"},"2.0.0":{"name":"other","version":"2.0.0"}},"dist-tags":{"latest":"2.0.0"}}"#).unwrap();
+    for spec in ["foo", "foo@*", "foo@2.0.0"] {
+        let output = run(&project, spec, &[]);
+        assert_eq!(output.status.code(), Some(1), "{spec}: {output:?}");
+        assert!(output.stderr.is_empty());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["errors"][0]["code"], "REGISTRY_METADATA_INVALID");
+        assert!(result["data"].is_null());
+        assert_eq!(result["changes"]["state"], "unchanged");
+    }
+    let output = run(&project, "foo@1.0.0", &[]);
+    assert!(output.status.success(), "{output:?}");
 }
