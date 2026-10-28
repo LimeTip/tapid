@@ -133,11 +133,14 @@ fn command_request_with_policy(
 }
 
 #[test]
-fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants() {
+fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_and_descendants() {
     let project = tapid_test_support::TempProject::new("windows-lpac-project").unwrap();
     let outside = tapid_test_support::TempProject::new("windows-lpac-outside").unwrap();
     project.write("approved.txt", b"approved-input").unwrap();
     let secret = outside.write("undeclared.txt", b"ambient-input").unwrap();
+    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let undeclared_executable = outside.path().join("undeclared.exe");
+    fs::copy(&executable, &undeclared_executable).unwrap();
     windows_acl::initialize_inheritance(project.path());
     windows_acl::initialize_inheritance(outside.path());
     let system32 =
@@ -156,13 +159,31 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
     // The host can read the fixture. Its only package-side grant is ambient AAP;
     // neither this file nor its directory appears in the execution policy.
     assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
+    // A valid PE image and successful host launch distinguish access denial
+    // from a missing executable, loader dependency, or invalid fixture.
+    let host_control = Command::new(&undeclared_executable)
+        .args([
+            "--exact",
+            "windows_ambient_execution_target_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-target")
+        .output()
+        .unwrap();
+    assert!(host_control.status.success(), "{host_control:?}");
+    assert!(String::from_utf8_lossy(&host_control.stdout).contains("undeclared-target-executed"));
     let baseline = project_dacl(outside.path());
     let root = fs::canonicalize(project.path()).unwrap();
-    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let child = root.join("probe.exe");
     fs::copy(&executable, &child).unwrap();
     project
         .write("outside-path.txt", secret.to_str().unwrap().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "outside-executable.txt",
+            undeclared_executable.to_str().unwrap().as_bytes(),
+        )
         .unwrap();
     let request = ExecutionRequest::builder(child.as_os_str())
         .args([
@@ -201,6 +222,7 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
         !stdout.contains("ambient-input"),
         "undeclared AAP input was readable: {stdout}"
     );
+    assert!(!stdout.contains("undeclared-target-executed"), "{stdout}");
     assert_eq!(project_dacl(outside.path()), baseline);
 }
 
@@ -213,6 +235,17 @@ fn windows_ambient_read_probe_helper() {
     assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
     let outside = fs::read_to_string("outside-path.txt").unwrap();
     let denied = fs::read(outside).expect_err("undeclared AAP file must be denied");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    let outside_executable = fs::read_to_string("outside-executable.txt").unwrap();
+    let denied = Command::new(outside_executable)
+        .args([
+            "--exact",
+            "windows_ambient_execution_target_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-target")
+        .output()
+        .expect_err("undeclared AAP executable must be denied before target execution");
     assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
     if mode == "ambient-root" {
         println!("approved-root");
@@ -231,6 +264,13 @@ fn windows_ambient_read_probe_helper() {
         );
     } else {
         println!("approved-child");
+    }
+}
+
+#[test]
+fn windows_ambient_execution_target_helper() {
+    if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-target") {
+        println!("undeclared-target-executed");
     }
 }
 

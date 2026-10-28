@@ -158,6 +158,35 @@ node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked
 node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked uncontained
 ```
 
+## Windows dependency authority closure checkpoint (#273)
+
+Authenticated dependency builds remain disabled on Windows at
+`dependency_toolchain_identity`. The following inventory describes source
+mechanisms and unresolved inputs, not native acceptance. No complete Windows
+runtime identity or prepared execution authority exists yet.
+
+| Input channel | Current mechanism / concrete input | Required closure and evidence |
+| --- | --- | --- |
+| All Application Packages | LPAC opt-out and actual suspended-token access checks; explicit per-profile project grants | The root/descendant Rust probe now attempts an AAP-only copied executable as well as reads. A successful host launch proves fixture validity; contained launches must fail with `PermissionDenied`. Native execution of this extended probe is pending. |
+| All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | Inventory effective read/execute authority, including mutable application locations. Deny or bind the complete accessible set; AAP controls do not cover this channel. |
+| Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | Test initial contents, cross-run influence, and deletion failure. Unique names alone do not identify initial profile bytes or registry state. |
+| Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
+| COM / brokers | No complete activation or response inventory | Probe native activation independently of compatibility hooks. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
+| Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
+| KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
+| Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
+| Dynamic DLL loads | Native token/ACL checks apply; compatibility interception is incomplete | Add absolute, searched, altered-search, secondary-dependency and manual-load controls. Static imports and observed loads cannot establish closure. |
+| Descendant executables | Suspended root is verified and assigned to a non-breakaway Job before resume; token restrictions propagate | Extended AAP fixture pairs approved root/descendant execution with undeclared executable denial. Dynamic process API and DLL-initialization bypass controls remain outstanding. |
+| Declared tools / runtime snapshots | CLI verifies declared tool bytes; Windows system identity is rejected before authenticated lookup | Retain the same bounded authority for hashing and execution. Secondary-byte, resolution-order and mutation controls must precede enabling recipe reuse. |
+
+Kernel enforcement and privileged-host integrity are trust assumptions. They do
+not cover mutable user registry state, undeclared application bytes, or arbitrary
+broker responses. The unresolved rows block runtime identity integration, not
+further fixture development. The extended AAP control is owned by the existing
+native Windows workspace test suite and requires its guard setup. Compilation
+or a zero-test macOS invocation is not an enforcement receipt. This checkpoint
+does not establish #157 project-script acceptance or #274 integrated adoption.
+
 ## Private Windows dependency write and key validation
 
 The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).
