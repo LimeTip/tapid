@@ -1518,7 +1518,7 @@ for (const runtime of platform === "win32" ? ["pwsh", "powershell.exe"] : ["pwsh
       const directory = await mkdtemp(join(tmpdir(), "tapid-download-"));
       try {
         const environment = { ...processEnv, HOME: directory, USERPROFILE: directory, XDG_CONFIG_HOME: directory, XDG_CACHE_HOME: directory, APPDATA: directory, LOCALAPPDATA: directory };
-        try { await run(runtime, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { env: environment, timeout: 20000 }); }
+        try { await run(runtime, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { env: environment, timeout: 20000, killSignal: "SIGKILL" }); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT" || processEnv.CI) throw error;
           context.skip(`${runtime} unavailable`); return;
@@ -1580,7 +1580,7 @@ if ('${mode}' -ne 'initial-http') {
 }
 Write-Output 'download contract verified'
   `);
-        const result = await run(runtime, ["-NoProfile", "-NonInteractive", "-File", join(directory, "test.ps1")], { timeout: 20000, env: environment });
+        const result = await run(runtime, ["-NoProfile", "-NonInteractive", "-File", join(directory, "test.ps1")], { timeout: 20000, killSignal: "SIGKILL", env: environment });
         match(result.stdout, /download contract verified/);
       } finally { await rm(directory, { recursive: true, force: true }); }
     });
@@ -1609,7 +1609,7 @@ for (const runtime of platform === "win32" ? ["pwsh", "powershell.exe"] : ["pwsh
     server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
     try {
       const environment = { ...processEnv, HOME: directory, USERPROFILE: directory, XDG_CONFIG_HOME: directory, XDG_CACHE_HOME: directory, APPDATA: directory, LOCALAPPDATA: directory };
-      try { await run(runtime, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { env: environment, timeout: 20000 }); }
+      try { await run(runtime, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { env: environment, timeout: 20000, killSignal: "SIGKILL" }); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT" || processEnv.CI) throw error;
         context.skip(`${runtime} unavailable`); return;
@@ -1661,7 +1661,7 @@ if ($clock.ElapsedMilliseconds -gt 3000) { throw 'native deadline exceeded sched
 if (Test-Path $path) { throw 'native partial download remains' }
 Write-Output "Native TLS success and stalled body verified: $($PSVersionTable.PSVersion)"
 `);
-      const result = await run(runtime, ["-NoProfile", "-NonInteractive", "-File", join(directory, "test.ps1")], { timeout: 20000, env: environment });
+      const result = await run(runtime, ["-NoProfile", "-NonInteractive", "-File", join(directory, "test.ps1")], { timeout: 20000, killSignal: "SIGKILL", env: environment });
       match(result.stdout, /Native TLS success and stalled body verified/);
       context.diagnostic(result.stdout.trim());
       for (let attempt = 0; attempt < 100 && !closed; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
