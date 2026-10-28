@@ -13,6 +13,13 @@ The crate validates required `name` and `version`, optional `private`, `descript
 
 `PackageManifest::parse` accepts document text and `to_json` emits stable JSON with sorted map keys. Archive extraction, link creation, and process execution are owned by other crates and the CLI.
 
+`node_engine` classifies the preserved `engines.node` declaration as absent, a
+string range, malformed `engines`, or malformed `node`. It does not evaluate
+range syntax or runtime compatibility. `package_manager` and `dev_engines` expose
+preserved raw values, distinguishing absence from a declared null. Dependency
+edits retain these fields, including malformed declarations; parsing does not
+execute a runtime or invoke another package manager.
+
 `ManifestError::diagnostic` accepts the same input and returns the failed field,
 map key, expected constraint, and observed JSON type. It does not copy arbitrary
 field values. `Workspace::discover_typed` preserves this evidence and the

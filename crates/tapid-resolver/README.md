@@ -9,6 +9,11 @@
 
 Pure deterministic resolution for normalized npm- and JSR-compatible registry metadata.
 
+`Requirement::parse_range` exposes the same npm range evaluator without accepting
+dist-tags or npm aliases. It retains empty-range wildcard semantics and the same
+prerelease rules. This entry point supports evaluating version requirements such
+as Node engines without treating them as dependency source specifications.
+
 Registry adapters own network access and normalize metadata. The resolver accepts only those values and performs no HTTP, archive, or filesystem work. Package identities retain source identity, so equal names and versions from registries, copied file tarballs, and pinned Git archives remain distinct.
 
 Normalization and resolution reject metadata above 100,000 version records,

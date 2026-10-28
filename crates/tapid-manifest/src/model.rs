@@ -3,6 +3,15 @@ use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf};
 use tapid_core::{PackageName, PackageVersion};
 
+/// Observed Node requirement in a parsed manifest, without evaluating a runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeEngineDeclaration<'a> {
+    NotDeclared,
+    Range(&'a str),
+    MalformedEngines,
+    MalformedNode,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DependencyKind {
     Dependencies,
@@ -64,6 +73,29 @@ impl PackageBin {
 }
 
 impl PackageManifest {
+    /// Classifies `engines.node` while retaining malformed input for round trips.
+    pub fn node_engine(&self) -> NodeEngineDeclaration<'_> {
+        match self.extra.get("engines") {
+            None => NodeEngineDeclaration::NotDeclared,
+            Some(serde_json::Value::Object(engines)) => match engines.get("node") {
+                None => NodeEngineDeclaration::NotDeclared,
+                Some(serde_json::Value::String(range)) => NodeEngineDeclaration::Range(range),
+                Some(_) => NodeEngineDeclaration::MalformedNode,
+            },
+            Some(_) => NodeEngineDeclaration::MalformedEngines,
+        }
+    }
+
+    /// Raw manager declaration; presence, including null, is distinct from absence.
+    pub fn package_manager(&self) -> Option<&serde_json::Value> {
+        self.extra.get("packageManager")
+    }
+
+    /// Raw development-engine declaration, preserved without executing tooling.
+    pub fn dev_engines(&self) -> Option<&serde_json::Value> {
+        self.extra.get("devEngines")
+    }
+
     pub fn new(name: &str, version: &str, private: bool) -> Result<Self, ManifestError> {
         Ok(Self {
             name: name.parse().map_err(ManifestError::InvalidPackageName)?,
