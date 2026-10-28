@@ -154,11 +154,63 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
             })
             .collect::<Vec<_>>();
         let manifest_before = fs::read(project.path().join("package.json")).unwrap();
+        let inspection = args.contains(&"status") || args.contains(&"--dry-run");
+        let inspected_paths = [
+            "tapid.lock",
+            ".tapid-managed",
+            "node_modules/parent/package.json",
+            "node_modules/shared/package.json",
+        ];
+        let inspected_before = inspection
+            .then(|| inspected_paths.map(|path| fs::read(project.path().join(path)).unwrap()));
         let result = metrics.call(&project, &home, &args);
         if args.contains(&"outdated") {
             assert_eq!(result["outcome"], "partial");
+        } else if args.contains(&"status") {
+            assert_eq!(result["data"]["manifest_lock_agreement"], "match");
+            assert_eq!(result["data"]["capabilities"]["runner"], "not_assessed");
+            assert!(
+                !result["data"]["checks_not_performed"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            let blocked = !result["data"]["blockers"].as_array().unwrap().is_empty();
+            assert_eq!(
+                result["outcome"],
+                if blocked { "failure" } else { "success" }
+            );
         } else {
             success(&result);
+        }
+        if args.contains(&"--dry-run") {
+            assert_eq!(result["data"]["preview_kind"], "resolved_graph");
+            let effects = &result["data"]["effects"];
+            assert_eq!(effects["metadata_source"], "lockfile");
+            assert_eq!(effects["metadata_lookups"], 0);
+            assert_eq!(effects["artifact_requests"], 0);
+            for effect in [
+                "network_allowed",
+                "cache_reads",
+                "cache_writes",
+                "project_writes",
+            ] {
+                assert_eq!(effects[effect], false, "{effect}: {result}");
+            }
+        }
+        if let Some(before) = inspected_before {
+            assert_eq!(result["changes"]["state"], "unchanged");
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest_before
+            );
+            for (path, bytes) in inspected_paths.into_iter().zip(before) {
+                assert_eq!(
+                    fs::read(project.path().join(path)).unwrap(),
+                    bytes,
+                    "{path}"
+                );
+            }
         }
         examples += 1;
         if args.contains(&"import-package-lock") {
@@ -167,7 +219,7 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
         if args.contains(&"add") || args.contains(&"remove") {
             pinned = Some(fs::read(project.path().join("tapid.lock")).unwrap());
         }
-        if args.contains(&"ci") || args.contains(&"install") {
+        if args.contains(&"ci") || (args.contains(&"install") && !inspection) {
             let current = fs::read(project.path().join("tapid.lock")).unwrap();
             let expected = pinned.as_ref().unwrap();
             if args.contains(&"install") {
@@ -202,8 +254,8 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
             original_npm
         );
     }
-    assert_eq!(examples, 10);
-    metrics.finish(10);
+    assert_eq!(examples, 12);
+    metrics.finish(12);
 }
 
 /// Compare complete package records so unrelated version, source, and edge changes fail the test.
