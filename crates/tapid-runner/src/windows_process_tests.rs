@@ -129,6 +129,16 @@ fn scm_com_server_activates_and_removes_its_exact_registration() {
     assert!(String::from_utf8_lossy(&activated.stdout).contains("com:descendant:activated"));
     assert!(String::from_utf8_lossy(&activated.stdout).contains("com:local-server:activated"));
     assert!(project.path().join("ready").is_file());
+    let root = std::fs::canonicalize(project.path()).unwrap();
+    let program = root.join("scm-client.exe");
+    std::fs::copy(&executable, &program).unwrap();
+    let mut registry =
+        super::registry_probe::RegistryInput::new(root.file_name().unwrap().to_str().unwrap());
+    let mut contained_dispatches = 0;
+    compare_lpac_com_clients(&root, &program, &class, &registry.path, |observed| {
+        contained_dispatches += observed;
+    });
+    registry.cleanup();
     project.write("stop", b"").unwrap();
     assert_eq!(
         unsafe { WaitForSingleObject(server.0, 5_000) },
@@ -140,7 +150,7 @@ fn scm_com_server_activates_and_removes_its_exact_registration() {
     assert_eq!(exit_code, 0);
     assert_eq!(
         std::fs::read_to_string(project.path().join("completed")).unwrap(),
-        "2"
+        (2 + contained_dispatches).to_string()
     );
     registration.cleanup();
     client
@@ -411,127 +421,16 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         2,
         "host root and descendant requests must reach the Rust server"
     );
-    let program_units: Vec<_> = program.as_os_str().encode_wide().collect();
-    let argument_units: Vec<Vec<u16>> = arguments
-        .iter()
-        .map(|arg| arg.encode_utf16().collect())
-        .collect();
-    let command = super::super::super::serialize_windows_command_line_units(
-        &program_units,
-        &argument_units,
-        false,
-    )
-    .unwrap();
-    let application: Vec<_> = program_units.into_iter().chain(Some(0)).collect();
-    let cwd: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
-    for registry_read in [true, false] {
-        let creations_before = server.creations();
-        let environment = super::super::super::windows_environment_block_units(
-            &std::collections::BTreeMap::from([
-                (std::ffi::OsString::from("SystemRoot"), system_root.clone()),
-                (
-                    std::ffi::OsString::from("TAPID_TEST_COM_DESCENDANT"),
-                    std::ffi::OsString::from("1"),
-                ),
-                (
-                    std::ffi::OsString::from("TAPID_TEST_COM_CLASS"),
-                    std::ffi::OsString::from(&server.class),
-                ),
-                (
-                    std::ffi::OsString::from("TAPID_TEST_REGISTRY"),
-                    std::ffi::OsString::from(&registry.path),
-                ),
-                (
-                    std::ffi::OsString::from("TAPID_TEST_MARKER"),
-                    std::ffi::OsString::from(if registry_read {
-                        "provider-contained"
-                    } else {
-                        "provider-capability-free"
-                    }),
-                ),
-            ]),
-        )
-        .unwrap();
-
-        let mut container = WindowsAppContainer::create().unwrap();
-        let job = WindowsJob::new(&ExecutionLimits::default(), false).unwrap();
-        let mut grants = super::super::WindowsFilesystemGrants::apply(
-            &container,
-            &[crate::execution::ResolvedFilesystemGrant {
-                path: root.clone(),
-                access: FilesystemAccess::Read,
-                kind: FilesystemGrantKind::DirectorySubtree,
-                source: crate::execution::FilesystemGrantSource::ProjectPolicy,
-                binding: crate::execution::FilesystemBindingMode::CanonicalPath,
-            }],
-        )
-        .unwrap();
-        let mut pipes = WindowsStdioPipes::new().unwrap();
-        let capability = registry_read
-            .then(super::super::token::RegistryReadCapability::new)
-            .transpose()
-            .unwrap();
-        let mut child = WindowsSuspendedChild::create_inner(
-            &container,
-            &application,
-            &command,
-            &environment,
-            &cwd,
-            Some(&mut pipes),
-            capability,
-        )
-        .expect("LPAC creation and actual-token verification");
-        job.assign_suspended_process(child.process_handle())
-            .unwrap();
-        let mut token = 0;
-        // SAFETY: child owns a live suspended process; output receives a query handle.
-        assert_ne!(
-            unsafe { OpenProcessToken(child.process_handle(), TOKEN_QUERY, &mut token) },
-            0
-        );
-        let information = super::super::token_information(token, TokenCapabilities);
-        let capabilities_valid = super::super::token::validate_runtime_capabilities(token);
-        // SAFETY: close the query handle before asserting on the captured result.
-        unsafe { CloseHandle(token) };
-        capabilities_valid.unwrap();
-        let information = information.unwrap();
-        assert!(!information.is_empty());
-        // SAFETY: token_information returns aligned storage containing the native count.
-        let count = unsafe { *information.as_ptr().cast::<u32>() };
-        assert_eq!(count, u32::from(registry_read));
-        println!("LPAC:registryRead={registry_read}:capability-count={count}");
-        let capture =
-            WindowsOutputCapture::start(pipes.into_parent_readers().unwrap(), Some(16384));
-        let termination = child
-            .resume_and_wait_for_status(&job, 10_000, capture.output_limit_exceeded(), None)
-            .unwrap();
-        let (stdout, stderr) = capture.finish().unwrap();
+    let mut creations_before = server.creations();
+    compare_lpac_com_clients(&root, &program, &server.class, &registry.path, |observed| {
+        let creations = server.creations();
         assert_eq!(
-            termination,
-            WindowsChildTermination::Exited(0),
-            "registryRead={registry_read}: stdout={}; stderr={}",
-            String::from_utf8_lossy(&stdout),
-            String::from_utf8_lossy(&stderr)
-        );
-        let stdout = String::from_utf8_lossy(&stdout);
-        assert!(stdout.contains("provider:startup:ok"), "{stdout}");
-        assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
-        assert!(stdout.contains("registry:host-input:"), "{stdout}");
-        assert!(stdout.contains("com:shell-link:"), "{stdout}");
-        assert!(stdout.contains("com:local-server:"), "{stdout}");
-        assert_eq!(stdout.matches("com:descendant:").count(), 1, "{stdout}");
-        assert_eq!(
-            server.creations() - creations_before,
-            (stdout.matches("com:local-server:activated").count()
-                + stdout.matches("com:descendant:activated").count()) as u32,
+            creations - creations_before,
+            observed,
             "activation observation must match server-side dispatch"
         );
-        println!("registryRead={registry_read}: {stdout}");
-        drop(child);
-        job.wait_until_empty(5_000).unwrap();
-        grants.restore().unwrap();
-        container.cleanup().unwrap();
-    }
+        creations_before = creations;
+    });
     registry.cleanup();
     server.cleanup();
     let creations_before = server.creations();
@@ -615,5 +514,140 @@ fn probe_com_activation(marker: &str) {
         0x80070005 => println!("com:shell-link:access-denied"),
         0x80040154 => println!("com:shell-link:class-unavailable"),
         _ => panic!("unexpected ShellLink activation result: {result:#010x}"),
+    }
+}
+
+// Shared native launch path keeps SCM and running-class comparisons under the
+// same verified suspended token, explicit grants and non-breakaway Job.
+fn compare_lpac_com_clients(
+    root: &std::path::Path,
+    program: &std::path::Path,
+    class: &str,
+    registry_path: &str,
+    mut observe_dispatches: impl FnMut(u32),
+) {
+    let helper = format!(
+        "{}::provider_helper",
+        module_path!().split_once("::").unwrap().1
+    );
+    let arguments = ["--exact", helper.as_str(), "--nocapture"];
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    let program_units: Vec<_> = program.as_os_str().encode_wide().collect();
+    let argument_units: Vec<Vec<u16>> = arguments
+        .iter()
+        .map(|arg| arg.encode_utf16().collect())
+        .collect();
+    let command = super::super::super::serialize_windows_command_line_units(
+        &program_units,
+        &argument_units,
+        false,
+    )
+    .unwrap();
+    let application: Vec<_> = program_units.into_iter().chain(Some(0)).collect();
+    let cwd: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    for registry_read in [true, false] {
+        let environment = super::super::super::windows_environment_block_units(
+            &std::collections::BTreeMap::from([
+                (std::ffi::OsString::from("SystemRoot"), system_root.clone()),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_COM_DESCENDANT"),
+                    std::ffi::OsString::from("1"),
+                ),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_COM_CLASS"),
+                    std::ffi::OsString::from(class),
+                ),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_REGISTRY"),
+                    std::ffi::OsString::from(registry_path),
+                ),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_MARKER"),
+                    std::ffi::OsString::from(if registry_read {
+                        "provider-contained"
+                    } else {
+                        "provider-capability-free"
+                    }),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        let mut container = WindowsAppContainer::create().unwrap();
+        let job = WindowsJob::new(&ExecutionLimits::default(), false).unwrap();
+        let mut grants = super::super::WindowsFilesystemGrants::apply(
+            &container,
+            &[crate::execution::ResolvedFilesystemGrant {
+                path: root.to_path_buf(),
+                access: FilesystemAccess::Read,
+                kind: FilesystemGrantKind::DirectorySubtree,
+                source: crate::execution::FilesystemGrantSource::ProjectPolicy,
+                binding: crate::execution::FilesystemBindingMode::CanonicalPath,
+            }],
+        )
+        .unwrap();
+        let mut pipes = WindowsStdioPipes::new().unwrap();
+        let capability = registry_read
+            .then(super::super::token::RegistryReadCapability::new)
+            .transpose()
+            .unwrap();
+        let mut child = WindowsSuspendedChild::create_inner(
+            &container,
+            &application,
+            &command,
+            &environment,
+            &cwd,
+            Some(&mut pipes),
+            capability,
+        )
+        .expect("LPAC creation and actual-token verification");
+        job.assign_suspended_process(child.process_handle())
+            .unwrap();
+        let mut token = 0;
+        // SAFETY: child owns a live suspended process; output receives a query handle.
+        assert_ne!(
+            unsafe { OpenProcessToken(child.process_handle(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        let information = super::super::token_information(token, TokenCapabilities);
+        let capabilities_valid = super::super::token::validate_runtime_capabilities(token);
+        // SAFETY: close the query handle before asserting on the captured result.
+        unsafe { CloseHandle(token) };
+        capabilities_valid.unwrap();
+        let information = information.unwrap();
+        assert!(!information.is_empty());
+        // SAFETY: token_information returns aligned storage containing the native count.
+        let count = unsafe { *information.as_ptr().cast::<u32>() };
+        assert_eq!(count, u32::from(registry_read));
+        println!("LPAC:registryRead={registry_read}:capability-count={count}");
+        let capture =
+            WindowsOutputCapture::start(pipes.into_parent_readers().unwrap(), Some(16384));
+        let termination = child
+            .resume_and_wait_for_status(&job, 10_000, capture.output_limit_exceeded(), None)
+            .unwrap();
+        let (stdout, stderr) = capture.finish().unwrap();
+        assert_eq!(
+            termination,
+            WindowsChildTermination::Exited(0),
+            "registryRead={registry_read}: stdout={}; stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let stdout = String::from_utf8_lossy(&stdout);
+        assert!(stdout.contains("provider:startup:ok"), "{stdout}");
+        assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
+        assert!(stdout.contains("registry:host-input:"), "{stdout}");
+        assert!(stdout.contains("com:shell-link:"), "{stdout}");
+        assert!(stdout.contains("com:local-server:"), "{stdout}");
+        assert_eq!(stdout.matches("com:descendant:").count(), 1, "{stdout}");
+        observe_dispatches(
+            (stdout.matches("com:local-server:activated").count()
+                + stdout.matches("com:descendant:activated").count()) as u32,
+        );
+        println!("registryRead={registry_read}: {stdout}");
+        drop(child);
+        job.wait_until_empty(5_000).unwrap();
+        grants.restore().unwrap();
+        container.cleanup().unwrap();
     }
 }

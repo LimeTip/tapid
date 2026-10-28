@@ -179,7 +179,7 @@ sampled controls; it does not resolve the inventory below or enable authenticati
 | All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
 | Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | The native cross-run control derives each profile folder from the actual child token, writes and rereads a private sentinel, requires its removal after completion, and checks that a second execution gets a different folder and cannot read the previous sentinel. Native execution is pending. Full initial contents and deletion-failure controls remain unresolved. Unique names alone do not identify initial profile bytes or registry state. |
 | Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
-| COM / brokers | Paired host/LPAC in-process ShellLink and disposable running Rust local-server activation probes; no complete activation or response inventory | Native observations are pending. The local-server control checks dispatch counts and exact registration revocation, but does not cover SCM launch or arbitrary brokers. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
+| COM / brokers | Paired host/LPAC in-process ShellLink and disposable running Rust local-server activation probes; no complete activation or response inventory | Native observations are pending. The local-server control checks dispatch counts and exact registration revocation, but covers host SCM launch separately, but does not cover LPAC-triggered SCM launch or arbitrary brokers. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
 | Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
 | KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
 | Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
@@ -345,7 +345,7 @@ Windows CRT initializer dispatches its exact private argument prefix before
 libtest parses COM's `-Embedding` argument. Production binaries contain no such
 dispatch. The parent supplies a fresh GUID and disposable directory; create-new
 readiness evidence follows registration, and a stop file requests exact-cookie
-revocation. The server has a ten-second internal deadline and the existing
+revocation. The server has a forty-second internal deadline and the existing
 bounded host supervisor owns termination and reaping. A separate client must
 activate the class, the server must report exactly one dispatch, and a fresh
 client must observe class unavailability after server exit. Native execution is
@@ -372,8 +372,15 @@ checks their absence, and requires class unavailability from a fresh client.
 It neither creates nor deletes shared registry ancestors. A missing per-user
 CLSID parent or an execution context that ignores per-user COM registration
 fails the host-positive control rather than falling back to machine registration.
-Native Windows execution of this control remains pending. Paired LPAC SCM
-activation, complete broker authority closure and recipe identity remain required.
+The same verified suspended-launch helper now runs registryRead and capability-free
+LPAC clients against the already running SCM-launched class, including direct
+descendants. This does not test an LPAC client starting an inactive server. Each
+run requires separate root and descendant observations. The final server dispatch
+count must equal the two host activations plus all reported contained activations;
+class unavailability and access denial remain characterization, not broker closure.
+The forty-second server deadline covers the bounded host and paired client waits.
+Native Windows execution, complete broker authority closure and recipe identity
+remain required.
 
 The capability comparison's host-positive helper has a ten-second native process
 wait. Timeout terminates the helper and requires termination observation within

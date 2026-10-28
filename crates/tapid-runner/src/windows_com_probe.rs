@@ -235,7 +235,7 @@ static STANDALONE_SERVER_INIT: extern "C" fn() = {
                 .unwrap();
             writeln!(ready, "{}", std::process::id()).unwrap();
             drop(ready);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
             while !root.join("stop").exists() {
                 assert!(
                     std::time::Instant::now() < deadline,
