@@ -196,6 +196,15 @@ prepared authority or recipe integration. The AAP test retains strict denial
 assertions. Both tests reuse the Rust native addon fixture and resolve its export
 without calling Node APIs. Searched loads change `SetDllDirectoryW` only inside
 isolated helper processes and restore the default search path afterward.
+Both root and descendant helpers also resolve `LoadLibraryW` from the already
+loaded `kernel32.dll` using `GetProcAddress`, then attempt the same absolute DLL
+load through that function pointer. Host and approved contained loads must
+succeed through this path; AAP-only loads must fail with access denial. ARAP
+results remain characterization and emit `resolved-load-library` observations.
+The fixture borrows the kernel module handle, following the
+[GetModuleHandleW ownership contract](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlew),
+and releases only successfully loaded fixture modules. This exercises dynamically resolved loader calls without
+relying on compatibility interception; native Windows execution is still pending.
 These sampled controls do not cover secondary DLL dependencies, precedence
 mutations, manual mapping, side-by-side assemblies or arbitrary broker inputs.
 
