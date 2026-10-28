@@ -33,16 +33,23 @@ mod tool_tests;
 mod workspace_acceptance;
 
 #[test]
+fn relative_coverage_profile_is_anchored_to_the_parent_directory() {
+    let parent = std::env::current_dir().unwrap();
+    let relative = OsStr::new("coverage-%p.profraw");
+    assert_eq!(
+        command_support::coverage_profile_path(relative, &parent),
+        parent.join(relative)
+    );
+}
+
+#[test]
 fn completions_generate_static_bash_script_without_project_mutation() {
     let project = tapid_test_support::TempProject::new("completions").unwrap();
     project.write("package.json", b"not json").unwrap();
     let before = fs::read_dir(project.path()).unwrap().count();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
-    command
-        .args(["completions", "bash"])
-        .current_dir(project.path())
-        .env_clear();
-    let output = command.output().unwrap();
+    let output = isolated_command(project.path(), &["completions", "bash"], true)
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty());
     let script = String::from_utf8(output.stdout).unwrap();
