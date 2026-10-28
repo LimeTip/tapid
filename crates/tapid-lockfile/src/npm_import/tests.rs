@@ -541,6 +541,73 @@ fn imported_omission_ledger_round_trip_and_hostile_inputs() {
         wire
     );
     assert!(restored.validate_replay(manifest, DIGEST).is_err());
+    let selection = restored.placement_selection().unwrap();
+    let before_replay = restored.to_json().unwrap();
+    for changed in [
+        crate::SelectionTarget {
+            os: "darwin".into(),
+            ..selection.target.clone()
+        },
+        crate::SelectionTarget {
+            cpu: "aarch64".into(),
+            ..selection.target.clone()
+        },
+    ] {
+        assert!(
+            restored
+                .validate_replay_with_selection(manifest, DIGEST, &changed, selection.profile)
+                .is_err()
+        );
+    }
+    assert!(
+        restored
+            .validate_replay_with_selection(
+                manifest,
+                "wrong-digest",
+                &selection.target,
+                selection.profile
+            )
+            .is_err()
+    );
+    assert!(
+        lock.validate_replay_with_selection(manifest, DIGEST, &selection.target, selection.profile)
+            .is_err()
+    );
+
+    assert!(
+        restored
+            .validate_replay_with_selection(manifest, DIGEST, &selection.target, selection.profile)
+            .is_ok()
+    );
+    assert!(
+        restored
+            .validate_replay_with_selection(
+                manifest,
+                DIGEST,
+                &selection.target,
+                crate::SelectionProfile::Production
+            )
+            .is_err()
+    );
+    let mut changed = selection.target.clone();
+    changed.libc = None;
+    assert!(
+        restored
+            .validate_replay_with_selection(manifest, DIGEST, &changed, selection.profile)
+            .is_err()
+    );
+    assert!(
+        restored
+            .validate_replay_with_selection(
+                r#"{"name":"changed"}"#,
+                DIGEST,
+                &selection.target,
+                selection.profile
+            )
+            .is_err()
+    );
+
+    assert_eq!(restored.to_json().unwrap(), before_replay);
     for (field, value) in [
         ("declaringPlacement", serde_json::json!("../escape")),
         (

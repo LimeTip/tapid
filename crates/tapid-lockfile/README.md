@@ -85,7 +85,9 @@ legacy-schema ledgers, missing schema 11 facts, duplicate declarations, dangling
 origins, selected-edge conflicts, and mismatched known target identities. Existing
 schemas remain readable without invented reasons. Imported schema 8 remains a
 separate placement contract and rejects these ordinary-lock fields. Schema 11
-replay currently fails explicitly until target/profile-aware replay is integrated;
+replay through `validate_replay` still fails explicitly. The opt-in
+`validate_replay_with_selection` checks exact target/profile facts, validates the
+ledger, and retains manifest-digest and integrity-provenance checks;
 normal CLI selection does not yet emit this schema. This persistence API alone
 does not establish complete optional-dependency failure support.
 
@@ -99,6 +101,8 @@ rejected. `set_placement_selection` validates atomically. Shared target validati
 and the existing narrow reason enum are reused from ordinary selection facts.
 This initial contract represents absent placements only; it does not remove npm
 placements, record artifact/hook failures, or enable omission success. Schema 8
-rejects the new ledger, schema 12 requires it, and replay explicitly rejects schema
-12 until target/profile-aware selection is integrated. Normal CLI imports still
-emit schema 8.
+rejects the new ledger, schema 12 requires it, and `validate_replay` explicitly
+rejects schema 12. `validate_replay_with_selection` checks exact target/profile facts and the
+ledger before existing imported manifest validation. Neither opt-in API performs
+CLI manifest declaration matching, artifact hydration, or omission reporting.
+Normal CLI imports still emit schema 8.

@@ -200,6 +200,39 @@ impl ImportedNpmLockfile {
                 "recorded selection replay is not integrated; regenerate online",
             ));
         }
+        self.validate_replay_manifest(manifest, digest)
+    }
+
+    /// Validate recorded placement selection inputs without reselecting omissions.
+    pub fn validate_replay_with_selection(
+        &self,
+        manifest: &str,
+        digest: &str,
+        target: &crate::SelectionTarget,
+        profile: crate::SelectionProfile,
+    ) -> Result<(), NpmImportError> {
+        self.validate_selection_schema()?;
+        let selection = self.placement_selection.as_ref().ok_or_else(|| {
+            parse::error(
+                "/placementSelection",
+                "root",
+                "selection",
+                "recorded selection is required",
+            )
+        })?;
+        selection.validate(self)?;
+        if &selection.target != target || selection.profile != profile {
+            return Err(parse::error(
+                "/placementSelection",
+                "root",
+                "selection",
+                "recorded selection target/profile differs; explicitly reselect online",
+            ));
+        }
+        self.validate_replay_manifest(manifest, digest)
+    }
+
+    fn validate_replay_manifest(&self, manifest: &str, digest: &str) -> Result<(), NpmImportError> {
         if self.root_manifest_digest != digest {
             return Err(parse::error(
                 "/rootManifestDigest",

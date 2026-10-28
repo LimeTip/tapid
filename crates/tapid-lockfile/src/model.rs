@@ -918,6 +918,32 @@ impl Lockfile {
         if self.selection.is_some() {
             return Err(LockfileError::SelectionReplayNotSupported);
         }
+        self.validate_replay_manifest(current_root_manifest_digest)
+    }
+
+    /// Check recorded selection inputs before replay. This does not validate current
+    /// manifest declarations or authorize creating new omissions during installation.
+    pub fn validate_replay_with_selection(
+        &self,
+        current_root_manifest_digest: &str,
+        target: &crate::SelectionTarget,
+        profile: crate::SelectionProfile,
+    ) -> Result<(), LockfileError> {
+        self.validate_alias_schema()?;
+        let selection = self
+            .selection
+            .as_ref()
+            .ok_or(LockfileError::SelectionReplayNotSupported)?;
+        if &selection.target != target || selection.profile != profile {
+            return Err(LockfileError::SelectionInputsMismatch);
+        }
+        self.validate_replay_manifest(current_root_manifest_digest)
+    }
+
+    fn validate_replay_manifest(
+        &self,
+        current_root_manifest_digest: &str,
+    ) -> Result<(), LockfileError> {
         let current_root_manifest_digest = canonical_artifact_digest(current_root_manifest_digest)?;
         if self.root_manifest_digest != current_root_manifest_digest {
             return Err(LockfileError::RootManifestDigestMismatch {

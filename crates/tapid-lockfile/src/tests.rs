@@ -1104,6 +1104,14 @@ fn omission_ledger_rejects_identity_confusion_and_replay_without_target_checks()
         parsed.validate_replay(&digest),
         Err(crate::LockfileError::SelectionReplayNotSupported)
     ));
+    let selection = parsed.selection().unwrap();
+    parsed
+        .validate_replay_with_selection(&digest, &selection.target, selection.profile)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&parsed.to_json().unwrap()).unwrap()["selection"],
+        wire["selection"]
+    );
     for field in ["os", "cpu", "libc"] {
         let mut hostile = wire.clone();
         hostile["selection"]["target"][field] = "../unsafe".into();
@@ -1180,6 +1188,36 @@ fn retained_declarations_round_trip_required_optional_overlap() {
         ]
     });
     let parsed = Lockfile::from_json(&wire.to_string()).unwrap();
+    let selection = parsed.selection().unwrap();
+    parsed
+        .validate_replay_with_selection(
+            parsed.root_manifest_digest(),
+            &selection.target,
+            selection.profile,
+        )
+        .unwrap();
+    let mut unverified = wire.clone();
+    unverified["packages"][&key]["registryIntegrityDeclared"] = false.into();
+    let unverified = Lockfile::from_json(&unverified.to_string()).unwrap();
+    assert!(matches!(
+        unverified.validate_replay_with_selection(
+            unverified.root_manifest_digest(),
+            &selection.target,
+            selection.profile
+        ),
+        Err(crate::LockfileError::UnverifiedRegistryArtifact(_))
+    ));
+    let mut changed = parsed.clone();
+    changed.set_roots(Vec::<String>::new()).unwrap();
+    assert!(
+        changed
+            .validate_replay_with_selection(
+                changed.root_manifest_digest(),
+                &selection.target,
+                selection.profile
+            )
+            .is_err()
+    );
     let encoded: serde_json::Value = serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
     assert_eq!(encoded["selection"], wire["selection"]);
     for field in ["name", "requirement", "target"] {
@@ -1261,4 +1299,67 @@ fn retained_declarations_preserve_workspace_alias_and_package_origins() {
     assert!(Lockfile::from_json(&hostile.to_string()).is_err());
     wire["selection"]["declarations"][2]["origin"]["key"] = child_key.into();
     assert!(Lockfile::from_json(&wire.to_string()).is_err());
+}
+
+#[test]
+fn recorded_selection_replay_checks_effective_inputs_and_manifest() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    let target = crate::SelectionTarget {
+        os: "linux".into(),
+        cpu: "x86_64".into(),
+        libc: Some("gnu".into()),
+    };
+    assert!(
+        lock.validate_replay_with_selection(&digest, &target, crate::SelectionProfile::Production)
+            .is_err()
+    );
+    lock.set_selection(crate::LockedSelection {
+        target: target.clone(),
+        profile: crate::SelectionProfile::Production,
+        declarations: vec![],
+        omissions: vec![],
+    })
+    .unwrap();
+    assert!(
+        lock.validate_replay_with_selection(&digest, &target, crate::SelectionProfile::Production)
+            .is_ok()
+    );
+    assert!(matches!(
+        lock.validate_replay_with_selection(&digest, &target, crate::SelectionProfile::Development),
+        Err(crate::LockfileError::SelectionInputsMismatch)
+    ));
+    for changed in [
+        crate::SelectionTarget {
+            os: "darwin".into(),
+            ..target.clone()
+        },
+        crate::SelectionTarget {
+            cpu: "aarch64".into(),
+            ..target.clone()
+        },
+        crate::SelectionTarget {
+            libc: None,
+            ..target.clone()
+        },
+    ] {
+        assert!(
+            lock.validate_replay_with_selection(
+                &digest,
+                &changed,
+                crate::SelectionProfile::Production
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        lock.validate_replay_with_selection(
+            &format!("sha256-{}", "b".repeat(64)),
+            &target,
+            crate::SelectionProfile::Production
+        )
+        .is_err()
+    );
+    assert!(lock.validate_replay(&digest).is_err());
+    assert_eq!(lock.selection().unwrap().target, target);
 }
