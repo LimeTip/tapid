@@ -119,6 +119,15 @@ impl PreparedNativeProfile {
             packages.push(package);
         }
         lock.insert_packages(packages)?;
+        // Carry claims to the existing recipe/attestation verifier. They never
+        // replace the independently verified source digest or layout tree here.
+        for encoded in self.sources.keys() {
+            if let NativeSourceEvidence::Verified { package } =
+                &self.selection.packages()[encoded].source_evidence
+            {
+                lock.set_derived_hooks(encoded, package.derived_hooks().to_vec())?;
+            }
+        }
         lock.set_roots(
             self.selection
                 .materialized_declarations(profile)
@@ -936,6 +945,22 @@ mod tests {
         )
         .unwrap();
         locked.set_artifact_url(&url).unwrap();
+        // Structurally valid claims are not authenticated merely by loading the
+        // selection. Preserve them for the lifecycle verifier, while retaining
+        // the independently verified source tree for discovery and layout.
+        let output = tapid_lockfile::DerivedHookOutput::new(
+            "install",
+            &format!("sha256-{}", "b".repeat(64)),
+            &format!("sha256-{}", "c".repeat(64)),
+            &format!("hmac-sha256-{}", "d".repeat(64)),
+        )
+        .unwrap();
+        let mut evidence = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+        evidence.insert_package(locked).unwrap();
+        evidence
+            .set_derived_hooks(&key, vec![output.clone()])
+            .unwrap();
+        let locked = evidence.packages()[&key].clone();
         let mut wire: serde_json::Value =
             serde_json::from_str(&pending.to_json().unwrap()).unwrap();
         wire["packages"][&key]["sourceEvidence"] =
@@ -951,6 +976,16 @@ mod tests {
         })
         .unwrap();
         assert_eq!(replayed.sources.len(), 1);
+        let lifecycle = replayed
+            .lifecycle_sources(&format!("sha256-{}", "a".repeat(64)), full)
+            .unwrap();
+        assert_eq!(lifecycle.packages()[&key].derived_hooks(), &[output]);
+        assert_eq!(
+            lifecycle.packages()[&key].tree_digest(),
+            replayed.sources[&key].digest.to_string()
+        );
+        let layout = replayed.layout(full).unwrap();
+        assert_eq!(layout.trees[&key], replayed.sources[&key].tree);
         assert_eq!(selection.to_json().unwrap(), before);
         drop(replayed);
 

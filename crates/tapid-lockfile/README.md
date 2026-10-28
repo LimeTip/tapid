@@ -68,6 +68,8 @@ exact manifest bindings before archive access; only the enabled closure reaches
 lifecycle discovery and layout activation. These source layouts use default-denied
 lifecycle policy. Replay checks approvals and derived outputs only for materialized
 packages; omitted-only lifecycle approvals do not require their archives or tools.
+Native preparation preserves retained derived-hook claims in its invocation-local
+lifecycle graph without selecting their output trees or authenticating the claims.
 Approvals for retained package names (including stale pins), retained derived
 outputs, workspace activation and selection mutation reject pending integration.
 Fresh profile preparation still rejects nonempty approval policies. This is not
