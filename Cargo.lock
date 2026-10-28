@@ -1631,6 +1631,7 @@ dependencies = [
  "semver",
  "serde_json",
  "tapid-core",
+ "tapid-manifest",
  "tapid-registry-client",
 ]
 

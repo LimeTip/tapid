@@ -13,7 +13,7 @@ pub use lifecycle::{
     DependencyLifecyclePlan, dependency_lifecycle_commands, dependency_lifecycle_hooks,
     dependency_lifecycle_plan,
 };
-pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
+pub use model::{BinTarget, DependencyDeclaration, DependencyKind, PackageBin, PackageManifest};
 pub use workspace::{Workspace, WorkspaceMember};
 
 /// Maximum bytes read from each root or member manifest during workspace discovery.

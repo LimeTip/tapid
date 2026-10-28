@@ -22,6 +22,14 @@ impl DependencyKind {
     }
 }
 
+/// One declaration, retaining overlaps between dependency sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DependencyDeclaration<'a> {
+    pub kind: DependencyKind,
+    pub name: &'a str,
+    pub specification: &'a str,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageManifest {
     pub(crate) name: PackageName,
@@ -210,6 +218,19 @@ impl PackageManifest {
             (DependencyKind::PeerDependencies, &self.peer_dependencies),
         ]
         .into_iter()
+    }
+
+    /// Traverses every declaration in section order without collapsing overlaps.
+    pub fn dependency_declarations(&self) -> impl Iterator<Item = DependencyDeclaration<'_>> {
+        self.dependency_sections().flat_map(|(kind, dependencies)| {
+            dependencies
+                .iter()
+                .map(move |(name, specification)| DependencyDeclaration {
+                    kind,
+                    name,
+                    specification,
+                })
+        })
     }
 
     pub fn dependency_kind(&self, name: &str) -> Option<DependencyKind> {

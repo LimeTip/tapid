@@ -486,7 +486,7 @@ fn inspect_manifest(
             let valid = if member_copied {
                 false
             } else if let Some(member) = workspace.members().iter().find(|m| m.name() == name) {
-                crate::online::workspace_requirement(raw, &member.manifest().version())
+                tapid_resolver::workspace_requirement(raw, &member.manifest().version())
                     .is_ok_and(|r| r.matches(&member.manifest().version()))
             } else if raw.starts_with("workspace:") {
                 false

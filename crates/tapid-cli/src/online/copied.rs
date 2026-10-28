@@ -3,44 +3,7 @@ use super::*;
 use crate::application::outcome::DiagnosticContext;
 use tapid_registry_client::GitDependency;
 
-#[derive(Clone, Debug)]
-pub(crate) enum CopiedDeclaration {
-    File(String),
-    Git(GitDependency),
-}
-
-pub(crate) fn declaration(raw: &str) -> Result<Option<CopiedDeclaration>, String> {
-    if let Some(path) = raw.strip_prefix("file:") {
-        let path = path.strip_prefix("./").unwrap_or(path);
-        if path.is_empty()
-            || path.starts_with('/')
-            || path.contains(['\\', ':', '|', '#'])
-            || path.chars().any(char::is_control)
-            || path
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            || ![".tgz", ".tar.gz", ".tar"]
-                .iter()
-                .any(|extension| path.ends_with(extension))
-        {
-            return Err("file dependency must name a project-relative .tgz, .tar.gz, or .tar regular file; directory links and traversal are unsupported".into());
-        }
-        return Ok(Some(CopiedDeclaration::File(path.into())));
-    }
-    if raw.starts_with("git+") {
-        return GitDependency::parse(raw)
-            .map(CopiedDeclaration::Git)
-            .map(Some);
-    }
-    if raw.contains("://")
-        || raw.starts_with("github:")
-        || raw.starts_with("git:")
-        || raw.starts_with("ssh:")
-    {
-        return Err("unsupported dependency protocol; only git+https repositories and file tarballs are supported".into());
-    }
-    Ok(None)
-}
+pub(crate) use tapid_resolver::{CopiedDeclaration, copied_declaration as declaration};
 
 fn declarations(manifest: &PackageManifest) -> impl Iterator<Item = (&String, &String)> {
     manifest
