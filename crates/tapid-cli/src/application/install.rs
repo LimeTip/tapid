@@ -370,6 +370,7 @@ fn perform_install(
         ));
     }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
+    let captures = online::CapturedSources::default();
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => {
@@ -380,6 +381,7 @@ fn perform_install(
         &project_dir,
         &preflight_manifest,
         &project_dir.join("package.json"),
+        &captures,
     )?;
     online::validate_directory_store(
         &project_dir,
@@ -388,7 +390,7 @@ fn perform_install(
         store.root(),
     )?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated.updated, &manifest_path)?;
+        online::validate_manifest_roots(&project_dir, updated.updated, &manifest_path, &captures)?;
         online::validate_directory_store(
             &project_dir,
             updated.updated,
@@ -401,7 +403,7 @@ fn perform_install(
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate, &manifest_path)?;
+        online::validate_manifest_roots(&project_dir, &candidate, &manifest_path, &captures)?;
         online::validate_directory_store(&project_dir, &candidate, &manifest_path, store.root())?;
     }
     let lock_path = project_dir.join("tapid.lock");
@@ -420,6 +422,7 @@ fn perform_install(
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
     let activation_lock = session.lock.as_ref().expect("project lock acquired");
     if activation_lock.recovered {
+        captures.clear();
         session
             .outcome
             .warnings
@@ -556,6 +559,7 @@ fn perform_install(
                 lock,
                 &registry_config,
                 &lifecycle_policy,
+                &captures,
             )? && replayable
                 && !overrides.enabled()
         } else {
@@ -606,6 +610,7 @@ fn perform_install(
                     None
                 },
                 update,
+                &captures,
                 &mut report_replay_progress,
             )?
         };
@@ -785,7 +790,15 @@ fn perform_install(
         })?;
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-    let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+    let discovered = tapid_manifest::Workspace::discover_typed(&project_dir)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+    let workspace = online::workspace_materialization_with_captures(
+        &project_dir,
+        &registry_config,
+        None,
+        &discovered,
+        &captures,
+    )?;
     if !online::workspace_matches_lock(&workspace, &lock) {
         return Err(
             "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
@@ -838,7 +851,7 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-    online::validate_locked_files(&project_dir, &lock)?;
+    online::validate_locked_files_with_captures(&project_dir, &lock, &captures)?;
     if !online::validate_locked_routes(&lock, &registry_config)? {
         return Err(OperationalError::new(
             ErrorKind::Lockfile,
@@ -868,6 +881,7 @@ fn perform_install(
             &registry_config,
             registry_fixture,
             &project_dir,
+            &captures,
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         )?;
         let mut lifecycle_snapshots = Vec::new();
@@ -936,6 +950,7 @@ fn perform_install(
             &registry_config,
             registry_fixture,
             &project_dir,
+            &captures,
         )?
     {
         session.mutated = true;

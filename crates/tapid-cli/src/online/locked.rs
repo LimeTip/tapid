@@ -51,6 +51,7 @@ pub(crate) fn hydrate_locked(
     config: &crate::registry::RegistryConfig,
     fixture_path: Option<&Path>,
     project: &Path,
+    captures: &CapturedSources,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
     let mut transports = BTreeMap::new();
     let allowed_origins = config.configured_origins();
@@ -58,7 +59,7 @@ pub(crate) fn hydrate_locked(
     let mut fixture_packages = None;
     hydrate_with_fetch(lock, store, |key, url| {
         if let Some(source) = key.source.copied() {
-            return copied::fetch_pinned(project, source, fixture_path);
+            return copied::fetch_pinned(project, source, fixture_path, captures);
         }
         let registry = key.source.registry().ok_or("expected registry identity")?;
         if let Some(path) = fixture_path {
@@ -443,6 +444,7 @@ pub(crate) struct PreparedLockedInstall {
     pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_locked_install(
     lock: &Lockfile,
     manifest: &PackageManifest,
@@ -450,6 +452,7 @@ pub(crate) fn prepare_locked_install(
     registry_config: &crate::registry::RegistryConfig,
     registry_fixture: Option<&Path>,
     project: &Path,
+    captures: &CapturedSources,
     report_progress: impl FnMut(usize, usize),
 ) -> LockedInstallOutput {
     store.cleanup_stale_replay_snapshots().map_err(|error| {
@@ -486,7 +489,7 @@ pub(crate) fn prepare_locked_install(
             let copied_bytes = key
                 .source
                 .copied()
-                .map(|source| copied::fetch_pinned(project, source, registry_fixture))
+                .map(|source| copied::fetch_pinned(project, source, registry_fixture, captures))
                 .transpose()?;
             let bytes = if let Some(bytes) = copied_bytes {
                 bytes
@@ -655,6 +658,7 @@ mod ci_tests {
                 &crate::registry::RegistryConfig::default(),
                 None,
                 store.root(),
+                &CapturedSources::default(),
                 |_, _| {},
             )
             .unwrap();
@@ -713,6 +717,7 @@ mod ci_tests {
                     &crate::registry::RegistryConfig::default(),
                     None,
                     store.root(),
+                    &CapturedSources::default(),
                     |_, _| {}
                 )
                 .is_err()

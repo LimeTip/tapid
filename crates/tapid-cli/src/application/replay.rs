@@ -189,9 +189,19 @@ pub(super) fn can_replay_online(
     lock: &Lockfile,
     config: &crate::registry::RegistryConfig,
     policy: &tapid_runner::DependencyLifecyclePolicy,
+    captures: &online::CapturedSources,
 ) -> Result<bool, OperationalError> {
     let root_digest = online::root_digest(project)?;
-    let workspace = online::workspace_materialization(project, config)?;
+    let discovered = tapid_manifest::Workspace::discover_typed(project).map_err(|error| {
+        OperationalError::from_source(crate::application::outcome::ErrorKind::InvalidData, error)
+    })?;
+    let workspace = online::workspace_materialization_with_captures(
+        project,
+        config,
+        None,
+        &discovered,
+        captures,
+    )?;
     can_replay_inspected(project, lock, config, policy, &root_digest, &workspace)
 }
 
@@ -207,7 +217,7 @@ pub(super) fn can_replay_inspected(
 
     let digest_matches = lock.root_manifest_digest() == root_digest;
     if digest_matches {
-        online::validate_locked_files(project, lock)?;
+        online::validate_locked_files_with_captures(project, lock, &workspace.captures)?;
     }
     Ok(routes_match
         && policy.approvals().is_empty()

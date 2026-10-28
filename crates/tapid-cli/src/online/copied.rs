@@ -3,6 +3,46 @@ use super::*;
 use crate::application::outcome::DiagnosticContext;
 use tapid_registry_client::GitDependency;
 
+/// Captures belong to one command, never to the persistent verified cache.
+/// Origin is retained even when two captures contain identical bytes.
+type CapturedArtifacts = BTreeMap<(PathBuf, String), (PackageSource, std::sync::Arc<Vec<u8>>)>;
+
+#[derive(Clone, Default)]
+pub(crate) struct CapturedSources(std::rc::Rc<std::cell::RefCell<CapturedArtifacts>>);
+
+impl CapturedSources {
+    pub(super) fn capture_manifest(
+        &self,
+        project: &Path,
+        manifest: &PackageManifest,
+    ) -> Result<(), String> {
+        for (name, raw) in declarations(manifest) {
+            if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
+                self.artifact(project, &path)
+                    .map_err(|reason| format!("dependency '{name}': {reason}"))?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+    fn artifact(
+        &self,
+        project: &Path,
+        relative: &str,
+    ) -> Result<(PackageSource, std::sync::Arc<Vec<u8>>), String> {
+        let key = (project.to_owned(), relative.to_owned());
+        if let Some(artifact) = self.0.borrow().get(&key) {
+            return Ok(artifact.clone());
+        }
+        let (source, bytes) = local_artifact(project, relative)?;
+        let artifact = (source, std::sync::Arc::new(bytes));
+        self.0.borrow_mut().insert(key, artifact.clone());
+        Ok(artifact)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum CopiedDeclaration {
     File(String),
@@ -128,8 +168,6 @@ pub(super) fn validate_declarations(
             })?;
             identity = match parsed {
                 CopiedDeclaration::File(path) => {
-                    let _ = local_artifact(project, &path)
-                        .map_err(|reason| format!("dependency '{name}': {reason}"))?;
                     format!("file:{path}")
                 }
                 CopiedDeclaration::Git(spec) => {
@@ -204,6 +242,17 @@ pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, Stri
 }
 
 fn directory_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    if relative.split('/').any(|part| {
+        ["node_modules", ".git", ".tapid"].iter().any(|managed| {
+            if cfg!(windows) {
+                part.eq_ignore_ascii_case(managed)
+            } else {
+                part == *managed
+            }
+        })
+    }) {
+        return Err("directory dependency is inside a managed tree".into());
+    }
     tapid_archive::capture_directory(
         project,
         relative,
@@ -329,7 +378,11 @@ pub(super) fn archive_format(source: &PackageSource, bytes: &[u8]) -> ArchiveFor
     }
 }
 
-fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, OperationalError> {
+fn record(
+    source: PackageSource,
+    bytes: impl Into<std::sync::Arc<Vec<u8>>>,
+) -> Result<PackageRecord, OperationalError> {
+    let bytes = bytes.into();
     if source.artifact_digest() != Some(digest(&bytes).as_str()) {
         return Err(
             OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
@@ -407,10 +460,11 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
             libc: platform_list("libc")?,
         },
         fixture: false,
-        copied_archive: Some(std::sync::Arc::new(bytes)),
+        copied_archive: Some(bytes),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_roots(
     project: &Path,
     manifest: &PackageManifest,
@@ -419,6 +473,7 @@ pub(super) fn prepare_roots(
     using_fixture: bool,
     update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
     member: Option<(&str, &Path)>,
+    captures: &CapturedSources,
 ) -> Result<Vec<(Dependency, PackageRecord)>, OperationalError> {
     let manifest = normalized_manifest(project, project, manifest)?;
     let current_digest = root_digest(project)?;
@@ -468,7 +523,7 @@ pub(super) fn prepare_roots(
             .and_then(|key| key.source.package_source());
         let package = match spec {
             CopiedDeclaration::File(path) => {
-                let (source, bytes) = local_artifact(project, &path)?;
+                let (source, bytes) = captures.artifact(project, &path)?;
                 if pinned.as_ref().is_some_and(|pin| pin != &source) {
                     return Err(OperationalError::new(
                         ErrorKind::Integrity,
@@ -585,16 +640,20 @@ pub(crate) fn validate_locked_files(
     project: &Path,
     lock: &Lockfile,
 ) -> Result<(), OperationalError> {
+    validate_locked_files_with_captures(project, lock, &CapturedSources::default())
+}
+
+pub(crate) fn validate_locked_files_with_captures(
+    project: &Path,
+    lock: &Lockfile,
+    captures: &CapturedSources,
+) -> Result<(), OperationalError> {
     for (key, _) in lock.packages_typed()? {
         if let Some(source) = key.source.copied()
             && let Some((path, expected)) = source.file_parts().or_else(|| source.directory_parts())
         {
-            let bytes = if source.directory_parts().is_some() {
-                directory_bytes(project, path)?
-            } else {
-                file_bytes(project, path)?
-            };
-            if digest(&bytes).as_str() != expected {
+            let (actual_source, bytes) = captures.artifact(project, path)?;
+            if &actual_source != source || digest(&bytes).as_str() != expected {
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     format!("file dependency '{}' digest mismatch", key.name),
@@ -616,11 +675,17 @@ pub(super) fn fetch_pinned(
     project: &Path,
     source: &PackageSource,
     fixture_path: Option<&Path>,
+    captures: &CapturedSources,
 ) -> Result<Vec<u8>, OperationalError> {
-    let bytes = if let Some((path, _)) = source.directory_parts() {
-        directory_bytes(project, path)?
-    } else if let Some((path, _)) = source.file_parts() {
-        file_bytes(project, path)?
+    let bytes = if let Some((path, _)) = source.directory_parts().or_else(|| source.file_parts()) {
+        let (actual_source, bytes) = captures.artifact(project, path)?;
+        if &actual_source != source {
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                "copied source identity changed",
+            ));
+        }
+        bytes.as_ref().clone()
     } else if let Some((repository, commit, _)) = source.git_parts() {
         if let Some(path) = fixture_path {
             let fixture = fixture(path)?;

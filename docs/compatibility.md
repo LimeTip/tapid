@@ -16,12 +16,12 @@ This matrix distinguishes current implemented behavior from accepted target cont
 | Resolution | Deterministic exact-identity graph selection; simple npm root overrides replace matching transitive regular or optional dependency ranges; range satisfaction is differentially tested against pinned `node-semver` 7.8.5 for exact/partial versions, `x`/`*` wildcards, comparators and intersections, caret/tilde including zero-major bounds, hyphen ranges, OR ranges, prerelease eligibility, and build metadata; distinct parents may select different versions of one transitive package; compatible npm optional dependencies are selected using bounded `os`, `cpu`, and `libc` metadata; registry peer requirements are checked against compatible direct project roots and peer provider versions are retained in peer contexts. Workspace packages have distinct identities, resolve locally without registry fallback, and member registry dependencies are recursively resolved and recorded as member edges. Direct declarations that map one local install name to conflicting registry or workspace identities are rejected before mutation; registry origin remains part of package identity | Direct requirements from multiple workspace members share resolver constraints, so incompatible ranges for the same registry/package fail instead of producing member-specific versions. Glob and `workspace:` compatibility are bounded. Nested/package-specific override selectors and overrides of direct dependencies unless the range is identical are unsupported. Other `node-semver` edge cases beyond the pinned compatibility contract and full npm CLI/package-specifier behavior are not guaranteed; nested/ancestor peer-provider lookup, multiple peer contexts for the same exact package instance, automatic peer placement, and all optional-dependency failure semantics remain incomplete; stable-range selection does not select prerelease candidates. `outdated` recognizes ordinary unaliased workspace dependency specs; aliased or prefixed workspace declarations are not fully reported yet |
 | Online install | Replays matching locks without metadata requests; changed manifests prefer compatible locked selections, and `update` explicitly refreshes the graph. Resolves necessary npm metadata, downloads and verifies archives, writes `tapid.lock`, stages verified trees for rollback, and atomically activates `node_modules`; store publication commits only after activation succeeds; durable project/store journals recover pre-commit crashes by rolling back and post-commit crashes by finishing cleanup; schema 7 records separate workspace package identity, registry integrity provenance, and peer contexts. Root workspace installs resolve member registry dependencies recursively, persist member edges, validate peers against local or direct-root providers, and stage local links for activation | Dependency lifecycle scripts require exact checked-in approvals and Linux ManagedTree; `add`, `remove`, `update`, read-only `outdated` with direct version/range impact and explicit `--offline` unknown metadata, and atomic managed-tree `prune` are available. Pre-commit resolution, integrity, archive, peer, workspace, or materialization failures restore prior project/store state when rollback succeeds; typed outcomes distinguish failed recovery and committed changes with cleanup pending. Windows junction behavior and broad cross-platform workspace-link verification remain unverified. The compatibility escape hatch records locally computed integrity and offline/frozen replay rejects it. Static path/symlink escapes are rejected and detected failures roll back, but pathname-based lifecycle recovery can race a concurrent local path substitution; containment is not race-free under concurrent filesystem mutation |
 | Locked CI install | `tapid ci` requires a matching root manifest and workspace graph, preserves the manifest and lockfile bytes, and installs exact locked versions and edges. Missing trees are downloaded from locked HTTPS URLs and verified against locked integrity and tree digests. Store publication and managed activation share the lifecycle transaction; dependency scripts do not run | Uses `tapid.lock`, not npm lockfiles. Download URLs are required for every registry package regardless of cache contents or `--offline`; incomplete locks require deliberate online regeneration. Explicit local registry fixtures can supply artifacts without locked URLs. `--offline` requires all verified trees. Unmanaged `node_modules` is rejected; full npm dependency semantics remain unsupported |
-| Offline and frozen install | Requires a lockfile, matching root manifest digest, verified registry store trees, and valid `.tapid-tree` markers; schema 7 persists exact registry roots, workspace source identities, and integrity provenance; replay rebuilds local links and reconstructs member registry edges and peer providers from current contained manifests, validates them against the lock, and does not resolve metadata. Frozen can hydrate missing trees from pinned registry URLs or copied sources after archive and tree-digest verification; offline forbids downloads | Schema 6 remains readable for registry-only locks; schema 5 requires online regeneration because it lacks the schema 6 provenance contract. Registry cold hydration requires pinned URLs and registry-declared integrity provenance. Copied sources use their schema 10 archive pins. Corrupt local trees and changed registry routes or recorded target contexts fail closed. This is not complete npm frozen-lockfile policy |
+| Offline and frozen install | Requires a lockfile, matching root manifest digest, verified registry store trees, and valid `.tapid-tree` markers; schema 7 persists exact registry roots, workspace source identities, and integrity provenance; replay rebuilds local links and reconstructs member registry edges and peer providers from current contained manifests, validates them against the lock, and does not resolve metadata. Frozen can hydrate missing trees from pinned registry URLs or copied sources after archive and tree-digest verification; offline forbids downloads | Schema 6 remains readable for registry-only locks; schema 5 requires online regeneration because it lacks the schema 6 provenance contract. Registry cold hydration requires pinned URLs and registry-declared integrity provenance. Copied archives use schema 10 pins; directory snapshots and member copied bindings require schema 11. Corrupt local trees and changed registry routes or recorded target contexts fail closed. This is not complete npm frozen-lockfile policy |
 | `.bin` | Package `bin` metadata is planned and materialized from verified regular files; Unix symlinks and Windows `.cmd` plus PowerShell wrappers | Other platforms are unsupported; collisions, unsafe targets, and missing targets fail closed |
 | Dependency lifecycle scripts | Default deny and skipped-hook warnings; exact policy approvals can build private derived trees on Linux ManagedTree, with source identities preserved in schema 9 | Preparation hooks, cyclic approved graphs, live workspace inputs, and macOS/Windows execution are unsupported. Offline/frozen replay requires exact verified prerequisites and never executes hooks. See [policy and limits](dependency-lifecycle.md) |
 | Root scripts | Default-on fail-closed CLI, explicit `assurance = "restricted"`, and legacy-safe omitted assurance as ManagedTree are implemented. Native macOS Restricted uses sampled native controls; Linux Restricted uses Landlock, `no_new_privs`, seccomp, and explicit environment/descriptor setup. Local `.bin` commands precede runtime tools, while a byte-verified private Node snapshot on a distinct inode preserves runtime selection; runtimes under project write authority are rejected. Human and JSON receipts include authority and completion evidence. Post-separator arguments remain opaque | Linux ManagedTree and all four resource ceilings require delegated cgroup v2 and private namespaces. macOS ManagedTree, narrower network scopes, and `--no-sandbox` remain unsupported. Targeted Ubuntu 24.04.5 x86_64 local-VM consumer and runner tests pass on code commit `3dd67f75c8d6f4187f8f1145f4a615939472e1c4`; the broader common Restricted probe matrix remains incomplete. Scripts can use all granted authority; host writes or races after final validation remain outside Restricted containment |
 | Archive | Bounded hostile-path, duplicate, case-collision, symlink, and special-file validation; materialization accepts a direct package root or exactly one named top-level npm wrapper containing `package.json` | Missing or ambiguous package roots fail closed; malware scanning and executable analysis are outside the crate |
-| Store and lockfile | SHA-256 content-addressed staging, executable-aware tree identity, exact tree replay, advisory replay leases, canonical lockfile schema 7, schema 9 with approved derived-hook outputs, or schema 10 with immutable copied sources, with exact registry roots, separate root-relative workspace identities, registry-integrity provenance, and peer-context identities; controlled schema 4 and 6 read compatibility, rollback-capable staged tree publication under cross-process locking with durable lifecycle coordination, and recoverable atomic managed activation | Schema 5 requires online regeneration; schemas earlier than 4 are rejected; schema 6 remains registry-only, workspace members are not represented as verified registry artifacts, and no remote cache, garbage collection, or full npm lockfile graph exists |
+| Store and lockfile | SHA-256 content-addressed staging, executable-aware tree identity, exact tree replay, advisory replay leases, canonical lockfile schema 7, schema 9 with approved derived-hook outputs, schema 10 with immutable copied sources, or schema 11 with directory snapshots and member copied bindings, with exact registry roots, separate root-relative workspace identities, registry-integrity provenance, and peer-context identities; controlled schema 4 and 6 read compatibility, rollback-capable staged tree publication under cross-process locking with durable lifecycle coordination, and recoverable atomic managed activation | Schema 5 requires online regeneration; schemas earlier than 4 are rejected; schema 6 remains registry-only, workspace members are not represented as verified registry artifacts, and no remote cache, garbage collection, or full npm lockfile graph exists |
 | Platforms | Experimental macOS Restricted uses native Seatbelt APIs and path bindings; Linux Restricted uses Landlock and seccomp; Windows implements AppContainer/Job Object execution, existing declared-target writes and graceful Ctrl+C. Native controls and exact integrated-revision acceptance gate claims | Windows missing/unsafe write targets and network-enabled policies remain unsupported and fail closed; full Windows support and the broader common Restricted matrix remain pending. Targeted Ubuntu local-VM evidence is recorded at `3dd67f75c8d6f4187f8f1145f4a615939472e1c4`; Windows pre-integration native and hosted results are documented separately. New merged-revision acceptance remains required. See platform-validation.md |
 
 ## Persisted registry identity compatibility
@@ -205,7 +205,7 @@ requirements remain unsupported.
 
 ## Copied file tarballs and pinned Git dependencies
 
-Project-root dependency, development dependency, and optional dependency maps
+Root and workspace-member dependency, development dependency, and optional dependency maps
 accept `file:vendor/tool.tgz`, `.tar.gz`, or `.tar` archives and
 `git+https://example.test/tool.git#main` repositories. `tapid add` accepts
 `local@file:vendor/tool.tgz` and `local@git+https://example.test/tool.git#main`.
@@ -213,10 +213,56 @@ The local install name may differ from the archive's actual package name.
 Package names, versions, registry dependencies, peers, platform constraints,
 and bins come from the copied archive's `package.json`.
 
-File archives must be regular files inside the project root. Absolute paths,
-parent traversal, symlink components, and directory links are rejected.
-The lock pins the root-relative path and archive SHA-256. Every replay checks
+File archives must be regular files inside the explicit project root. Paths resolve
+from the declaring manifest; member-relative `..` components are allowed only
+while remaining contained. Absolute/drive/UNC paths, backslashes, ambiguous
+separators, controls, and symlink/reparse components are rejected.
+The lock pins the project-relative path and archive SHA-256. Every replay checks
 the current file against that digest, including warm offline replay.
+
+`file:vendor/tool` also accepts a contained directory snapshot. The actual target
+kind determines capture, so a directory named `tool.tgz` remains a directory.
+Schema 11 records `directory-v1:<project-relative-path>#<artifact-sha256>` and
+member copied bindings. Equal bytes at different paths retain distinct origins;
+equal-name/version registry and workspace packages remain separate instances.
+
+| Workflow | Local edits | Replay identity |
+| --- | --- | --- |
+| Workspace links | Immediately visible | Existing mutable workspace identity |
+| Copied tarballs | Accept a replacement archive explicitly | Exact archive bytes |
+| Directory snapshots | Accept changed content with `update` | Captured bytes, paths, entry kinds and normalized executable modes |
+
+Directory capture includes dotfiles, empty directories and build outputs. It
+requires a regular root `package.json` of at most 1 MiB. Real `.git` and
+`node_modules` directories are excluded at every depth; links with those names
+fail. Ignore files, npm `files`, and hooks do not affect capture. Sorted portable
+UTF-8 paths, zero ownership/timestamps, directories at 0755, and files at 0644 or
+0755 produce deterministic uncompressed GNU tar bytes. Windows files capture as
+non-executable; bin shims retain their normal behavior. Timestamp-only changes
+do not change the pin. Unix executable-bit differences can change captures
+between platforms.
+
+Capture rejects links/reparse points, multiply linked files, special files,
+reserved verification metadata, case-colliding/unsafe names, and managed
+output/store/staging trees. A source cannot contain its declaring root/member.
+Distinct directory roots cannot overlap, including unselected declarations
+during targeted updates; repeated declarations of one root share one capture
+per operation. Existing limits apply: 100,000 entries, 4,096-byte paths, 512 MiB
+per file, 2 GiB total payload, and 512 MiB final archive. Capture uses held
+filesystem objects and aborts detectable replacement or changes. Stop writers
+for a coherent snapshot: same-length concurrent writes can evade checks or
+produce a mixed view. Captured bytes remain exactly pinned; capture is not an
+atomic filesystem snapshot. Windows capture requires local drive paths.
+
+Matching install, frozen install, CI and offline replay inspect local directory
+content even with a warm store. Changed, missing, or substituted source kinds
+fail. Cold online hydration regenerates only the accepted snapshot. Frozen
+replay preserves lock bytes. `update local [--workspace NAME]` accepts changed
+selected content even at the same version, preserving unselected pins; changed
+unselected sources fail. `update --offline` can accept local changes only using
+available locked metadata and verified artifacts, without HTTP/Git fallback.
+Offline Git updates retain accepted commits. Root/member manifests, lock,
+layouts and store publication use the existing coordinated recovery transaction.
 
 Git references may be branches, tags, or full commit hashes. Tapid peels the
 reference to a full commit and archives that exact commit without a checkout.
@@ -248,7 +294,11 @@ without claiming registry-declared authentication. Older clients reject schema 1
 `update --latest` preserves copied declarations; `outdated` reports the locked
 version without looking up a registry replacement.
 
-Copied declarations in workspace members or published package dependency maps,
-live directory dependencies, Git preparation hooks, and approved copied-package
+Copied declarations in published package dependency maps, copied peer specifiers,
+arbitrary live directory dependencies, external paths, Git preparation hooks, and approved copied-package
 lifecycle execution are outside this contract. Copied sources do not fall back
-to registry resolution. See [ADR 0009](adr/0009-immutable-copied-dependency-sources.md).
+to registry resolution. Ordinary semver dependencies, aliases, peers and optional/platform
+constraints retain existing resolver limits; unsupported graphs fail before
+publication. No prepare/build/install hooks run implicitly, and linking grants no
+additional script filesystem authority. See [ADR 0009](adr/0009-immutable-copied-dependency-sources.md)
+and [directory snapshot decisions](adr/0012-contained-directory-snapshots.md).

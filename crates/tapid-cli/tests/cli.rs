@@ -8901,6 +8901,7 @@ fn copied_directory_member_update_recovers_coordinated_activation() {
     for (variable, point) in [
         ("TAPID_TEST_FAIL_ACTIVATION", "1"),
         ("TAPID_TEST_CRASH_POINT", "store_published"),
+        ("TAPID_TEST_CRASH_POINT", "lockfile_replaced"),
         ("TAPID_TEST_CRASH_POINT", "workspace_member_activated"),
     ] {
         let project = tapid_test_support::TempProject::new("member-directory-recovery").unwrap();
@@ -8938,6 +8939,7 @@ fn copied_directory_member_update_recovers_coordinated_activation() {
         let result = run_with_env(
             dir,
             &[
+                "--json",
                 "update",
                 "local",
                 "--workspace",
@@ -8949,6 +8951,10 @@ fn copied_directory_member_update_recovers_coordinated_activation() {
             point,
         );
         assert!(!result.status.success(), "{point}");
+        if variable == "TAPID_TEST_FAIL_ACTIVATION" {
+            let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(json["changes"]["state"], "rolled_back", "{json}");
+        }
         if variable == "TAPID_TEST_CRASH_POINT" {
             for _ in 0..2 {
                 let recovered = run_with_env(
@@ -9177,6 +9183,7 @@ fn copied_directory_update_rolls_back_publication_and_recovers_interruption() {
     for (variable, point) in [
         ("TAPID_TEST_FAIL_ACTIVATION", "1"),
         ("TAPID_TEST_CRASH_POINT", "store_published"),
+        ("TAPID_TEST_CRASH_POINT", "lockfile_replaced"),
         ("TAPID_TEST_CRASH_POINT", "activation_complete"),
     ] {
         let project = tapid_test_support::TempProject::new("directory-rollback").unwrap();
@@ -9210,11 +9217,21 @@ fn copied_directory_update_rolls_back_publication_and_recovers_interruption() {
             .unwrap();
         let failed = run_with_env(
             dir,
-            &["update", "local", "--store-dir", store.to_str().unwrap()],
+            &[
+                "--json",
+                "update",
+                "local",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
             variable,
             point,
         );
         assert!(!failed.status.success(), "{point}");
+        if variable == "TAPID_TEST_FAIL_ACTIVATION" {
+            let json: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+            assert_eq!(json["changes"]["state"], "rolled_back", "{json}");
+        }
         if variable == "TAPID_TEST_CRASH_POINT" {
             for _ in 0..2 {
                 let recovery = run_with_env(
@@ -10020,3 +10037,293 @@ fn sandbox_json_rejects_install_before_privileged_management() {
 }
 #[path = "cli_cases/preview.rs"]
 mod preview_tests;
+
+#[test]
+fn copied_directory_repeated_origin_aliases_share_selection_across_members() {
+    let project = tapid_test_support::TempProject::new("directory-repeated-aliases").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["members/*"],"dependencies":{"first":"file:vendor/tool","second":"file:./vendor/tool","registry":"npm:h3@1.0.0"}}"#).unwrap();
+    project.write("members/member/package.json", br#"{"name":"member","version":"1.0.0","devDependencies":{"third":"file:../../vendor/tool"}}"#).unwrap();
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"h3","version":"1.0.0","main":"index.js"}"#,
+        )
+        .unwrap();
+    project
+        .write("vendor/tool/index.js", b"module.exports = 345;")
+        .unwrap();
+    let fixture = project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let dir = project.path();
+    let store = dir.join("store");
+    for flags in [vec!["install"], vec!["install", "--offline", "--frozen"]] {
+        let mut args = flags;
+        args.extend([
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let result = run(dir, &args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let lock =
+            Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+        assert_eq!(lock.packages().len(), 2);
+        assert_eq!(
+            lock.root_bindings()["first"],
+            lock.root_bindings()["second"]
+        );
+        assert_ne!(
+            lock.root_bindings()["first"],
+            lock.root_bindings()["registry"]
+        );
+        let member = lock.workspace_packages().values().next().unwrap();
+        assert_eq!(
+            member.dependencies()["third"],
+            lock.root_bindings()["first"]
+        );
+        let probe = node_assertion_output(Command::new("node").args(["-e", "if(require('first') !== 345 || require('second') !== 345 || require('member/node_modules/third') !== 345) process.exit(1);"]).current_dir(dir), true, "directory-repeated-aliases").unwrap();
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+    }
+    let why = run(dir, &["--json", "why", "h3"]);
+    assert!(why.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&why.stdout).unwrap();
+    let paths = json["data"]["paths"].as_array().unwrap();
+    assert!(paths.iter().any(|path| {
+        path["steps"][0]["sourceKind"] == "copied"
+            && path["steps"][0]["key"]
+                .as_str()
+                .unwrap()
+                .starts_with("directory-v1:vendor/tool#")
+    }));
+    let text = run(dir, &["why", "h3"]);
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("directory-v1:vendor/tool#"));
+    let status = run(dir, &["--json", "status"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(
+        json["data"]["capabilities"]["lock_schemas"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(11))
+    );
+    assert!(
+        json["data"]["capabilities"]["spec_forms"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("file_directory_snapshot"))
+    );
+    fs::remove_dir_all(dir.join("vendor/tool")).unwrap();
+    let status = run(dir, &["--json", "status"]);
+    assert!(
+        status.status.success(),
+        "status must retain its metadata-only contract: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+#[test]
+fn copied_directory_dependency_graph_preserves_aliases_peers_and_optional_edges() {
+    let project = tapid_test_support::TempProject::new("directory-package-graph").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"local":"file:vendor/tool","h3":"1.0.0"}}"#).unwrap();
+    project.write("vendor/tool/package.json", br#"{"name":"tool","version":"1.0.0","main":"index.js","dependencies":{"alias":"npm:h3@1.0.0"},"peerDependencies":{"h3":"^1"},"optionalDependencies":{"optional":"npm:h3@1.0.0"}}"#).unwrap();
+    project
+        .write(
+            "vendor/tool/index.js",
+            b"module.exports = [require('alias'), require('h3'), require('optional')];",
+        )
+        .unwrap();
+    let fixture = project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let dir = project.path();
+    let store = dir.join("store");
+    let installed = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let before = fs::read(dir.join("tapid.lock")).unwrap();
+    for flags in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["ci", "--offline"],
+    ] {
+        let mut args = flags;
+        args.extend([
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ]);
+        let replay = run(dir, &args);
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), before);
+        let node = node_assertion_output(Command::new("node").args(["-e", "const v = require('local'); if(v.length !== 3 || v.some(x => JSON.stringify(x) !== JSON.stringify(require('h3')))) process.exit(1);"]).current_dir(dir), true, "directory-package-graph").unwrap();
+        assert!(
+            node.status.success(),
+            "{}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+    }
+}
+
+#[test]
+fn copied_directory_unsupported_graphs_report_unchanged_state() {
+    for extra in [
+        r#""os":["tapid-unsupported-platform"]"#,
+        r#""dependencies":{"nested":"file:../other"}"#,
+        r#""peerDependencies":{"nested":"file:../other"}"#,
+        r#""bin":{"unsafe":"../outside.js"}"#,
+        r#""bin":{"missing":"missing.js"}"#,
+    ] {
+        let project = tapid_test_support::TempProject::new("directory-invalid-graph").unwrap();
+        let root =
+            br#"{"name":"app","version":"1.0.0","dependencies":{"local":"file:vendor/tool"}}"#;
+        project.write("package.json", root).unwrap();
+        project
+            .write(
+                "vendor/tool/package.json",
+                format!(r#"{{"name":"tool","version":"1.0.0",{extra}}}"#).as_bytes(),
+            )
+            .unwrap();
+        let dir = project.path();
+        let fixture = project
+            .write("registry.json", br#"{"packages":[]}"#)
+            .unwrap();
+        let store = dir.join("store");
+        let result = run(
+            dir,
+            &[
+                "--json",
+                "install",
+                "--registry-fixture",
+                fixture.to_str().unwrap(),
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
+        );
+        assert!(!result.status.success(), "{extra}");
+        let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(json["changes"]["state"], "unchanged", "{json}");
+        assert_eq!(fs::read(dir.join("package.json")).unwrap(), root);
+        assert!(!dir.join("tapid.lock").exists());
+        assert!(!dir.join("node_modules").exists());
+        if store.join("trees").exists() {
+            assert_eq!(fs::read_dir(store.join("trees")).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
+fn copied_directory_replay_rejects_equal_bytes_after_source_kind_substitution() {
+    let project = tapid_test_support::TempProject::new("directory-kind-substitution").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"local":"file:vendor/tool.tar"}}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "vendor/tool.tar/package.json",
+            br#"{"name":"tool","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project
+        .write("vendor/tool.tar/index.js", b"module.exports = 345;")
+        .unwrap();
+    let dir = project.path();
+    let archive = tapid_archive::capture_directory(
+        dir,
+        "vendor/tool.tar",
+        &["node_modules", ".git", ".tapid"],
+        tapid_archive::ArchiveLimits::default(),
+    )
+    .unwrap();
+    let store = dir.join("store");
+    let initial = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let lock = fs::read(dir.join("tapid.lock")).unwrap();
+    fs::remove_dir_all(dir.join("vendor/tool.tar")).unwrap();
+    project.write("vendor/tool.tar", &archive).unwrap();
+    let replay = run(
+        dir,
+        &[
+            "--json",
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !replay.status.success(),
+        "a directory pin must not become a tarball pin"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(json["changes"]["state"], "unchanged");
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(dir.join("node_modules/local/index.js")).unwrap(),
+        b"module.exports = 345;"
+    );
+}
+
+#[test]
+fn copied_directory_sources_cannot_reside_in_nested_managed_outputs() {
+    let project = tapid_test_support::TempProject::new("directory-nested-managed").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"local":"file:vendor/node_modules/tool"}}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "vendor/node_modules/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let dir = project.path();
+    let store = dir.join("store");
+    let result = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        !result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("managed"));
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+}

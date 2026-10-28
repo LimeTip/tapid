@@ -3,8 +3,9 @@ mod copied;
 mod graph;
 mod preview;
 pub(crate) use copied::{
-    copied_root_names, declaration as copied_declaration, validate_copied_root_binding,
-    validate_directory_store, validate_locked_files,
+    CapturedSources, copied_root_names, declaration as copied_declaration,
+    validate_copied_root_binding, validate_directory_store, validate_locked_files,
+    validate_locked_files_with_captures,
 };
 pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview_graph};
 mod locked;
@@ -377,6 +378,7 @@ pub(crate) struct WorkspacePeerDependency {
 }
 
 pub(crate) struct WorkspaceMaterialization {
+    pub captures: CapturedSources,
     pub links: WorkspaceLinkPlan,
     pub locked: Vec<LockedWorkspacePackage>,
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
@@ -418,6 +420,22 @@ pub(crate) fn workspace_materialization_from_discovered(
     registry_config: &crate::registry::RegistryConfig,
     replacement: Option<(&Path, &PackageManifest)>,
     workspace: &Workspace,
+) -> Result<WorkspaceMaterialization, OperationalError> {
+    workspace_materialization_with_captures(
+        project,
+        registry_config,
+        replacement,
+        workspace,
+        &CapturedSources::default(),
+    )
+}
+
+pub(crate) fn workspace_materialization_with_captures(
+    project: &Path,
+    registry_config: &crate::registry::RegistryConfig,
+    replacement: Option<(&Path, &PackageManifest)>,
+    workspace: &Workspace,
+    captures: &CapturedSources,
 ) -> Result<WorkspaceMaterialization, OperationalError> {
     let root = workspace
         .root_path()
@@ -660,6 +678,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     )?;
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
+        captures: captures.clone(),
         links,
         locked,
         members,
@@ -852,6 +871,7 @@ pub(crate) fn validate_manifest_roots(
     project: &Path,
     manifest: &PackageManifest,
     manifest_path: &Path,
+    captures: &CapturedSources,
 ) -> Result<(), OperationalError> {
     let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
     let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
@@ -864,11 +884,12 @@ pub(crate) fn validate_manifest_roots(
     copied::validate_declarations(project, &normalized).map_err(invalid)?;
     let discovered = Workspace::discover_typed(project)
         .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-    let workspace = workspace_materialization_from_discovered(
+    let workspace = workspace_materialization_with_captures(
         project,
         &registry_config,
         Some((manifest_path, manifest)),
         &discovered,
+        captures,
     )
     .map_err(|mut error| {
         // Preserve the request-validation category while retaining typed evidence.
@@ -880,6 +901,14 @@ pub(crate) fn validate_manifest_roots(
     } else {
         discovered.root()
     };
+    captures
+        .capture_manifest(project, &normalized)
+        .map_err(invalid)?;
+    for member in &workspace.copied_members {
+        captures
+            .capture_manifest(project, &member.manifest)
+            .map_err(invalid)?;
+    }
     workspace_root_resolution(root_manifest, &workspace, &registry_config)
         .map(|_| ())
         .map_err(invalid)
@@ -1059,9 +1088,18 @@ pub(crate) fn resolve_and_fetch_with_lock(
     registry_config: &crate::registry::RegistryConfig,
     previous_lock: Option<&Lockfile>,
     update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
+    captures: &CapturedSources,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
-    let workspace = workspace_materialization(project, registry_config)?;
+    let discovered = Workspace::discover_typed(project)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+    let workspace = workspace_materialization_with_captures(
+        project,
+        registry_config,
+        None,
+        &discovered,
+        captures,
+    )?;
     let graph::ResolvedGraph {
         candidate_exclusions,
         metadata_lookups: _,
@@ -1092,7 +1130,16 @@ pub(crate) fn resolve_and_fetch_with_lock(
             OperationalError::from_source(ErrorKind::Transaction, error)
                 .context("cannot save updated requirements")
         })?;
-        workspace_locked = workspace_materialization(project, registry_config)?.locked;
+        let discovered = Workspace::discover_typed(project)
+            .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+        workspace_locked = workspace_materialization_with_captures(
+            project,
+            registry_config,
+            None,
+            &discovered,
+            captures,
+        )?
+        .locked;
     }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")

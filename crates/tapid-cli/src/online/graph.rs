@@ -42,6 +42,7 @@ pub(super) fn resolve_package_graph(
         .map(|name| dep_parts(name).map(|(_, name)| name))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let WorkspaceMaterialization {
+        captures,
         links: workspace_links,
         locked: workspace_locked,
         members: _,
@@ -127,6 +128,7 @@ pub(super) fn resolve_package_graph(
         fixture.is_some(),
         update,
         None,
+        &captures,
     )?;
     let root_copied_count = copied_roots.len();
     for member in &copied_members {
@@ -138,6 +140,7 @@ pub(super) fn resolve_package_graph(
             fixture.is_some(),
             update,
             Some((&member.key, &member.manifest_path)),
+            &captures,
         )?;
         for (dependency, record) in prepared {
             workspace_registry_dependencies.push(WorkspaceRegistryDependency {

@@ -40,7 +40,7 @@ verified graph content. Transitive copied declarations and copied peer specifier
 remain unsupported. No implicit hooks or extra script filesystem grants follow
 from snapshotting or linking.
 
-Implementation is incomplete: current changes establish Unix and Windows archive capture,
+The implementation uses Unix and Windows archive capture,
 source/schema representation, and root/member CLI flows through copied-record
 preparation, archive verification, verified storage, and ordinary bin planning.
 Member copied bindings reuse the existing workspace package dependency edges;
@@ -55,11 +55,19 @@ fail before project activation, with no HTTP or Git fallback. Offline Git refere
 retain their accepted pin rather than refreshing remote references. Root/member regressions exercise Node imports,
 bins, skipped hooks, overlapping sources, configured-store boundaries, activation
 rollback, and interrupted publication/activation recovery. Member tarball/Git
-regressions also cover explicit-root invocation and warm/cold replay. This is internal
-implementation progress, not the complete compatibility contract.
+regressions also cover explicit-root invocation and warm/cold replay. The
+[compatibility contract](../compatibility.md#copied-file-tarballs-and-pinned-git-dependencies)
+records supported forms and limits; this decision does not supply native acceptance evidence.
 Windows traversal retains ancestor handles without
 write/delete sharing and rejects reparse points using native handle metadata;
 active writers fail closed. Windows roots currently require local drive paths.
-Native Windows runtime validation, shared captures, and complete
-dependency/platform, transaction/reporting, and consumer coverage
-must complete before the CLI advertises directory dependency support.
+Operation-scoped captures are shared across preflight, graph preparation, replay
+validation and cold hydration, keyed by project and normalized origin. Recovery
+discards pre-recovery captures. Shared archive bytes avoid copying one full
+artifact per alias; no persistent metadata/mtime shortcut waives recapture on a
+later command. Regression coverage includes repeated-origin aliases alongside
+equal-name/version registry packages, dependency aliases/peers/optional edges,
+platform and unsafe-bin rejection, JSON unchanged-state reporting, and the
+archive/store/linker consumer seam. Native Windows execution and full supported
+platform validation remain release evidence requirements, not established by
+cross-compilation or local macOS tests.

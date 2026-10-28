@@ -9,13 +9,19 @@ content.
 ### Source identity
 
 The origin of selected package content, including its immutable artifact pin
-when copied from a file or repository. Equal package names and versions may have
+when copied from a file, directory snapshot, or repository. Equal package names and versions may have
 different source identities.
 
 ### Copied artifact
 
-Package content copied from a contained file archive or a repository commit and
+Package content copied from a contained file archive, directory snapshot, or repository commit and
 identified by an accepted immutable artifact pin.
+
+### Directory snapshot
+
+An immutable copied artifact captured from a contained local directory. Its
+identity retains the project-relative origin and accepted content/mode pin.
+Edits require explicit update; existing workspace links remain the live workflow.
 
 ### Dist-tag
 
