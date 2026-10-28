@@ -130,3 +130,302 @@ fn lifecycle_reporting_distinguishes_unperformed_from_successful_empty_discovery
     assert_eq!(result["lifecycle"]["hooks_executed"], 0);
     assert_eq!(result["lifecycle"]["hooks_skipped"], 0);
 }
+
+#[test]
+fn lifecycle_rebuild_requires_explicit_selection_before_project_access() {
+    let fixture = command_support::CliFixture::new("rebuild-required-selection");
+    fixture
+        .project
+        .write("package.json", b"invalid manifest")
+        .unwrap();
+    let result = fixture.command(&["rebuild"]).output().unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("rebuild requires at least one"),
+        "{result:?}"
+    );
+    assert_eq!(
+        fs::read(fixture.project.path().join("package.json")).unwrap(),
+        b"invalid manifest"
+    );
+    assert!(!fixture.project.path().join("tapid.lock").exists());
+}
+
+#[test]
+fn lifecycle_rebuild_selects_exact_locked_instances_without_mutation_on_rejection() {
+    let fixture = command_support::CliFixture::new("rebuild-exact-selection");
+    let manifest =
+        br#"{"name":"demo","version":"1.0.0","dependencies":{"a":"1.0.0","other":"npm:b@2.0.0"}}"#;
+    fixture.project.write("package.json", manifest).unwrap();
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/aliased-root-cycle.json")).unwrap();
+    registry["packages"][1]["dependencies"] = serde_json::json!({});
+    fixture
+        .project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let installed = fixture
+        .command(&["install", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
+    assert!(installed.status.success(), "{installed:?}");
+    let lock_bytes = fs::read(fixture.project.path().join("tapid.lock")).unwrap();
+    let lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    let keys = lock
+        .packages()
+        .iter()
+        .filter(|(_, package)| package.name() == "b")
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2);
+    for (args, diagnostic) in [
+        (vec!["rebuild", "b"], "must identify one locked instance"),
+        (vec!["rebuild", "missing"], "found 0"),
+        (
+            vec!["rebuild", "--instance", "not-a-key"],
+            "instance is not locked",
+        ),
+        (
+            vec!["rebuild", "--instance", keys[0]],
+            "has no supported hooks",
+        ),
+        (
+            vec!["rebuild", "--instance", keys[1], "--force"],
+            "has no supported hooks",
+        ),
+    ] {
+        let result = fixture.command(&args).output().unwrap();
+        assert!(!result.status.success(), "{args:?}: {result:?}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(diagnostic), "{args:?}: {result:?}");
+        if args == ["rebuild", "b"] {
+            for key in &keys {
+                assert!(stderr.contains(key), "{stderr}");
+            }
+        }
+        assert_eq!(
+            fs::read(fixture.project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(fixture.project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        assert!(fixture.project.path().join("node_modules/a").exists());
+    }
+}
+
+#[test]
+fn lifecycle_rebuild_rejects_hookless_selection_with_explicit_plan_in_json() {
+    let fixture = command_support::CliFixture::new("rebuild-hookless-json");
+    fixture
+        .project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"b":"2.0.0"}}"#,
+        )
+        .unwrap();
+    fixture
+        .project
+        .write(
+            "registry.json",
+            include_bytes!("../fixtures/aliased-root-cycle.json"),
+        )
+        .unwrap();
+    let installed = fixture
+        .command(&["install", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
+    assert!(installed.status.success(), "{installed:?}");
+    let result = fixture
+        .command(&["rebuild", "b", "--json"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["lifecycle"]["explicitly_selected_packages"], 1);
+    assert_eq!(report["lifecycle"]["impacted_packages"], 1);
+    assert_eq!(report["lifecycle"]["hooks_executed"], 0);
+}
+
+#[test]
+fn lifecycle_rebuild_never_turns_default_denial_into_success_or_accepts_unsafe_modes() {
+    let fixture = command_support::CliFixture::new("rebuild-denied");
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#;
+    fixture.project.write("package.json", manifest).unwrap();
+    write_dependency_script_fixture(
+        &fixture.project,
+        "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
+    );
+    let installed = fixture
+        .command(&["install", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
+    assert!(installed.status.success(), "{installed:?}");
+    let lock = fs::read(fixture.project.path().join("tapid.lock")).unwrap();
+    for flags in [vec!["--json"], vec!["--force", "--json"]] {
+        let mut args = vec!["rebuild", "native-demo"];
+        args.extend(flags);
+        let result = fixture.command(&args).output().unwrap();
+        assert!(!result.status.success(), "{result:?}");
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["lifecycle"]["hooks_executed"], 0);
+        assert_eq!(
+            report["lifecycle"]["packages"][0]["hooks"][0]["authorization"],
+            "not_approved"
+        );
+        assert_eq!(
+            fs::read(fixture.project.path().join("tapid.lock")).unwrap(),
+            lock
+        );
+        assert_eq!(
+            fs::read(fixture.project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert!(
+            !fixture
+                .project
+                .path()
+                .join("node_modules/native-demo/SHOULD_NOT_EXIST")
+                .exists()
+        );
+    }
+    for flag in [
+        "--offline",
+        "--frozen",
+        "--allow-unapproved-dependency-scripts",
+        "--unsafe-no-dependency-sandbox",
+    ] {
+        let result = fixture
+            .command(&["rebuild", "native-demo", flag])
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert_eq!(
+            fs::read(fixture.project.path().join("tapid.lock")).unwrap(),
+            lock
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lifecycle_rebuild_forces_only_selected_and_authenticates_outside_impact_before_hooks() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let fixture = command_support::CliFixture::new("rebuild-impact");
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0","dependant":"1.0.0","unrelated":"1.0.0"}}"#;
+    fixture.project.write("package.json", manifest).unwrap();
+    write_dependency_script_fixture(&fixture.project, NATIVE_BUILD_ARCHIVE);
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.project.path().join("registry.json")).unwrap())
+            .unwrap();
+    for name in ["dependant", "unrelated"] {
+        let mut entry = registry["packages"][0].clone();
+        entry["name"] = name.into();
+        if name == "dependant" {
+            entry["dependencies"] = serde_json::json!({"native-demo":"1.0.0"});
+        }
+        registry["packages"].as_array_mut().unwrap().push(entry);
+    }
+    fixture
+        .project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let sh = fs::canonicalize("/bin/sh").unwrap();
+    let node = fs::canonicalize("/usr/bin/node").unwrap();
+    let script = r#"node -e "if(process.env.TAPID_TEST_SECRET)process.exit(42);require('fs').writeFileSync('generated.txt','generated')" && /usr/bin/gcc hello.c -o native"#;
+    let approvals = ["native-demo", "dependant", "unrelated"].map(|name| serde_json::json!({
+        "package":name,"version":"1.0.0","archive-digest":registry["packages"][0]["integrity"],
+        "hook":"install","script-digest":format!("sha256-{:x}", Sha256::digest(script)),
+        "system-toolchain":true,"process-memory-stats":true,"dependencies":name == "dependant",
+        "read":["."],"write":["."],"network":false,"environment":{"TMPDIR":"."},
+        "timeout-seconds":20,"max-output-bytes":8192,"max-processes":64,"max-memory-bytes":536870912,
+        "tools":[{"name":"sh","path":sh,"digest":format!("sha256-{:x}",Sha256::digest(fs::read(&sh).unwrap()))},
+                 {"name":"node","path":node,"digest":format!("sha256-{:x}",Sha256::digest(fs::read(&node).unwrap()))}]
+    }));
+    fixture
+        .project
+        .write(
+            "tapid.lifecycle.toml",
+            toml::to_string(&serde_json::json!({"schema":1,"approvals":approvals}))
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    let store = fixture.project.path().join("store");
+    let mut install = fixture.command(&[
+        "install",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+    ]);
+    let installed = install.arg(&store).output().unwrap();
+    assert!(installed.status.success(), "{installed:?}");
+    let lock_bytes = fs::read(fixture.project.path().join("tapid.lock")).unwrap();
+    let before = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    let rebuild = || {
+        let mut command =
+            fixture.command(&["rebuild", "native-demo", "--force", "--json", "--store-dir"]);
+        command.arg(&store);
+        command
+    };
+    let result = rebuild().output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["lifecycle"]["explicitly_selected_packages"], 1);
+    assert_eq!(report["lifecycle"]["impacted_packages"], 2);
+    assert_eq!(report["lifecycle"]["hooks_executed"], 1);
+    assert_eq!(report["lifecycle"]["generated_outputs_reused"], 2);
+    let details = report["lifecycle"]["packages"].as_array().unwrap();
+    for (name, role, disposition) in [
+        ("native-demo", "selected", "executed"),
+        ("dependant", "dependant", "reused"),
+        ("unrelated", "prerequisite", "reused"),
+    ] {
+        let entry = details
+            .iter()
+            .find(|p| p["identity"]["name"] == name)
+            .unwrap();
+        assert_eq!(entry["rebuild_role"], role);
+        assert_eq!(entry["hooks"][0]["disposition"], disposition);
+    }
+    assert_eq!(
+        fs::read(fixture.project.path().join("tapid.lock")).unwrap(),
+        lock_bytes,
+        "identical forced outputs permit dependant reuse"
+    );
+    assert_eq!(
+        fs::read(fixture.project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    // Removing authentication cannot silently expand the execution set to the
+    // unrelated hook. All prerequisites must authenticate before selected hooks.
+    fs::remove_file(store.join(".tapid-lifecycle-key")).unwrap();
+    let result = rebuild().output().unwrap();
+    assert!(!result.status.success(), "{result:?}");
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(
+        fs::read(fixture.project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    let after = Lockfile::from_json(
+        &fs::read_to_string(fixture.project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after.source_graph(), before.source_graph());
+    for name in ["native-demo", "dependant", "unrelated"] {
+        assert_eq!(
+            fs::read(
+                fixture
+                    .project
+                    .path()
+                    .join(format!("node_modules/{name}/generated.txt"))
+            )
+            .unwrap(),
+            b"generated"
+        );
+    }
+}

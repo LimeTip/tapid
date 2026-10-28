@@ -15,6 +15,10 @@ use tapid_linker::NamedLayoutInput;
 use tapid_lockfile::{DerivedHookOutput, Lockfile};
 use tapid_runner::{DependencyLifecycleApproval, DependencyLifecyclePolicy};
 
+#[path = "dependency_rebuild.rs"]
+mod rebuild;
+pub(crate) use rebuild::RebuildRequest;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ExecutionOverrides {
     pub(crate) allow_unapproved: bool,
@@ -80,6 +84,7 @@ pub(super) fn apply(
     project: &Path,
     policy: &DependencyLifecyclePolicy,
     overrides: ExecutionOverrides,
+    rebuild: Option<RebuildRequest<'_>>,
     retained_stages: &mut Vec<BuildStage>,
     lock: &mut Lockfile,
     input: &mut NamedLayoutInput,
@@ -113,16 +118,50 @@ pub(super) fn apply(
         }
     }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
-    let dependency_inputs = if policy.approvals().is_empty() && !overrides.allow_unapproved {
-        None
-    } else {
-        Some(inputs::DependencyInputs::new(lock)?)
-    };
+    let dependency_inputs =
+        if rebuild.is_none() && policy.approvals().is_empty() && !overrides.allow_unapproved {
+            None
+        } else {
+            Some(inputs::DependencyInputs::new(lock)?)
+        };
     let order = dependency_inputs.as_ref().map_or_else(
         || lock.packages().keys().cloned().collect(),
         |graph| graph.order.clone(),
     );
+    let explicit_selection = rebuild.map(|request| request.select(lock)).transpose()?;
+    let impact = explicit_selection.as_ref().map(|selected| {
+        let graph = dependency_inputs.as_ref().expect("rebuild graph required");
+        graph
+            .order
+            .iter()
+            .filter(|key| selected.contains(*key) || !graph.closure(key).is_disjoint(selected))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    });
+    if let Some(selected) = &explicit_selection {
+        let report = outcome.lifecycle.as_mut().unwrap();
+        report.explicitly_selected_packages = Some(selected.len());
+        report.impacted_packages = Some(impact.as_ref().unwrap().len());
+        report.reason = Some("rebuild_preflight_failed");
+    }
     let mut system_identity = None;
+
+    if let Some(selected) = explicit_selection.as_ref() {
+        rebuild::preflight(
+            selected,
+            impact.as_ref().unwrap(),
+            dependency_inputs.as_ref().unwrap(),
+            lock,
+            policy,
+            trees,
+            input,
+            store,
+            snapshots,
+            &mut system_identity,
+            &source_graph,
+            outcome,
+        )?;
+    }
     for key in order {
         let package = lock.packages()[&key].clone();
         let identity = inputs::identity(&key)?;
@@ -136,6 +175,19 @@ pub(super) fn apply(
             .as_mut()
             .unwrap()
             .package(super::outcome::LifecycleIdentity::new(&key, &package));
+        if let Some(selected) = &explicit_selection
+            && let Some(index) = observation
+        {
+            let package_report = &mut outcome.lifecycle.as_mut().unwrap().packages[index];
+            package_report.rebuild_role = Some(if selected.contains(&key) {
+                "selected"
+            } else if impact.as_ref().unwrap().contains(&key) {
+                "dependant"
+            } else {
+                "prerequisite"
+            });
+            package_report.force_requested = selected.contains(&key) && rebuild.unwrap().force;
+        }
         let hooks = match commands(&source) {
             Ok(hooks) => {
                 outcome
@@ -359,7 +411,11 @@ pub(super) fn apply(
                         .iter()
                         .find(|o| o.hook() == hook && o.key() == recipe)
                 });
-            if let Some(previous) = previous
+            let forced = rebuild.is_some_and(|request| request.force)
+                && explicit_selection
+                    .as_ref()
+                    .is_some_and(|selected| selected.contains(&key));
+            if let Some(previous) = previous.filter(|_| !forced)
                 && let Ok(snapshot) = store.verified_lifecycle_snapshot(
                     &recipe.parse().map_err(error)?,
                     &previous.tree_digest().parse().map_err(error)?,
@@ -384,6 +440,11 @@ pub(super) fn apply(
                     .unwrap()
                     .disposition(observed_hook, "reused", None);
                 continue;
+            }
+            if impact.as_ref().is_some_and(|impact| !impact.contains(&key)) {
+                return Err(error(format!(
+                    "rebuild prerequisite {key} {hook} changed; run an approved online install first"
+                )));
             }
             if !online {
                 outcome.lifecycle.as_mut().unwrap().disposition(
@@ -966,6 +1027,7 @@ mod tests {
                 project.path(),
                 &DependencyLifecyclePolicy::denied(),
                 ExecutionOverrides::default(),
+                None,
                 &mut Vec::new(),
                 &mut case_lock,
                 &mut input,

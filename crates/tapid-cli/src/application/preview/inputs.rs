@@ -185,6 +185,10 @@ impl Inputs {
         let (mode_name, update) = match mode {
             InstallMode::Online => ("online", Value::Null),
             InstallMode::Refresh => ("refresh", Value::Null),
+            InstallMode::Rebuild(r) => (
+                "rebuild",
+                json!({"packages": r.packages, "instances": r.instances, "force": r.force}),
+            ),
             InstallMode::Offline => ("offline", Value::Null),
             InstallMode::Frozen => ("frozen", Value::Null),
             InstallMode::Ci => ("ci", Value::Null),

@@ -1,3 +1,4 @@
+pub(crate) use super::dependency_scripts::RebuildRequest;
 #[derive(Clone, Copy)]
 pub(crate) enum Progress {
     Metadata(usize),
@@ -158,6 +159,7 @@ impl InstallSession {
 pub(crate) enum InstallMode<'a> {
     Online,
     Refresh,
+    Rebuild(RebuildRequest<'a>),
     Update(super::lifecycle::UpdateRequest<'a>),
     Offline,
     Frozen,
@@ -306,6 +308,16 @@ fn perform_install(
         ManifestMutation::AddPackage(package) => (None, Some(package)),
         ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
     };
+    let rebuild = match mode {
+        InstallMode::Rebuild(request) => Some(request),
+        _ => None,
+    };
+    if rebuild.is_some() && (overrides.enabled() || allow_unverified_registry_artifacts) {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "rebuild requires verified artifacts and exact approvals without execution overrides",
+        ));
+    }
     let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
@@ -447,6 +459,21 @@ fn perform_install(
         Some(InstallLock::Imported(lock)) => (None, Some(lock)),
         None => (None, None),
     };
+    if let Some(request) = rebuild {
+        if imported.is_some() {
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                "rebuild does not support imported locks; no conversion was performed",
+            ));
+        }
+        let lock = previous_lock.as_ref().ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::Lockfile,
+                "rebuild requires an existing native tapid.lock",
+            )
+        })?;
+        request.select(lock)?;
+    }
     if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
         imported = None;
     }
@@ -556,6 +583,7 @@ fn perform_install(
     if imported.is_some() || !offline && !frozen && !replay_existing {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+        let source_snapshots;
         let online::PreparedInstall {
             candidate_exclusions,
             mut lock,
@@ -566,7 +594,49 @@ fn perform_install(
                     workspace: mut workspace_plan,
                 },
             transaction: mut store_transaction,
-        } = if let Some(imported) = imported.as_mut() {
+        } = if rebuild.is_some() {
+            let lock = previous_lock.as_ref().expect("rebuild lock validated");
+            lock.validate_replay(&original_root_digest)?;
+            online::validate_locked_files(&project_dir, lock)?;
+            if !online::validate_locked_routes(lock, &registry_config)? {
+                return Err(OperationalError::new(
+                    ErrorKind::Lockfile,
+                    "rebuild requires the locked platform; run install to review platform changes",
+                ));
+            }
+            let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+            if !online::workspace_matches_lock(&workspace, lock) {
+                return Err(OperationalError::new(
+                    ErrorKind::Lockfile,
+                    "workspace changed; run install before rebuild",
+                ));
+            }
+            let dependencies = online::resolved_workspace_registry_dependencies(
+                &root_manifest,
+                &workspace,
+                &registry_config,
+            )?;
+            super::replay::validate_workspace_dependency_edges(&workspace, &dependencies, lock)?;
+            super::replay::validate_root_bindings(lock, &root_manifest, &registry_config)?;
+            let prepared = online::prepare_locked_install(
+                lock,
+                &root_manifest,
+                &store,
+                &registry_config,
+                registry_fixture,
+                &project_dir,
+                |completed, total| report_replay_progress(Progress::Replay(completed, total)),
+            )?;
+            source_snapshots = prepared.snapshots;
+            online::PreparedInstall {
+                candidate_exclusions: Default::default(),
+                lock: lock.clone(),
+                layout: prepared.layout,
+                transaction: prepared.transaction,
+            }
+        } else if let Some(imported) = imported.as_mut() {
+            source_snapshots = Vec::new();
+
             online::fetch_imported(
                 imported,
                 &project_dir,
@@ -576,6 +646,7 @@ fn perform_install(
                 &registry_config,
             )?
         } else {
+            source_snapshots = Vec::new();
             online::resolve_and_fetch_with_lock(
                 &project_dir,
                 &root_manifest,
@@ -592,6 +663,7 @@ fn perform_install(
                 &mut report_replay_progress,
             )?
         };
+        let _source_snapshots = source_snapshots;
         session.candidate_exclusions = candidate_exclusions;
 
         session
@@ -640,6 +712,7 @@ fn perform_install(
                 &project_dir,
                 &lifecycle_policy,
                 overrides,
+                rebuild,
                 &mut session.hook_stages,
                 &mut lock,
                 &mut input,
@@ -858,6 +931,7 @@ fn perform_install(
             &project_dir,
             &lifecycle_policy,
             overrides,
+            rebuild,
             &mut session.hook_stages,
             &mut lock.clone(),
             &mut input,
@@ -944,6 +1018,7 @@ fn perform_install(
         &project_dir,
         &lifecycle_policy,
         overrides,
+        rebuild,
         &mut session.hook_stages,
         &mut lock.clone(),
         &mut input,

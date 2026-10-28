@@ -121,3 +121,43 @@ Windows identity/integrated acceptance and native macOS feasibility remain
 separate platform work; no Linux VM fallback is implied. Representative native
 build/generated-code usability and external pilots remain adoption acceptance,
 independent of a truthful installation report.
+
+## Rebuilding selected locked outputs
+
+Use `tapid rebuild native-demo` for a package name that identifies one locked
+instance, or repeat `--instance '<exact key from tapid.lock>'` to select exact
+registry, version, peer and platform contexts. At least one selector is required.
+Names and exact selectors are combined and deduplicated. Ambiguous names report
+exact keys; selected packages without supported hooks fail.
+
+Rebuild validates the existing native lock and manifest agreement and prepares
+verified sources for that exact graph. It does not resolve versions, change
+requirements, or convert imported schema-8 locks. Missing archives may be fetched
+by their locked identity. `--offline`, `--frozen`, and invocation-only unsafe
+execution flags are not accepted. Ordinary install/ci replay remains available
+for authenticated cached outputs without executing hooks.
+
+Matching authenticated outputs are reused by default. `--force` reruns selected
+approved hook sequences from verified source. Dependency inputs run before their
+dependants; affected dependants reuse matching outputs or execute approved hooks
+when their bound inputs change. Force does not force dependants. Unrelated hooks
+never execute. Existing generated prerequisites outside the impact set must
+already authenticate under the current policy, recipe and toolchain; otherwise
+run an approved online install first. A policy-wide or recipe-domain change can
+therefore require ordinary installation before a narrow rebuild.
+
+Rebuild never edits approval policy. Missing or stale exact approvals fail rather
+than becoming successful default denial. Pinned-tool changes require deliberate
+policy updates; system-toolchain changes invalidate reusable outputs. The same
+Linux containment and toolchain prerequisites as approved installation apply;
+this command does not enable authenticated execution on macOS or Windows.
+Copied outputs without store-local authentication are not evidence of execution.
+Eligible impacted outputs may be regenerated under valid approvals; unusable
+outside-impact prerequisites fail before hooks.
+
+All outputs are staged and verified before the existing coordinated store,
+lockfile and layout transaction activates them. Precommit failure preserves the
+previous active trees; committed cleanup failures retain the existing honest
+committed outcome. Human and JSON reports separate explicit selection, dependency
+impact, observed execution and reuse from transaction commitment. Execution alone
+does not establish activated output or application readiness.

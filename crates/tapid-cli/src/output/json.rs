@@ -175,6 +175,7 @@ fn lifecycle_report(report: &crate::application::outcome::LifecycleReport) -> Va
     let mut packages = report.packages.iter().collect::<Vec<_>>();
     packages.sort_by(|a, b| a.identity.key.cmp(&b.identity.key));
     json!({"coverage": report.coverage, "reason": report.reason,
+        "explicitly_selected_packages": report.explicitly_selected_packages, "impacted_packages": report.impacted_packages,
         "selected_packages": report.selected_packages, "inspected_packages": report.inspected_packages,
         "details_complete": report.omitted_packages == 0 && report.packages.iter().all(|p| p.omitted_hooks == 0),
         "omitted_packages": report.omitted_packages,
@@ -182,7 +183,7 @@ fn lifecycle_report(report: &crate::application::outcome::LifecycleReport) -> Va
         "packages": packages.into_iter().map(|p| {
             let mut hooks = p.hooks.iter().collect::<Vec<_>>();
             hooks.sort_by(|a,b| a.hook.cmp(&b.hook));
-            json!({"identity": lifecycle_identity(&p.identity), "discovery": p.discovery,
+            json!({"identity": lifecycle_identity(&p.identity), "discovery": p.discovery, "rebuild_role": p.rebuild_role, "force_requested": p.force_requested,
                 "omitted_hooks": p.omitted_hooks,
                 "hooks": hooks.into_iter().map(|h| json!({"hook": h.hook, "authorization": h.authorization,
                     "disposition": h.disposition, "reason": h.reason})).collect::<Vec<_>>()})
