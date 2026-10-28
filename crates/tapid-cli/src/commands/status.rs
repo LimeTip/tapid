@@ -41,6 +41,9 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         "Manifest/lock agreement: {}",
         report.manifest_lock_agreement
     );
+    for line in crate::output::install::Reporter::selection_lines(report.selection.as_ref()) {
+        println!("{line}");
+    }
     for installation in &report.installation {
         println!(
             "Installation {}: {}",

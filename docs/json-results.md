@@ -316,7 +316,7 @@ inspection failures. `data.assessment` is `no_local_blockers` or `blocked`;
 These describe local preflight only. They do not establish that installation,
 lock replay, or script execution will succeed.
 
-Status data contains `manifest_lock_agreement`, `workspace`, `installation`,
+Status data contains `selection`, `manifest_lock_agreement`, `workspace`, `installation`,
 `recovery`, `recovery_guidance`, `registries`, `blockers`, `truncated`, `snapshot`,
 `verification_depth`, `checks_not_performed`, and `capabilities`. Manifest/lock
 agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`,
@@ -325,7 +325,12 @@ agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`
 when registry configuration or workspace discovery fails. Root binding checks
 require valid registry configuration; workspace checks also require discovery.
 A confirmed mismatch remains conclusive when other checks cannot run.
-Imported npm schema-8 locks use their own parser and root/workspace receipt
+`data.selection` is null without recorded facts; otherwise it contains the recorded
+target/profile, at most 50 omissions, `omitted_records`, and `details_complete`.
+Inspection checks schema 11/12 against the recorded target/profile, without
+authorizing current-host replay. Human output uses the same omission records.
+Shortened selection strings also set `details_complete` to false.
+Imported npm schema-8/12 locks use their own parser and root/workspace receipt
 validators. Their registry routing, platform selection, and ancestor installation
 layout checks are listed as unperformed.
 The shared store is not inspected. Blockers contain stable `code`

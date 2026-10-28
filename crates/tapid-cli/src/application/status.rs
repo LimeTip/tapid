@@ -32,6 +32,7 @@ pub(crate) struct Blocker {
 /// A report without blockers does not establish that installation or execution will succeed.
 #[derive(Serialize)]
 pub(crate) struct StatusReport {
+    pub(crate) selection: Option<crate::application::outcome::SelectionReport>,
     pub(crate) assessment: &'static str,
     pub(crate) manifest_lock_agreement: &'static str,
     pub(crate) workspace: Value,
@@ -110,6 +111,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         }
     });
     let mut report = StatusReport {
+        selection: None,
         assessment: "no_local_blockers",
         manifest_lock_agreement: "unknown",
         workspace: json!({"selected": selector, "manifest": null, "members": [], "linking": "not_verified"}),
@@ -135,7 +137,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         ],
         capabilities: json!({
             "experimental": true,
-            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
+            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION, tapid_lockfile::SELECTION_LOCKFILE_VERSION, 12],
             "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
@@ -260,7 +262,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     match read(&lock_path, MAX_FILE_BYTES) {
         Ok(bytes)
             if serde_json::from_slice::<Value>(&bytes)
-                .is_ok_and(|value| value["lockfileVersion"] == 8) =>
+                .is_ok_and(|value| matches!(value["lockfileVersion"].as_u64(), Some(8 | 12))) =>
         {
             inspect_imported_lock(&bytes, &manifest_bytes, workspace.as_ref(), &mut report);
         }
@@ -269,8 +271,20 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             .and_then(|text| Lockfile::from_json(text).ok())
         {
             Some(lock) => {
+                let mut outcome =
+                    crate::application::outcome::OperationOutcome::unchanged(&project);
+                outcome.record_selection(&lock);
+                report.selection = outcome.selection;
                 if let (Some(manifest), Ok(bytes)) = (&manifest, &manifest_bytes) {
-                    let root_matches = match lock.validate_replay(&digest_bytes(bytes)) {
+                    let root_matches = match if let Some(facts) = lock.selection() {
+                        lock.validate_replay_with_selection(
+                            &digest_bytes(bytes),
+                            &facts.target,
+                            facts.profile,
+                        )
+                    } else {
+                        lock.validate_replay(&digest_bytes(bytes))
+                    } {
                         Ok(()) => true,
                         Err(LockfileError::RootManifestDigestMismatch { .. }) => {
                             report.manifest_lock_agreement = "mismatch";
@@ -387,7 +401,7 @@ fn workspace_matches(
     .map_err(|_| "LOCK_WORKSPACE_MISMATCH")
 }
 
-/// Validate schema-8 root and workspace receipts with bounded manifest reads.
+/// Validate imported root and workspace receipts with bounded manifest reads.
 /// Routing, platform selection, and ancestor layout remain explicitly unchecked;
 /// a workspace match cannot erase an already established root mismatch.
 fn inspect_imported_lock(
@@ -417,10 +431,16 @@ fn inspect_imported_lock(
     else {
         return;
     };
-    if lock
-        .validate_replay(manifest, &digest_bytes(manifest.as_bytes()))
-        .is_err()
-    {
+    let mut outcome = crate::application::outcome::OperationOutcome::unchanged(&report.project);
+    outcome.record_imported_selection(&lock);
+    report.selection = outcome.selection;
+    let digest = digest_bytes(manifest.as_bytes());
+    let replay = if let Some(facts) = lock.placement_selection() {
+        lock.validate_replay_with_selection(manifest, &digest, &facts.target, facts.profile)
+    } else {
+        lock.validate_replay(manifest, &digest)
+    };
+    if replay.is_err() {
         report.manifest_lock_agreement = "mismatch";
         report.block("LOCK_MANIFEST_MISMATCH", &lock_path);
     }

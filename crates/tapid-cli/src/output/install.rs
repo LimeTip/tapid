@@ -127,7 +127,7 @@ impl Reporter {
     }
 
     fn lifecycle_lines(outcome: &crate::application::outcome::OperationOutcome) -> Vec<String> {
-        let mut lines = Self::selection_lines(outcome);
+        let mut lines = Self::selection_lines(outcome.selection.as_ref());
         if let Some(report) = &outcome.lifecycle {
             lines.push(format!("Dependency lifecycle: {} hook(s) executed, {} authenticated output(s) reused, {} hook(s) skipped.", report.executed, report.reused, report.skipped));
             for package in &report.packages {
@@ -150,9 +150,11 @@ impl Reporter {
         lines
     }
 
-    fn selection_lines(outcome: &crate::application::outcome::OperationOutcome) -> Vec<String> {
+    pub(crate) fn selection_lines(
+        selection: Option<&crate::application::outcome::SelectionReport>,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
-        if let Some(selection) = &outcome.selection {
+        if let Some(selection) = selection {
             let (target, _) = super::json::text(format!(
                 "{}/{}, libc={}",
                 selection.target.os,

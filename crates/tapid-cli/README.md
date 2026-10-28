@@ -382,7 +382,7 @@ preserving exact declaring placements and the target/profile for replay. Initial
 offline imports still emit schema 8. Absent placements use `importedPlacementAbsent`;
 the imported graph does not establish the original failure stage. Artifact/hook
 omission selection and complete optional-failure semantics remain unfinished.
-Preview and status integration is not established by this replay API.
+Preview integration remains unfinished. Status describes recorded omissions without authorizing replay on the current host.
 
 ## Experimental Node.js root-script runner and `.bin` handling
 
@@ -506,9 +506,11 @@ operation even when node_modules is absent. Root and member manifest discovery
 and workspace planning reads are limited to 32 MiB per manifest.
 Discovery also stops before parsing members when it exceeds 128 candidate manifests
 or 4,096 expansion steps, and reports a blocked, truncated inspection. Imported
-npm schema-8 locks use their root and workspace receipt validators; imported
+npm schema-8 and schema-12 locks use their root and workspace receipt validators; imported
 registry routing, platform selection, and ancestor installation layout remain
 explicitly unchecked.
+
+Status includes recorded schema-11/12 selection target, profile, and up to 50 omission records in `data.selection` and human output. `omitted_records` and `details_complete` identify incomplete details. Inspection validates against the recorded target/profile; current-host compatibility remains unchecked.
 
 Snapshot entries identify inspected metadata using SHA-256 or explicit missing
 and unreadable states. Directory and journal entries use metadata identities;

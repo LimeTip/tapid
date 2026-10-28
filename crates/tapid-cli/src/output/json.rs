@@ -232,7 +232,13 @@ pub(crate) fn status_result(report: &crate::application::status::StatusReport) -
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    if let Some(selection) = &report.selection {
+        data["selection"]["details_complete"] = json!(selection.omitted_records == 0);
+    }
     status_text(&mut data, "/data", &mut truncated);
+    if !data["selection"].is_null() && truncated.iter().any(|p| p.starts_with("/data/selection/")) {
+        data["selection"]["details_complete"] = json!(false);
+    }
     let shortened = !truncated.is_empty();
     if shortened {
         data["truncated"] = json!(true);
