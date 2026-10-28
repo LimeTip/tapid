@@ -39,13 +39,10 @@ pub(super) fn replay(
     // versions or archive pins for a retained name still require integration.
     for key in selection.materialized_keys(profile)? {
         let identity: tapid_lockfile::LockfilePackageKey = key.parse()?;
-        let package = &selection.packages()[&key];
         if policy
             .approvals()
             .iter()
             .any(|approval| approval.package() == identity.name.as_str())
-            || matches!(&package.source_evidence, tapid_lockfile::NativeSourceEvidence::Verified { package }
-                if !package.derived_hooks().is_empty())
         {
             return Err(OperationalError::new(
                 ErrorKind::InvalidRequest,
@@ -165,7 +162,9 @@ fn activate(
     let mut layout = prepared.layout(profile)?;
     let mut snapshots = Vec::new();
     // Discovery and default-denied hook reporting use the established lifecycle
-    // path. This invocation-local graph is never written to tapid.lock.
+    // path. Retained output claims must also pass its exact output-list check:
+    // removing an approval cannot silently activate the source tree instead.
+    // This invocation-local graph is never written to tapid.lock.
     super::super::dependency_scripts::apply(
         project,
         policy,

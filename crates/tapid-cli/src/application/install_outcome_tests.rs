@@ -102,6 +102,94 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
 }
 
 #[test]
+fn native_replay_rejects_retained_outputs_without_approval_through_lifecycle_validation() {
+    let (project, fixture, original) = native_selection_fixture();
+    let store_path = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::default(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store_path),
+        mode: InstallMode::Ci,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    run(request(), |_| {}).unwrap();
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let manifest = fs::read(project.path().join("node_modules/shared/package.json")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    let store = Store::new(store_path.clone());
+    let prepared = online::prepare_native_locked(
+        &selection,
+        &store,
+        &crate::registry::RegistryConfig::default(),
+        Some(&fixture),
+        project.path(),
+        false,
+        tapid_lockfile::InstallProfile::default(),
+    )
+    .unwrap();
+    let mut evidence = prepared
+        .lifecycle_sources(
+            &online::root_digest(project.path()).unwrap(),
+            tapid_lockfile::InstallProfile::default(),
+        )
+        .unwrap();
+    let key = evidence.packages().keys().next().unwrap().clone();
+    evidence
+        .set_derived_hooks(
+            &key,
+            vec![
+                tapid_lockfile::DerivedHookOutput::new(
+                    "install",
+                    &format!("sha256-{}", "b".repeat(64)),
+                    &format!("sha256-{}", "c".repeat(64)),
+                    &format!("hmac-sha256-{}", "d".repeat(64)),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let mut package = evidence.packages()[&key].clone();
+    package
+        .set_artifact_url("https://registry.npmjs.org/shared-1.0.0.tgz")
+        .unwrap();
+    wire["packages"][&key]["sourceEvidence"] =
+        serde_json::to_value(tapid_lockfile::NativeSourceEvidence::Verified {
+            package: Box::new(package),
+        })
+        .unwrap();
+    drop(prepared);
+    let claimed = wire.to_string();
+    project.write("tapid.lock", claimed.as_bytes()).unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("lifecycle approval was removed or changed"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(failure.outcome.lifecycle.is_some());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        claimed
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/package.json")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
 fn native_replay_ignores_approvals_for_omitted_packages_but_rejects_retained_approvals() {
     let (project, fixture, _) = native_selection_fixture();
     project

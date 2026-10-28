@@ -70,8 +70,10 @@ lifecycle policy. Replay checks approvals and derived outputs only for materiali
 packages; omitted-only lifecycle approvals do not require their archives or tools.
 Native preparation preserves retained derived-hook claims in its invocation-local
 lifecycle graph without selecting their output trees or authenticating the claims.
-Approvals for retained package names (including stale pins), retained derived
-outputs, workspace activation and selection mutation reject pending integration.
+Retained derived outputs without matching approvals fail the existing lifecycle
+replay output-list check before activation; removing policy cannot silently
+replace a derived tree with its source tree. Approvals for retained package names
+(including stale pins), workspace activation and selection mutation reject pending integration.
 Fresh profile preparation still rejects nonempty approval policies. This is not
 complete install-profile command support. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
