@@ -22,6 +22,38 @@ fn package(edges: Value, providers: Value) -> Value {
 }
 
 #[test]
+fn replay_requires_the_complete_manifest_snapshot() {
+    let root = format!("sha256-{}", "a".repeat(64));
+    let member = format!("sha256-{}", "b".repeat(64));
+    let members = std::collections::BTreeMap::from([("packages/member".into(), member.clone())]);
+    let selection = NativeSelection::new(
+        "0".into(),
+        "0".into(),
+        root.clone(),
+        members.clone(),
+        vec![],
+        Default::default(),
+    )
+    .unwrap();
+    let before = selection.to_json().unwrap();
+    selection.validate_replay(&root, &members).unwrap();
+    assert!(selection.validate_replay(&member, &members).is_err());
+    assert!(
+        selection
+            .validate_replay(&root, &Default::default())
+            .is_err()
+    );
+    let changed = std::collections::BTreeMap::from([("packages/member".into(), root.clone())]);
+    assert!(selection.validate_replay(&root, &changed).is_err());
+    let added = std::collections::BTreeMap::from([
+        ("packages/member".into(), member.clone()),
+        ("packages/other".into(), member),
+    ]);
+    assert!(selection.validate_replay(&root, &added).is_err());
+    assert_eq!(selection.to_json().unwrap(), before);
+}
+
+#[test]
 fn production_closure_retains_shared_dependencies_and_exact_peer_provider() {
     let (dev, shared, provider, tool) = (key("dev"), key("shared"), key("provider"), key("tool"));
     let app = LockfilePackageKey::new(

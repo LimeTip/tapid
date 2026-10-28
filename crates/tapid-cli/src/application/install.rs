@@ -23,6 +23,9 @@ use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
+#[path = "install_native.rs"]
+mod native;
+
 #[derive(Clone, Copy)]
 pub(crate) struct ManifestEdit<'a> {
     pub(crate) expected: &'a PackageManifest,
@@ -445,6 +448,32 @@ fn perform_install(
     let (previous_lock, mut imported) = match current_lock {
         Some(InstallLock::Native(lock)) => (Some(lock), None),
         Some(InstallLock::Imported(lock)) => (None, Some(lock)),
+        Some(InstallLock::Profile(selection)) => {
+            if package.is_some()
+                || manifest_override.is_some()
+                || matches!(mode, InstallMode::Refresh | InstallMode::Update(_))
+                || allow_unverified_registry_artifacts
+                || overrides.enabled()
+            {
+                return Err(OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "native profile selection mutation and execution overrides require profile integration",
+                ));
+            }
+            return native::replay(
+                session,
+                &project_dir,
+                &manifest_path,
+                &original_manifest,
+                original_lock.as_deref().expect("classified existing lock"),
+                &selection,
+                &lifecycle_policy,
+                store_root,
+                offline,
+                registry_fixture,
+                &mut report_replay_progress,
+            );
+        }
         None => (None, None),
     };
     if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
@@ -988,6 +1017,7 @@ fn perform_install(
 enum InstallLock {
     Native(Lockfile),
     Imported(tapid_lockfile::ImportedNpmLockfile),
+    Profile(tapid_lockfile::NativeSelection),
 }
 
 fn parse_install_lock(
@@ -998,10 +1028,14 @@ fn parse_install_lock(
 ) -> Result<InstallLock, OperationalError> {
     let input = std::str::from_utf8(bytes)
         .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
-    let lock = if serde_json::from_str::<serde_json::Value>(input)
+    let version = serde_json::from_str::<serde_json::Value>(input)
         .ok()
-        .is_some_and(|value| value["lockfileVersion"] == 8)
-    {
+        .and_then(|value| value["lockfileVersion"].as_u64());
+    let lock = if version == Some(tapid_lockfile::PROFILE_LOCKFILE_VERSION.into()) {
+        tapid_lockfile::NativeSelection::from_json(input)
+            .map(InstallLock::Profile)
+            .map_err(OperationalError::from)?
+    } else if version == Some(8) {
         tapid_lockfile::ImportedNpmLockfile::from_json(input)
             .map(InstallLock::Imported)
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))?

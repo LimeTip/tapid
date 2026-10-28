@@ -167,6 +167,24 @@ impl NativeSelection {
         &self.packages
     }
 
+    /// Match the complete manifest snapshot before using any source evidence.
+    pub fn validate_replay(
+        &self,
+        root_manifest_digest: &str,
+        workspace_manifest_digests: &BTreeMap<String, String>,
+    ) -> Result<(), LockfileError> {
+        if self.root_manifest_digest != root_manifest_digest {
+            return Err(LockfileError::RootManifestDigestMismatch {
+                expected: self.root_manifest_digest.clone(),
+                actual: root_manifest_digest.into(),
+            });
+        }
+        if &self.workspace_manifest_digests != workspace_manifest_digests {
+            return invalid("workspace membership or member manifest changed");
+        }
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Result<String, LockfileError> {
         serde_json::to_string_pretty(self).map_err(LockfileError::Serialization)
     }

@@ -33,10 +33,52 @@ pub(crate) struct PreparedNativeProfile {
     pub(crate) selection: NativeSelection,
     pub(super) materialized_keys: BTreeSet<String>,
     pub(super) sources: BTreeMap<String, PreparedNativeSource>,
-    pub(super) transaction: StoreTransaction,
+    pub(crate) transaction: StoreTransaction,
 }
 
 impl PreparedNativeProfile {
+    /// A verified, invocation-local graph for lifecycle discovery. Never serialize
+    /// this materialized view over the complete accepted selection.
+    pub(crate) fn lifecycle_sources(
+        &self,
+        root_digest: &str,
+    ) -> Result<Lockfile, OperationalError> {
+        let mut lock = Lockfile::new(root_digest)?;
+        let profile = tapid_lockfile::InstallProfile::default();
+        let mut packages = Vec::new();
+        for (encoded, source) in &self.sources {
+            let key: LockfilePackageKey = encoded.parse()?;
+            let mut package = LockedPackage::new_with_context_and_provenance(
+                key.source
+                    .package_source()
+                    .ok_or("expected artifact source")?
+                    .as_str(),
+                key.name.as_str(),
+                &key.version.to_string(),
+                &source.integrity.to_string(),
+                &source.digest.to_string(),
+                (&key.peer_context()?, &key.platform_context()?),
+                tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+            )?;
+            for (name, target) in self.selection.materialized_dependencies(encoded, profile)? {
+                package.add_alias_dependency(name, target)?;
+            }
+            packages.push(package);
+        }
+        lock.insert_packages(packages)?;
+        lock.set_roots(
+            self.selection
+                .materialized_declarations(profile)
+                .map(|edge| &edge.target),
+        )?;
+        lock.set_root_bindings(
+            self.selection
+                .materialized_declarations(profile)
+                .map(|edge| (edge.name.clone(), edge.target.clone()))
+                .collect(),
+        )?;
+        Ok(lock)
+    }
     /// Build linker inputs from verified sources without converting the complete
     /// selection into a legacy lock. Lifecycle preparation still precedes activation.
     #[allow(dead_code)]

@@ -61,11 +61,16 @@ keeps them distinct from registry and workspace sources. The historical JSON
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
 
 `NativeSelection` is the schema-11 capability model for explicit dependency-kind
-profiles. Installation does not yet emit or replay it. Unlike `Lockfile`, it
+profiles. Installation does not yet emit it. Application replay currently supports
+full registry-only source layouts with default-denied lifecycle policy; workspace
+activation, approved hooks, derived outputs and selection mutation reject pending
+their integration. This is not complete install-profile command support. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.
 `new` accepts typed declaration, package, edge and source-evidence inputs;
 both it and `from_json` validate the complete selection, including omitted packages;
+`validate_replay` compares the root digest and exact workspace manifest snapshot
+before source preparation;
 `materialized_declarations(InstallProfile)` and `materialized_dependencies(key,
 profile)` expose enabled local bindings, including exact peer providers, for
 layout planning. An omitted optional binding remains absent even if another

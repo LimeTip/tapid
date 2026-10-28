@@ -2,6 +2,87 @@ use super::*;
 
 const ARTIFACT: &str = "H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
 
+#[test]
+fn native_selection_recovery_keeps_profile_and_layout_in_one_generation() {
+    for point in ["store_published", "activation_complete", "commit_decision"] {
+        let project = tapid_test_support::TempProject::new("native-selection-recovery").unwrap();
+        let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1.0.0"}}"#;
+        project.write("package.json", manifest).unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/npm-import/registry.json")).unwrap();
+        let record = fixture["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "shared" && p["version"] == "1.0.0")
+            .unwrap();
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let key = tapid_lockfile::LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "shared".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string();
+        let selection = serde_json::json!({
+            "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+            "rootManifestDigest":format!("sha256-{:x}", sha2::Sha256::digest(manifest)),"workspaceManifestDigests":{},
+            "declarations":[{"workspace":null,"name":"shared","kind":"required","target":key}],
+            "packages":{key:{"sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/shared-1.0.0.tgz","artifactIntegrity":record["integrity"]},"dependencies":{},"peerProviders":{}}}
+        }).to_string();
+        project.write("tapid.lock", selection.as_bytes()).unwrap();
+        let store = project.path().join("store");
+        let args = [
+            "ci",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        let first = run(project.path(), &args);
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        let before = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+        let crash = run_with_env(project.path(), &args, "TAPID_TEST_CRASH_POINT", point);
+        assert!(
+            !crash.status.success(),
+            "crash point {point} was not reached"
+        );
+        let recovered = run_with_env(project.path(), &args, "TAPID_TEST_RECOVER_ONLY", "1");
+        assert!(
+            recovered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&recovered.stderr)
+        );
+        let after = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+        if point == "commit_decision" {
+            assert_ne!(before, after);
+        } else {
+            assert_eq!(before, after);
+        }
+        assert!(
+            project
+                .path()
+                .join("node_modules/shared/package.json")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            selection.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+    }
+}
+
 fn locked_project() -> tapid_test_support::TempProject {
     let project = tapid_test_support::TempProject::new("ci-locked").unwrap();
     project

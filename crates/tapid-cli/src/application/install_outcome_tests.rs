@@ -35,6 +35,214 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
 const ARTIFACT: &str = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
 const INTEGRITY: &str = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
 
+fn native_selection_fixture() -> (TempProject, PathBuf, String) {
+    let project = TempProject::new("native-selection-application").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let fixture = project
+        .write(
+            "registry.json",
+            include_bytes!("../../tests/fixtures/npm-import/registry.json"),
+        )
+        .unwrap();
+    let records: serde_json::Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let record = records["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "shared" && p["version"] == "1.0.0")
+        .unwrap();
+    let key = tapid_lockfile::LockfilePackageKey::new(
+        "https://registry.npmjs.org".parse().unwrap(),
+        "shared".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+        &Default::default(),
+        &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+    )
+    .to_string();
+    let selection = serde_json::json!({
+        "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+        "rootManifestDigest": online::root_digest(project.path()).unwrap(),"workspaceManifestDigests":{},
+        "declarations":[{"workspace":null,"name":"shared","kind":"required","target":key}],
+        "packages":{key:{"sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/shared-1.0.0.tgz","artifactIntegrity":record["integrity"]},"dependencies":{},"peerProviders":{}}}
+    }).to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    (project, fixture, selection)
+}
+
+#[test]
+fn native_selection_cold_ci_activates_sources_without_rewriting_selection() {
+    let (project, fixture, selection) = native_selection_fixture();
+    let report = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(report.replayed);
+    assert_eq!(report.package_count, 1);
+    assert_eq!(report.outcome.state, ChangeState::Committed);
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/.tapid-profile.json")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+
+    let installed = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    // A warm tree cannot independently authorize the archive-to-tree mapping for
+    // a pending selection. Offline replay must leave the active generation alone.
+    let failure = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Store);
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        installed
+    );
+
+    let mut records: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    for record in records["packages"].as_array_mut().unwrap() {
+        record["artifact"] = "base64:dGFtcGVyZWQ=".into();
+    }
+    fs::write(&fixture, records.to_string()).unwrap();
+    let failure = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        installed
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
+#[test]
+fn native_selection_stale_manifest_rejects_before_store_or_archive_access() {
+    let (project, fixture, selection) = native_selection_fixture();
+    fs::remove_file(&fixture).unwrap();
+    project
+        .write("package.json", br#"{"name":"changed","version":"1.0.0"}"#)
+        .unwrap();
+    project
+        .write("node_modules/sentinel", b"old installation")
+        .unwrap();
+    let failure = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Frozen,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::LockManifestMismatch);
+    assert!(failure.error.to_string().contains("manifest digest"));
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(!project.path().join("store").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+        b"old installation"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
+#[test]
+fn native_selection_activation_failure_rolls_back_published_sources() {
+    let (project, fixture, selection) = native_selection_fixture();
+    project.write("node_modules/KEEP", b"user data").unwrap();
+    let failure = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Materialization);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(failure.recovery_error.is_none());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/.tapid-profile.json")
+            .exists()
+    );
+    assert!(!project.path().join("store/trees").exists());
+}
+
 fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) {
     let project = TempProject::new(label).unwrap();
     project
