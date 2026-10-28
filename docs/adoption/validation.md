@@ -1,5 +1,23 @@
 # Implementation validation — 2026-10-28
 
+## Disposable execution recheck
+
+At source HEAD `5657bec`, the worktree was clean before this evidence-only update.
+The focused capture/comparator command documented below was rerun with the supplied absolute
+Node 22.23.3 executable and explicit PATH: 22 tests, 21 passed, one existing native
+probe skip, zero failures (2,236 ms). No runtime or test source changed, so the
+previous full TypeScript result below remains prior-run evidence.
+
+Checking the alternate Docker context did not recover execution: both the configured
+Colima socket and the default `/var/run/docker.sock` are absent. Registry metadata
+returned HTTP 200. Connected-tool discovery found no disposable command execution
+service, and no engine validation command or source-matched receipt was supplied.
+No external application code ran. The next executable step remains the documented
+pilot journey in a credential-free disposable environment with registry/source and
+loopback access; an offline test worker cannot replace that journey. This is a
+technical environment requirement, not a product decision or a request for host
+execution permission. Five-project and native platform evidence remain incomplete.
+
 ## Recovery preflight correction
 
 This retry found and fixed a concrete recovery defect in `evaluate-uptime-kuma.ts`:
