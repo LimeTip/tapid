@@ -18,6 +18,10 @@ pub(crate) struct Provider<'a> {
     pub(crate) authorize: &'a mut dyn FnMut(&SecurityRequest) -> bool,
     pub(crate) transport: &'a mut Transport<'a>,
     pub(crate) record: &'a mut Recorder<'a>,
+    /// When present, owns replay loading and recording; injected freshness still
+    /// supplies time/age policy and may impose a stricter floor.
+    #[cfg(unix)]
+    pub(crate) replay: Option<&'a tapid_security_provider::ReplayStore>,
     pub(crate) threshold: AuditThreshold,
 }
 
@@ -48,11 +52,46 @@ pub(super) fn collect(
             inventory.requests.len(),
         );
     };
+    #[cfg(unix)]
+    let floors = inventory
+        .requests
+        .iter()
+        .map(|(_, request)| {
+            provider
+                .replay
+                .map_or(Ok(None), |store| store.load(provider.trust.issuer, request))
+        })
+        .collect::<Vec<_>>();
     let freshness = inventory
         .requests
         .iter()
         .map(|(_, request)| (provider.freshness)(request))
         .collect::<Vec<_>>();
+    #[cfg(unix)]
+    let state_failed = freshness
+        .iter()
+        .zip(&floors)
+        .map(|(freshness, floor)| match floor {
+            Err(_) => true,
+            Ok(Some((sequence, digest))) if *sequence == freshness.minimum_sequence => freshness
+                .previous_digest
+                .is_some_and(|previous| previous != digest),
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    #[cfg(unix)]
+    let freshness = {
+        let mut freshness = freshness;
+        for (freshness, floor) in freshness.iter_mut().zip(&floors) {
+            if let Ok(Some((sequence, digest))) = floor
+                && *sequence >= freshness.minimum_sequence
+            {
+                freshness.minimum_sequence = *sequence;
+                freshness.previous_digest = Some(digest);
+            }
+        }
+        freshness
+    };
     let inputs = inventory
         .requests
         .iter()
@@ -70,8 +109,25 @@ pub(super) fn collect(
     let collection = collect_recorded(
         &inputs,
         &provider.trust,
-        &mut provider.transport,
-        &mut provider.record,
+        &mut |request| {
+            #[cfg(unix)]
+            if let Some(index) = inventory
+                .requests
+                .iter()
+                .position(|(_, input)| input == request)
+                && state_failed[index]
+            {
+                return Err(RetrievalError::StateUnavailable);
+            }
+            (provider.transport)(request)
+        },
+        &mut |issuer, request, sequence, digest| {
+            #[cfg(unix)]
+            if let Some(store) = provider.replay {
+                return store.record(issuer, request, sequence, digest);
+            }
+            (provider.record)(issuer, request, sequence, digest)
+        },
     );
     let complete = graph_complete && inventory.excluded == 0 && collection.complete();
     let mut failures = Vec::new();

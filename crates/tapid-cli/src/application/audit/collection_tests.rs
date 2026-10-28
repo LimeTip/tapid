@@ -68,7 +68,12 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     let mut recorded = 0;
     let evidence_status = std::cell::Cell::new("findings");
     let fail_private = std::cell::Cell::new(false);
+    let forbid_transport = std::cell::Cell::new(false);
     let mut transport = |request: &tapid_protocol::SecurityRequest| {
+        assert!(
+            !forbid_transport.get(),
+            "unreadable replay state must prevent transport"
+        );
         if fail_private.get() && request.subject.package.registry == "https://private.example" {
             return Err(tapid_security_provider::RetrievalError::Unavailable);
         }
@@ -119,6 +124,8 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     let mut reject_record = |_: &str, _: &tapid_protocol::SecurityRequest, _: u64, _: &str| {
         Err(tapid_security_provider::RetrievalError::StateUnavailable)
     };
+    #[cfg(unix)]
+    let store = tapid_security_provider::ReplayStore::open(&home.path().join("floors")).unwrap();
     let mut provider = Provider {
         trust,
         freshness: &mut |_| tapid_attestations::EvidenceFreshness {
@@ -130,6 +137,8 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         authorize: &mut |_| true,
         transport: &mut transport,
         record: &mut record,
+        #[cfg(unix)]
+        replay: None,
         threshold: tapid_policy::AuditThreshold::Any,
     };
     let report = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
@@ -168,6 +177,44 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         "advisory"
     );
     assert_eq!(value["data"]["coverage"]["complete"], true);
+    #[cfg(unix)]
+    {
+        provider.replay = Some(&store);
+        let checked = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+        assert_eq!(checked.evidence.len(), 2);
+        let request = &checked.evidence[0].result.request;
+        let floor = store.load("fixture.example", request).unwrap().unwrap();
+        assert_eq!(floor.0, 3);
+        store
+            .record("fixture.example", request, 4, &floor.1)
+            .unwrap();
+        let checked = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+        assert_eq!(checked.evidence.len(), 1);
+        assert_eq!(checked.failures.len(), 1);
+        assert_eq!(checked.outcome, tapid_policy::AuditOutcome::Incomplete);
+        // A corrupt floor must fail before disclosing this occurrence.
+        for entry in std::fs::read_dir(home.path().join("floors")).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "floor")
+            {
+                std::fs::write(path, b"corrupt").unwrap();
+            }
+        }
+        forbid_transport.set(true);
+        let checked = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+        assert!(checked.evidence.is_empty());
+        assert_eq!(checked.failures.len(), 2);
+        assert!(
+            checked
+                .failures
+                .iter()
+                .all(|failure| failure.code == "state_unavailable")
+        );
+        provider.replay = None;
+        forbid_transport.set(false);
+    }
     // The same signed provider and policy path handles imported placements.
     let npm = serde_json::json!({"lockfileVersion":3,"packages":{
         "":serde_json::from_slice::<serde_json::Value>(manifest).unwrap(),

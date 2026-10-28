@@ -464,10 +464,15 @@ represented exactly are excluded from request counts. Opaque deterministic
 placement identifiers retain local mappings to exact graph keys; projection
 does not authorize disclosure, including for public registries.
 An internal application adapter now connects exact native and imported requests to signed
-provider collection, replay recording and threshold policy. Human and JSON
+provider collection, replay recording and threshold policy. On Unix, the adapter
+can use `ReplayStore` directly for exact issuer/request floor loading and durable
+recording. Corrupt or unreadable floors prevent transport for that occurrence;
+other occurrences retain their findings. The store replaces the injected recorder
+and never weakens a stricter injected freshness floor. Human and JSON
 renderers retain verified reports, check times, expiry and per-occurrence failures.
 The adapter is tested with raw signed fixtures; no command-line activation,
-production keys, credentials or durable security-state implementation are supplied.
+production keys or credentials are supplied. Windows durable security state remains
+unimplemented.
 Imported selection traverses recorded root and workspace entry points without
 host filtering, preserves exact peer placements and excludes workspace sources
 and unrepresentable platform predicates. Local placement paths are hashed before
