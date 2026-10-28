@@ -326,3 +326,67 @@ CodeQL and release-intent workflows succeeded for
 `83130d6b54a87b7f74591c5c4bd9ea7d6cdfb259`, not this integrated source.
 Independent QA/Security and published-candidate Acceptance, including native
 platform checks, remain downstream. No commit, push, merge or deployment occurred.
+
+## Maintenance round 3 revalidation
+
+On 2026-10-28, inspected the pending feature against main at
+`99c2bffa2418cc49551db8ce64fe82c9c479b1ca`. Managed branch
+`relay/20-f4e5d221` and published PR HEAD both identify
+`8a66c653664aad766182c9fa84668280a75b24d5`; main is already an ancestor.
+The checkout was clean, with no unmerged files or conflict markers. No further
+production repair was justified. Only this evidence report changed this round.
+
+The decoder and complete planner still precede write-capable installer recovery.
+Manifest validators, bounded candidate-exclusion serialization, verified storage
+and recoverable installation remain the reuse points. Ordinary add/remove retain
+their different cross-section semantics. Final pointer normalization follows all
+contributors, and both ordering regressions remain intact.
+[Review 5680159558](https://github.com/LimeTip/tapid/pull/360#pullrequestreview-5680159558)
+was refreshed and confirms the previous P3 is fixed; refreshed review threads
+are empty and no new actionable finding was present.
+
+Fresh focused checks used the supplied absolute Node 22 runtime, its directory
+first in PATH, `CARGO_TARGET_DIR=target`, and the Cargo wrapper:
+
+| Command suffix | Result |
+| --- | --- |
+| `test -p tapid --lib --locked dependency_edit` | 10 passed |
+| `test -p tapid --test cli --locked dependency_edits_` | 8 passed |
+| `test -p tapid --test json_results --locked candidate_exclusions` | 2 passed |
+| `test -p tapid --lib --locked batch_` | 11 passed |
+| `test -p tapid --test agent_workflows --locked` | 8 passed |
+| `test -p tapid --test cli --locked dependency_dry_run` | 17 passed |
+| `test -p tapid --lib --locked preview_rejects_inputs_changed` | 1 passed |
+| `test -p tapid --test upgrade --locked` | 15 passed |
+
+The matrix freshly checked final-state equivalence and operation counts; retained
+timing samples remain historical. The focused and full-lane orchestration
+inadvertently overlapped; no new timing evidence is claimed. Both sample files
+still contain 61 parseable JSON records (metadata plus 60 samples). Guide sizes
+remain 5794 LF / 5902 CRLF bytes. Focused logs are
+`/tmp/tapid-current-<target>-<filter-or-all>.log`.
+
+Workspace formatting and warnings-denied all-target/all-feature Clippy passed.
+`test --workspace --all-features --locked --no-fail-fast` completed with three
+failing targets: CLI integration 279 passed / 5 failed, run planning 11 / 2,
+and runner library 152 / 25. CLI library passed 303 and manifest passed 38;
+other targets passed. Native diagnostics report `UnsupportedContainment`, failed
+probe-profile installation and missing enforcement receipts, including dependent
+probe-child assertions. No containment assertions or policies were changed.
+Separate integration tests passed (1 consumer-install and 4 contracts).
+Architecture passed with 192 production Rust files scanned. Full-lane logs are
+`/tmp/tapid-round3-{fmt,clippy,workspace,integration,architecture}.log`.
+Release-helper compatibility tests (`detect_version_test.ts` and
+`installers_test.ts`) passed: 62 passed, 11 existing platform/capability skips,
+zero failures. Log: `/tmp/tapid-round3-release.log`. Final whitespace checks
+passed; the report's relative links and recorded commands were reviewed.
+
+Refreshed exact-head checks report 33 successes and CodeRabbit neutral, including
+native Ubuntu/macOS/Windows test jobs in
+[CI run 40659245164](https://github.com/LimeTip/tapid/actions/runs/40659245164).
+This is hosted check evidence, not a current engine-isolated local receipt or
+protected-merge eligibility assessment. The configured Docker socket
+`/Users/doug/.colima/default/docker.sock` is absent. The engine must restore its
+configured worker and run the full documented lane on the final source; do not
+use an unsandboxed host fallback. Fresh independent QA/Security and Acceptance
+remain downstream. No commit, push, merge, deployment or external message occurred.
