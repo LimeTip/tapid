@@ -1084,6 +1084,7 @@ fn omission_ledger_round_trip_and_hostile_input() {
         "integrityMismatch",
         "malformedArchive",
         "containmentFailure",
+        "importedPlacementAbsent",
         "unknown",
     ] {
         let mut hostile = value.clone();

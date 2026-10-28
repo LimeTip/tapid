@@ -9086,7 +9086,7 @@ fn imported_recorded_omissions_replay_without_restoring_absent_placements() {
             declaring_placement: "".into(),
             name: "native".into(),
             requirement: "^1".into(),
-            reason: OmissionReason::MetadataAbsent,
+            reason: OmissionReason::ImportedPlacementAbsent,
         }],
     })
     .unwrap();

@@ -37,6 +37,13 @@ A plain `tapid install` also preserves an imported graph. Explicit dependency mu
 
 ## Supported subset
 
+First verification also records absent optional providers as placement-keyed
+`importedPlacementAbsent` omissions in schema 12. Root, workspace, and selected
+nested package declarations retain their exact local alias and requirement.
+This states what the pinned npm graph contains; it does not infer why npm omitted
+the provider. Replay preserves these facts without consulting metadata. Required
+missing providers still fail graph validation.
+
 The importer accepts v3 `packages` entries for registry tarballs with canonical, credential-free HTTPS URLs, a conventional package/version tarball path, and one canonical padded SHA-512 integrity value. It supports nested duplicate versions, npm aliases with explicit actual package names, already selected ancestor peer providers, and distinct peer contexts when the resulting Tapid instance graph can represent them. It retains ordinary npm descriptive metadata, including license, engines, funding, deprecation, bin metadata, and install-script flags. Retaining engines metadata does not add runtime engine enforcement.
 
 Workspace imports accept `node_modules/<name>` links at the root or directly inside declared, contained workspace members. Member names, versions, dependency sections, peer metadata, and bins must match the npm lock. Bin comparison accepts equivalent string and object forms, including npm's conversion of a string bin to a command named after the unscoped package name. Tapid records each member manifest digest and rejects changed manifests or membership on replay. Tapid preserves these local link placements, including links to members not named in root dependencies. Member registry dependencies and peers can use root-hoisted, member-local, and nested registry placements. Different members can select different versions of the same dependency. Selection follows npm ancestor lookup and checks the nearest provider against the declared requirement. Selected local member dependencies must satisfy their declared ranges.

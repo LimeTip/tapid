@@ -85,7 +85,7 @@ impl ImportedSelection {
                 {
                     return Err(invalid());
                 }
-            } else if omission.reason == OmissionReason::IncompatiblePlatform {
+            } else if omission.reason != OmissionReason::ImportedPlacementAbsent {
                 return Err(invalid());
             }
         }
@@ -94,7 +94,7 @@ impl ImportedSelection {
 }
 
 impl ImportedNpmLockfile {
-    /// Record target-specific optional platform cuts from the pinned npm graph.
+    /// Record absent optional placements and target-specific platform cuts.
     /// Required reachability is checked before any selection facts are changed.
     pub fn record_platform_selection(
         &mut self,
@@ -120,20 +120,24 @@ impl ImportedNpmLockfile {
                 continue;
             };
             for (name, requirement) in declarations {
-                let Some(path) = parse::lookup(&placements, parent, name, false) else {
-                    continue;
+                let reason = match parse::lookup(&placements, parent, name, false) {
+                    None => OmissionReason::ImportedPlacementAbsent,
+                    Some(path)
+                        if graph.packages.contains_key(&path) && !selected.contains(&path) =>
+                    {
+                        OmissionReason::IncompatiblePlatform
+                    }
+                    Some(_) => continue,
                 };
-                if graph.packages.contains_key(&path) && !selected.contains(&path) {
-                    omissions.push(ImportedOmission {
-                        declaring_placement: parent.to_owned(),
-                        name: name.clone(),
-                        requirement: requirement
-                            .as_str()
-                            .expect("validated requirement")
-                            .to_owned(),
-                        reason: OmissionReason::IncompatiblePlatform,
-                    });
-                }
+                omissions.push(ImportedOmission {
+                    declaring_placement: parent.to_owned(),
+                    name: name.clone(),
+                    requirement: requirement
+                        .as_str()
+                        .expect("validated requirement")
+                        .to_owned(),
+                    reason,
+                });
             }
         }
         if !omissions.is_empty() {

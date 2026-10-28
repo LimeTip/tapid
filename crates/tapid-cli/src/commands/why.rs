@@ -71,6 +71,9 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                     tapid_lockfile::OmissionReason::MetadataAbsent => "metadata absent",
                     tapid_lockfile::OmissionReason::NoUsableCandidate => "no usable candidate",
                     tapid_lockfile::OmissionReason::IncompatiblePlatform => "incompatible platform",
+                    tapid_lockfile::OmissionReason::ImportedPlacementAbsent => {
+                        "imported placement absent"
+                    }
                 };
                 let origin = match &omission.origin {
                     tapid_lockfile::OmissionOrigin::Root => "project root".to_owned(),

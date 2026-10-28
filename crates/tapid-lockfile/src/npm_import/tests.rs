@@ -533,7 +533,7 @@ fn imported_omission_ledger_round_trip_and_hostile_inputs() {
     wire["placementSelection"] = serde_json::json!({
         "target":{"os":"linux","cpu":"x86_64","libc":"gnu"},
         "profile":"development",
-        "omissions":[{"declaringPlacement":"","name":"missing","requirement":"^1","reason":"metadataAbsent"}]
+        "omissions":[{"declaringPlacement":"","name":"missing","requirement":"^1","reason":"importedPlacementAbsent"}]
     });
     let restored = ImportedNpmLockfile::from_json(&wire.to_string()).unwrap();
     assert_eq!(
@@ -617,6 +617,9 @@ fn imported_omission_ledger_round_trip_and_hostile_inputs() {
         ("name", serde_json::json!("other")),
         ("requirement", serde_json::json!("^2")),
         ("reason", serde_json::json!("integrityMismatch")),
+        ("reason", serde_json::json!("metadataAbsent")),
+        ("reason", serde_json::json!("noUsableCandidate")),
+        ("reason", serde_json::json!("incompatiblePlatform")),
     ] {
         let mut hostile = wire.clone();
         hostile["placementSelection"]["omissions"][0][field] = value;
@@ -645,11 +648,12 @@ fn imported_omissions_preserve_declaring_placements_and_atomic_updates() {
     let selection: ImportedSelection = serde_json::from_value(serde_json::json!({
         "target":{"os":"linux","cpu":"x86_64","libc":null},"profile":"production",
         "omissions":[
-            {"declaringPlacement":"","name":"missing","requirement":"^1","reason":"metadataAbsent"},
-            {"declaringPlacement":"packages/member","name":"missing","requirement":"^2","reason":"noUsableCandidate"}
+            {"declaringPlacement":"","name":"missing","requirement":"^1","reason":"importedPlacementAbsent"},
+            {"declaringPlacement":"packages/member","name":"missing","requirement":"^2","reason":"importedPlacementAbsent"}
         ]
     })).unwrap();
-    lock.set_placement_selection(selection.clone()).unwrap();
+    lock.record_platform_selection(selection.target.clone(), selection.profile)
+        .unwrap();
     assert_eq!(lock.placement_selection(), Some(&selection));
     let before = lock.to_json().unwrap();
     for change in 0..5 {
@@ -684,7 +688,7 @@ fn imported_omission_cannot_hide_selected_optional_provider() {
     let mut lock = ImportedNpmLockfile::import(&input.to_string(), &root, DIGEST).unwrap();
     let selection: ImportedSelection = serde_json::from_value(serde_json::json!({
         "target":{"os":"linux","cpu":"x86_64","libc":null},"profile":"development",
-        "omissions":[{"declaringPlacement":"","name":name,"requirement":requirement,"reason":"metadataAbsent"}]
+        "omissions":[{"declaringPlacement":"","name":name,"requirement":requirement,"reason":"importedPlacementAbsent"}]
     })).unwrap();
     let before = lock.to_json().unwrap();
     assert!(lock.set_placement_selection(selection).is_err());
@@ -699,7 +703,7 @@ fn imported_omissions_retain_nested_alias_declarations_and_reject_hoisted_target
     let mut lock = ImportedNpmLockfile::import(&input.to_string(), MANIFEST, DIGEST).unwrap();
     let selection: ImportedSelection = serde_json::from_value(serde_json::json!({
         "target":{"os":"linux","cpu":"x86_64","libc":null},"profile":"development",
-        "omissions":[{"declaringPlacement":"node_modules/parent","name":"renamed","requirement":"npm:absent@^2","reason":"noUsableCandidate"}]
+        "omissions":[{"declaringPlacement":"node_modules/parent","name":"renamed","requirement":"npm:absent@^2","reason":"importedPlacementAbsent"}]
     })).unwrap();
     lock.set_placement_selection(selection.clone()).unwrap();
     let before = lock.to_json().unwrap();
@@ -768,4 +772,38 @@ fn imported_platform_cuts_preserve_alias_placements_and_required_reachability() 
             .is_err()
     );
     assert_eq!(required.to_json().unwrap(), before);
+}
+
+#[test]
+fn imported_missing_placements_record_exact_origins_without_inventing_failure_stages() {
+    let mut input: Value = serde_json::from_str(INPUT).unwrap();
+    input["packages"][""]["optionalDependencies"]["renamed"] = "npm:absent@^1".into();
+    input["packages"]["node_modules/parent"]["optionalDependencies"] =
+        serde_json::json!({"renamed":"npm:absent@^2"});
+    let root = input["packages"][""].to_string();
+    let mut lock = ImportedNpmLockfile::import(&input.to_string(), &root, DIGEST).unwrap();
+    lock.record_platform_selection(
+        crate::SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: None,
+        },
+        crate::SelectionProfile::Development,
+    )
+    .unwrap();
+    let wire: Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    let omissions = wire["placementSelection"]["omissions"].as_array().unwrap();
+    for (parent, requirement) in [
+        ("", "npm:absent@^1"),
+        ("node_modules/parent", "npm:absent@^2"),
+    ] {
+        assert!(
+            omissions.contains(&serde_json::json!({
+                "declaringPlacement":parent,"name":"renamed","requirement":requirement,
+                "reason":"importedPlacementAbsent"
+            })),
+            "{omissions:?}"
+        );
+    }
+    ImportedNpmLockfile::from_json(&wire.to_string()).unwrap();
 }

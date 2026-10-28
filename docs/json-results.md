@@ -16,7 +16,9 @@ failed artifact verification or failed replay into success. These fields report
 existing ledger facts; ordinary registry selection generates them for accepted
 metadata/candidate omissions, including graphs with copied file and Git roots.
 Imported first verification also generates placement-keyed incompatible-platform
-omissions. Initial import remains schema 8; missing-placement generation remains unfinished.
+omissions and absent optional placements (`importedPlacementAbsent`). The latter
+records absence in the pinned npm graph without claiming a metadata, candidate,
+download, or hook failure. Initial import remains schema 8.
 
 | Command | Global `--json` |
 | --- | --- |

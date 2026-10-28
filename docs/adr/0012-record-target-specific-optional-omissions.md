@@ -41,8 +41,12 @@ Imported schema 12 uses a separate placement-keyed ledger because ordinary keys
 cannot preserve npm placement identity. Offline import generation still emits
 schema 8. First artifact verification records optional platform cuts in schema 12
 without deleting the pinned npm placements. Required reachability remains fatal;
-replay requires the recorded target/profile. Missing-placement generation and
-broader reporting remain separate implementation work. Copied root declarations retain their original file or Git
+replay requires the recorded target/profile. First verification also records
+absent optional providers as `importedPlacementAbsent`, preserving root, workspace,
+and selected nested declaring placements. Absence in a pinned npm graph provides
+no evidence of the original failure stage, so imported validation rejects metadata
+and candidate reasons for these cuts. Ordinary locks reject this import-only
+reason. Broader reporting remains separate implementation work. Copied root declarations retain their original file or Git
 specification in `originalRequirement`, the resolved npm package requirement,
 and the exact immutable source-qualified target key. The lockfile validates the
 bounded input and effective package identity; the CLI reuses copied specification

@@ -74,13 +74,15 @@ pub enum OmissionOrigin {
     Package { key: String },
 }
 
-/// Only reasons whose failure stage is unambiguous are representable.
+/// Known failure stages, or explicit absence in an imported placement graph.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OmissionReason {
     MetadataAbsent,
     NoUsableCandidate,
     IncompatiblePlatform,
+    /// The imported npm lock has no provider; its original failure stage is unknown.
+    ImportedPlacementAbsent,
 }
 
 impl LockedSelection {
@@ -218,6 +220,9 @@ impl LockedSelection {
         }
         let mut declarations = std::collections::BTreeSet::new();
         for omission in &self.omissions {
+            if omission.reason == OmissionReason::ImportedPlacementAbsent {
+                return Err(invalid());
+            }
             validate_original_requirement(
                 &omission.origin,
                 &omission.name,

@@ -127,4 +127,8 @@ ordinary root/member declaration checks, imported manifest/placement checks,
 selected artifact verification and bounded omission reporting. These replay paths
 do not add new accepted failure reasons. First verification records platform cuts
 with `record_platform_selection`; required reachability is validated before the
-ledger changes. Missing-placement generation remains unfinished.
+ledger changes. The same operation records absent optional providers as
+`importedPlacementAbsent` at root, selected package, and workspace origins.
+Only this reason is accepted for absent imported providers: the pinned npm lock
+does not establish metadata absence or candidate failure. Ordinary schema 11
+rejects this import-only reason.

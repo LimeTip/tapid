@@ -1629,3 +1629,105 @@ fn npm_import_records_platform_cuts_before_unchanged_offline_replay() {
         marker
     );
 }
+
+#[test]
+fn npm_import_records_absent_root_and_nested_aliases_and_replays_without_metadata() {
+    let project = reference_project("npm-import-absent-ledger");
+    let mut npm: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package-lock.json")).unwrap())
+            .unwrap();
+    npm["packages"][""]["optionalDependencies"]["missing"] = "npm:absent@^1".into();
+    npm["packages"]["node_modules/parent"]["optionalDependencies"] =
+        serde_json::json!({"missing":"npm:absent@^2"});
+    project
+        .write("package.json", npm["packages"][""].to_string().as_bytes())
+        .unwrap();
+    project
+        .write("package-lock.json", npm.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    let store = project.path().join("store");
+    let installed = invoke(
+        &project,
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stdout)
+    );
+    let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(
+        result["selection"]["omissions"],
+        wire["placementSelection"]["omissions"]
+    );
+    for (parent, requirement) in [
+        ("", "npm:absent@^1"),
+        ("node_modules/parent", "npm:absent@^2"),
+    ] {
+        assert!(
+            result["selection"]["omissions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({
+                    "declaringPlacement":parent,"name":"missing","requirement":requirement,
+                    "reason":"importedPlacementAbsent"
+                }))
+        );
+    }
+    project.write("registry.json", b"invalid JSON").unwrap();
+    for args in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["install", "--offline"],
+    ] {
+        let output = invoke(
+            &project,
+            &[args.as_slice(), &["--store-dir", store.to_str().unwrap()]].concat(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("ImportedPlacementAbsent"));
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert!(!project.path().join("node_modules/missing").exists());
+    }
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    let mut forged = wire;
+    forged["placementSelection"]["omissions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|cut| cut["name"] == "missing")
+        .unwrap()["reason"] = "metadataAbsent".into();
+    let forged = forged.to_string();
+    project.write("tapid.lock", forged.as_bytes()).unwrap();
+    assert!(
+        !invoke(&project, &["install", "--offline", "--json"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        forged
+    );
+    assert_eq!(
+        fs::read(project.path().join(".tapid-managed")).unwrap(),
+        marker
+    );
+}
