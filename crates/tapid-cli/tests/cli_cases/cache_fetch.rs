@@ -865,14 +865,29 @@ fn cache_fetch_human_and_json_agree_with_explicit_project_selection() {
     let (output, json) = fetch_json(&scenario, "seed");
     assert!(output.status.success(), "{output:?}");
     let elsewhere = tapid_test_support::TempHome::new("fetch-working-directory").unwrap();
-    let output = scenario.command(&["cache", "fetch", "--project-dir"]).arg(root)
-        .arg("--store-dir").arg(root.join("seed")).current_dir(elsewhere.path()).output().unwrap();
+    let output = scenario
+        .command(&["cache", "fetch", "--project-dir"])
+        .arg(root)
+        .arg("--store-dir")
+        .arg(root.join("seed"))
+        .current_dir(elsewhere.path())
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains(&format!("Target: {}", json["data"]["target"].as_str().unwrap())), "{text}");
+    assert!(
+        text.contains(&format!(
+            "Target: {}",
+            json["data"]["target"].as_str().unwrap()
+        )),
+        "{text}"
+    );
     assert!(text.contains("complete_locked_graph"));
     assert!(text.contains("verified sources only"));
-    let counters = text.lines().find_map(|line| line.strip_prefix("Completed work: ")).unwrap();
+    let counters = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Completed work: "))
+        .unwrap();
     let counters: serde_json::Value = serde_json::from_str(counters).unwrap();
     assert_eq!(counters, json["data"]["counters"]);
 }
@@ -883,11 +898,29 @@ fn cache_fetch_failed_shared_tree_keeps_later_contexts_unprocessed() {
     let scenario = fetch_project("fetch-shared-failure");
     let path = scenario.project.path().join("tapid.lock");
     let mut lock: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    let (key, mut package) = lock["packages"].as_object().unwrap().iter().find(|(_, p)| p["name"] == "parent").map(|(k,p)| (k.clone(),p.clone())).unwrap();
+    let (key, mut package) = lock["packages"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, p)| p["name"] == "parent")
+        .map(|(k, p)| (k.clone(), p.clone()))
+        .unwrap();
     package["peerContext"] = "name=react;version=18.0.0".into();
-    lock["packages"].as_object_mut().unwrap().insert(key.replace("peer=-", "peer=name=react;version=18.0.0"), package);
-    for package in lock["packages"].as_object_mut().unwrap().values_mut().filter(|p| p["name"] == "parent") {
-        package["artifactIntegrity"] = format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode([0; 64])).into();
+    lock["packages"].as_object_mut().unwrap().insert(
+        key.replace("peer=-", "peer=name=react;version=18.0.0"),
+        package,
+    );
+    for package in lock["packages"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .filter(|p| p["name"] == "parent")
+    {
+        package["artifactIntegrity"] = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode([0; 64])
+        )
+        .into();
     }
     fs::write(path, lock.to_string()).unwrap();
     let (output, value) = fetch_json(&scenario, "cold");
@@ -899,13 +932,27 @@ fn cache_fetch_failed_shared_tree_keeps_later_contexts_unprocessed() {
 #[test]
 fn cache_fetch_failure_details_are_sanitized_bounded_and_have_sorted_pointers() {
     let scenario = super::command_support::CliFixture::new("fetch-untrusted-details");
-    scenario.project.write("package.json", br#"{"name":"app","version":"1.0.0"}"#).unwrap();
+    scenario
+        .project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
     let mut packages = serde_json::Map::new();
     for index in 0..12 {
-        let key = format!("https://user:never-log-this@registry.example/{index}/{}?token=never-log-this\u{1b}", "a".repeat(5000));
+        let key = format!(
+            "https://user:never-log-this@registry.example/{index}/{}?token=never-log-this\u{1b}",
+            "a".repeat(5000)
+        );
         packages.insert(key, serde_json::json!({}));
     }
-    scenario.project.write("tapid.lock", serde_json::json!({"lockfileVersion":7,"packages":packages}).to_string().as_bytes()).unwrap();
+    scenario
+        .project
+        .write(
+            "tapid.lock",
+            serde_json::json!({"lockfileVersion":7,"packages":packages})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
     let (output, value) = fetch_json(&scenario, "cold");
     assert_eq!(output.status.code(), Some(1));
     let text = String::from_utf8(output.stdout).unwrap();
@@ -915,7 +962,12 @@ fn cache_fetch_failure_details_are_sanitized_bounded_and_have_sorted_pointers() 
         assert!(key.len() <= 4096);
         assert!(!key.chars().any(char::is_control));
     }
-    let pointers = value["truncated_fields"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect::<Vec<_>>();
+    let pointers = value["truncated_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(pointers.len(), 12);
     let mut sorted = pointers.clone();
     sorted.sort_unstable();

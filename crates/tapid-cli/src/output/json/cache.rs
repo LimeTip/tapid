@@ -61,7 +61,12 @@ pub(crate) fn cache_fetch(
     json_output: bool,
 ) -> ExitCode {
     let success = report.result.is_ok();
-    let target = format!("{}/{}/{}", std::env::consts::OS, std::env::consts::ARCH, crate::online::current_libc().unwrap_or("unspecified"));
+    let target = format!(
+        "{}/{}/{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        crate::online::current_libc().unwrap_or("unspecified")
+    );
     let counters = json!({"already_verified_trees":report.observations.count("already_verified"), "fetched_verified_trees":report.observations.count("fetched_verified"),"newly_published_trees":report.newly_published,"network_retrievals":report.observations.network_retrievals,"fixture_reads":report.observations.fixture_reads,"local_reads":report.observations.local_reads,"unsupported_instances":report.count("unsupported"),"unavailable_instances":report.count("unavailable"),"failed_instances":report.count("failed"),"unprocessed_instances":report.count("unprocessed")});
     let code = if success { 0 } else { 1 };
     if !json_output {
