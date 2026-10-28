@@ -10,7 +10,6 @@ fn bounded_host_output(
     timeout_ms: u32,
 ) -> std::io::Result<std::process::Output> {
     use std::io::Read;
-    use std::os::windows::io::AsRawHandle;
     let capture = tapid_test_support::TempProject::new("host-authority-capture")?;
     let stdout_path = capture.path().join("stdout");
     let stderr_path = capture.path().join("stderr");
@@ -19,6 +18,31 @@ fn bounded_host_output(
         .stdout(std::fs::File::create(&stdout_path)?)
         .stderr(std::fs::File::create(&stderr_path)?);
     let mut child = command.spawn()?;
+    let status = bounded_child_status(&mut child, timeout_ms)?;
+    let read = |path: &std::path::Path| -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(16_385)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 16_384 {
+            return Err(std::io::Error::other(
+                "host authority probe output exceeded limit",
+            ));
+        }
+        Ok(bytes)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: read(&stdout_path)?,
+        stderr: read(&stderr_path)?,
+    })
+}
+
+fn bounded_child_status(
+    child: &mut std::process::Child,
+    timeout_ms: u32,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::windows::io::AsRawHandle;
     // SAFETY: Child owns the live process handle throughout both waits.
     let waited = unsafe { WaitForSingleObject(child.as_raw_handle() as _, timeout_ms) };
     if waited != WAIT_OBJECT_0 {
@@ -39,24 +63,7 @@ fn bounded_host_output(
             "host authority probe did not complete within its bounded wait",
         ));
     }
-    let status = child.wait()?;
-    let read = |path: &std::path::Path| -> std::io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(16_385)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 16_384 {
-            return Err(std::io::Error::other(
-                "host authority probe output exceeded limit",
-            ));
-        }
-        Ok(bytes)
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: read(&stdout_path)?,
-        stderr: read(&stderr_path)?,
-    })
+    child.wait()
 }
 
 #[test]
@@ -109,6 +116,12 @@ fn host_authority_probe_preserves_output_and_rejects_each_oversized_stream() {
 
 #[test]
 fn provider_helper() {
+    if let Ok(marker @ ("com-descendant" | "com-descendant-host")) =
+        std::env::var("TAPID_TEST_MARKER").as_deref()
+    {
+        super::com_probe::probe(marker);
+        return;
+    }
     // Direct writes bypass libtest capture so the supervisor observes the actual
     // native stdout/stderr streams, including stderr-only overflow.
     match std::env::var("TAPID_TEST_MARKER").as_deref() {
@@ -143,6 +156,33 @@ fn provider_helper() {
     if let Ok(marker) = std::env::var("TAPID_TEST_MARKER") {
         probe_com_activation(&marker);
         super::com_probe::probe(&marker);
+        if std::env::var_os("TAPID_TEST_COM_DESCENDANT").is_some() {
+            // The outer bounded supervisor owns the wait and, for LPAC runs,
+            // the Job owns this child too. Inherit the controlled environment
+            // and native output handles; never introduce a shell or host tool.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &format!(
+                        "{}::provider_helper",
+                        module_path!().split_once("::").unwrap().1
+                    ),
+                    "--nocapture",
+                ])
+                .env_remove("TAPID_TEST_COM_DESCENDANT")
+                .env(
+                    "TAPID_TEST_MARKER",
+                    if marker == "provider-host" {
+                        "com-descendant-host"
+                    } else {
+                        "com-descendant"
+                    },
+                )
+                .spawn()
+                .unwrap();
+            let status = bounded_child_status(&mut child, 3_000).unwrap();
+            assert!(status.success(), "COM descendant failed: {status}");
+        }
     }
 }
 
@@ -168,6 +208,7 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         .env("SystemRoot", &system_root)
         .env("TAPID_TEST_REGISTRY", &registry.path)
         .env("TAPID_TEST_COM_CLASS", &server.class)
+        .env("TAPID_TEST_COM_DESCENDANT", "1")
         .env("TAPID_TEST_MARKER", "provider-host");
     let host = bounded_host_output(&mut host_command, 10_000).unwrap();
     assert!(
@@ -179,10 +220,11 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     assert!(String::from_utf8_lossy(&host.stdout).contains("registry:host-input:readable"));
     assert!(String::from_utf8_lossy(&host.stdout).contains("com:shell-link:activated"));
     assert!(String::from_utf8_lossy(&host.stdout).contains("com:local-server:activated"));
+    assert!(String::from_utf8_lossy(&host.stdout).contains("com:descendant:activated"));
     assert_eq!(
         server.creations(),
-        1,
-        "host request must reach the Rust server"
+        2,
+        "host root and descendant requests must reach the Rust server"
     );
     let program_units: Vec<_> = program.as_os_str().encode_wide().collect();
     let argument_units: Vec<Vec<u16>> = arguments
@@ -202,6 +244,10 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         let environment = super::super::super::windows_environment_block_units(
             &std::collections::BTreeMap::from([
                 (std::ffi::OsString::from("SystemRoot"), system_root.clone()),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_COM_DESCENDANT"),
+                    std::ffi::OsString::from("1"),
+                ),
                 (
                     std::ffi::OsString::from("TAPID_TEST_COM_CLASS"),
                     std::ffi::OsString::from(&server.class),
@@ -288,9 +334,11 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         assert!(stdout.contains("registry:host-input:"), "{stdout}");
         assert!(stdout.contains("com:shell-link:"), "{stdout}");
         assert!(stdout.contains("com:local-server:"), "{stdout}");
+        assert_eq!(stdout.matches("com:descendant:").count(), 1, "{stdout}");
         assert_eq!(
             server.creations() - creations_before,
-            u32::from(stdout.contains("com:local-server:activated")),
+            (stdout.matches("com:local-server:activated").count()
+                + stdout.matches("com:descendant:activated").count()) as u32,
             "activation observation must match server-side dispatch"
         );
         println!("registryRead={registry_read}: {stdout}");
@@ -304,6 +352,7 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     let creations_before = server.creations();
     host_command
         .env_remove("TAPID_TEST_REGISTRY")
+        .env_remove("TAPID_TEST_COM_DESCENDANT")
         .env("TAPID_TEST_MARKER", "com-revoked");
     let revoked = bounded_host_output(&mut host_command, 10_000).unwrap();
     assert!(

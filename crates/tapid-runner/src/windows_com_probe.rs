@@ -238,7 +238,7 @@ pub fn probe(marker: &str) {
         }
     }
     unsafe { CoUninitialize() };
-    if marker == "provider-host" {
+    if matches!(marker, "provider-host" | "com-descendant-host") {
         assert_eq!(result, 0, "host local-server activation: {result:#010x}");
     }
     if marker == "com-revoked" {
@@ -247,10 +247,15 @@ pub fn probe(marker: &str) {
             "revoked class must be unavailable"
         );
     }
+    let scope = if matches!(marker, "com-descendant" | "com-descendant-host") {
+        "descendant"
+    } else {
+        "local-server"
+    };
     match result as u32 {
-        0 => println!("com:local-server:activated"),
-        0x80070005 => println!("com:local-server:access-denied"),
-        0x80040154 => println!("com:local-server:class-unavailable"),
+        0 => println!("com:{scope}:activated"),
+        0x80070005 => println!("com:{scope}:access-denied"),
+        0x80040154 => println!("com:{scope}:class-unavailable"),
         _ => panic!("unexpected local-server activation result: {result:#010x}"),
     }
 }

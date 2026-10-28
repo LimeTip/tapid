@@ -296,7 +296,17 @@ context only and `REGCLS_MULTI_SEPARATE`. Separate helper processes request
 server-side creation count. Each LPAC variant records activation, access denial,
 or class unavailability, and its observation must match the creation-count delta.
 This samples cross-process COM dispatch under the host's default COM security;
-no custom security descriptor, elevation, shell action, or persistent registry
+each root helper also launches the same isolated Rust executable directly as a
+descendant, with inherited controlled environment and output handles. Host root
+and descendant activation must both succeed. Each LPAC run requires separate
+root and descendant observations, and their combined successful activation count
+must match the server-side creation delta. The outer timeout and Job supervision
+cover the contained descendant, and cleanup still requires an empty Job before
+revocation. This checks a direct descendant, not arbitrary broker closure or
+detached process topology. Descendant waits reuse the host supervisor's bounded
+native wait, termination and reaping, without creating capture files from inside
+the LPAC. Native execution remains required.
+No custom security descriptor, elevation, shell action, or persistent registry
 entry is installed. The inert factory uses atomic reference accounting and exposes
 no host operations. Helpers retain the existing bounded waits/output supervision.
 After both helpers and Jobs exit, normal cleanup checks revocation of the exact
