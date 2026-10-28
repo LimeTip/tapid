@@ -392,3 +392,279 @@ fn denied_or_invalid_evidence_never_advances_replay_state() {
     ));
     assert_eq!(requests, 1);
 }
+
+#[test]
+fn collection_retains_verified_findings_when_another_request_fails() {
+    use tapid_security_provider::{CollectionInput, collect_recorded};
+    let first = request();
+    let mut second = first.clone();
+    second.subject.requested_name = "another-alias".into();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let inputs = [&first, &second].map(|request| CollectionInput {
+        request,
+        disclosure: Disclosure::Exact(request),
+        freshness: &freshness,
+    });
+    let mut recorded = 0;
+    let collection = collect_recorded(
+        &inputs,
+        &trust,
+        &mut |sent| {
+            if sent == &first {
+                Ok(Cursor::new(ENVELOPE))
+            } else {
+                Err(RetrievalError::Unavailable)
+            }
+        },
+        &mut |_, _, _, _| {
+            recorded += 1;
+            Ok(())
+        },
+    );
+    assert_eq!(collection.results.len(), 2);
+    assert_eq!(
+        collection.results[0].as_ref().unwrap().result().findings[0].id,
+        "REPORT-1"
+    );
+    assert!(matches!(
+        collection.results[1],
+        Err(RetrievalError::Unavailable)
+    ));
+    assert_eq!(collection.not_checked, 0);
+    assert!(!collection.complete());
+    assert_eq!(recorded, 1);
+}
+
+#[test]
+fn collection_caps_requests_and_reports_unchecked_tail() {
+    use tapid_security_provider::{CollectionInput, collect_recorded};
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let inputs = (0..1002)
+        .map(|_| CollectionInput {
+            request: &request,
+            disclosure: Disclosure::Exact(&request),
+            freshness: &freshness,
+        })
+        .collect::<Vec<_>>();
+    let mut calls = 0;
+    let collection = collect_recorded(
+        &inputs,
+        &trust,
+        &mut |_| {
+            calls += 1;
+            Err::<Cursor<&[u8]>, _>(RetrievalError::Unavailable)
+        },
+        &mut |_, _, _, _| panic!("failed requests must not persist state"),
+    );
+    assert_eq!(calls, 1000);
+    assert_eq!(collection.results.len(), 1000);
+    assert_eq!(collection.not_checked, 2);
+    assert!(!collection.complete());
+}
+
+#[test]
+fn collection_bounds_aggregate_decompressed_reads_including_rejected_responses() {
+    use tapid_security_provider::{CollectionInput, collect_recorded};
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let inputs = (0..140)
+        .map(|_| CollectionInput {
+            request: &request,
+            disclosure: Disclosure::Exact(&request),
+            freshness: &freshness,
+        })
+        .collect::<Vec<_>>();
+    let read = std::rc::Rc::new(std::cell::Cell::new(0));
+    struct Endless(std::rc::Rc<std::cell::Cell<usize>>);
+    impl Read for Endless {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            buffer.fill(b' ');
+            self.0.set(self.0.get() + buffer.len());
+            Ok(buffer.len())
+        }
+    }
+    let collection = collect_recorded(
+        &inputs,
+        &trust,
+        &mut |_| Ok(Endless(read.clone())),
+        &mut |_, _, _, _| panic!("invalid bodies cannot advance replay state"),
+    );
+    assert_eq!(read.get(), 32 * 1024 * 1024);
+    assert_eq!(collection.results.len(), 128);
+    assert_eq!(collection.not_checked, 12);
+    assert_eq!(
+        collection.limit,
+        Some(tapid_security_provider::CollectionLimit::ResponseBytes)
+    );
+    assert!(!collection.complete());
+}
+
+#[test]
+fn collection_explains_its_limit_and_never_calls_empty_inventory_complete() {
+    use tapid_security_provider::{CollectionInput, CollectionLimit, collect_recorded};
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let empty = collect_recorded::<Cursor<&[u8]>>(
+        &[],
+        &trust,
+        &mut |_| panic!("empty collection cannot make requests"),
+        &mut |_, _, _, _| panic!("empty collection cannot record evidence"),
+    );
+    assert!(!empty.complete());
+    assert_eq!(empty.limit, None);
+    let inputs = (0..1001)
+        .map(|_| CollectionInput {
+            request: &request,
+            disclosure: Disclosure::Denied,
+            freshness: &freshness,
+        })
+        .collect::<Vec<_>>();
+    let denied = collect_recorded::<Cursor<&[u8]>>(
+        &inputs,
+        &trust,
+        &mut |_| panic!("denied collection cannot make requests"),
+        &mut |_, _, _, _| panic!("denied collection cannot record evidence"),
+    );
+    assert_eq!(denied.limit, Some(CollectionLimit::Requests));
+    assert_eq!(denied.not_checked, 1);
+    assert!(
+        denied
+            .results
+            .iter()
+            .all(|result| matches!(result, Err(RetrievalError::NotAuthorized)))
+    );
+}
+
+#[test]
+fn collection_completeness_requires_current_full_signed_coverage_and_recording() {
+    use tapid_security_provider::{CollectionInput, collect_recorded};
+    use tapid_signatures::TrustEnvelope;
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    for (status, limitations, writable, expected) in [
+        ("findings", vec![], true, true),
+        ("no_known_findings", vec![], true, true),
+        ("partial", vec!["malware source unavailable"], true, false),
+        ("stale", vec!["refresh unavailable"], true, false),
+        ("invalid_evidence", vec!["report withdrawn"], true, false),
+        ("findings", vec!["limited provider coverage"], true, false),
+        ("findings", vec![], false, false),
+    ] {
+        let mut envelope: serde_json::Value = serde_json::from_slice(ENVELOPE).unwrap();
+        let claims = &mut envelope["claims"];
+        claims["status"] = serde_json::json!(status);
+        claims["limitations"] = serde_json::json!(limitations);
+        if status == "no_known_findings" {
+            claims["findings"] = serde_json::json!([]);
+        }
+        if status == "invalid_evidence" {
+            claims["coverage"] = serde_json::json!([]);
+            claims["findings"][0]["state"] = serde_json::json!("withdrawn");
+            claims["findings"][0]["revision"] = serde_json::json!("3");
+        }
+        let seed = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let seed =
+            std::array::from_fn(|i| u8::from_str_radix(&seed[2 * i..2 * i + 2], 16).unwrap());
+        let bytes = serde_json::to_vec(
+            &TrustEnvelope::unsigned("tapid-security-v2", "version-scope", claims.clone())
+                .sign("fixture", &seed)
+                .unwrap(),
+        )
+        .unwrap();
+        let inputs = [CollectionInput {
+            request: &request,
+            disclosure: Disclosure::Exact(&request),
+            freshness: &freshness,
+        }];
+        let collection = collect_recorded(
+            &inputs,
+            &trust,
+            &mut |_| Ok(Cursor::new(&bytes)),
+            &mut |_, _, _, _| {
+                if writable {
+                    Ok(())
+                } else {
+                    Err(RetrievalError::StateUnavailable)
+                }
+            },
+        );
+        assert_eq!(
+            collection.complete(),
+            expected,
+            "status={status}, writable={writable}"
+        );
+        if writable {
+            assert!(collection.results[0].is_ok(), "{:?}", collection.results[0]);
+            if status == "invalid_evidence" {
+                let evidence = collection.results[0].as_ref().unwrap();
+                assert_eq!(evidence.result().findings[0].id, "REPORT-1");
+                assert_eq!(evidence.result().findings[0].revision, "3");
+                assert_eq!(
+                    evidence.result().findings[0].state,
+                    tapid_protocol::ReportState::Withdrawn
+                );
+            }
+        } else {
+            assert!(matches!(
+                collection.results[0],
+                Err(RetrievalError::StateUnavailable)
+            ));
+        }
+    }
+}

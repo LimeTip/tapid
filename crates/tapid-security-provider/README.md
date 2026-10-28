@@ -22,8 +22,25 @@ rollback or equivocation. Writer failures return `StateUnavailable`; denied
 disclosure and invalid evidence never invoke the writer. This interface does
 not itself provide a durable filesystem store or make an in-memory writer durable.
 
+`collect_recorded` evaluates exact requests in input order and retains successful
+reports alongside per-request failures. It admits at most 1,000 inputs and reads
+at most 32 MiB of decompressed responses across the collection, including invalid
+and oversized responses. Each response still has the existing 262,144-byte
+verification limit. Results correspond to the processed input prefix; `not_checked`
+counts the remaining suffix, and `limit` explains request/response-budget exhaustion.
+The response that exhausts the aggregate read budget fails closed as unavailable.
+Processing is sequential, so a collection uses one transport request at a time.
+
+Collection completeness requires a nonempty collection, no unchecked inputs,
+successful replay recording, and current signed full-coverage results without
+limitations. It does not establish reachable-graph coverage, authorization to
+private evidence, scanner accuracy or artifact analysis. No report is discarded
+because another request failed. The caller must still enforce graph completeness
+and policy thresholds. Transport timeouts and collection deadlines remain the
+adapter's responsibility; this synchronous interface cannot interrupt a blocked read.
+
 This is the retrieval foundation, not a complete audit service. Durable replay
-persistence, credentials, cache, collection budgets and live transport remain
+persistence, credentials, cache, deadline enforcement and live transport remain
 unimplemented. Callers must supply trusted replay floors and persist accepted
 sequence/digest state before using evidence for policy. A verified response alone
 does not establish collection completeness. No project, store, artifact or
