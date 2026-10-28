@@ -1347,6 +1347,12 @@ fn candidate_exclusions_survive_install_preview_and_replay() {
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("password"));
         if preview {
+            assert_eq!(result["data"]["starting_state"]["schema_version"], 1);
+            assert_eq!(result["data"]["starting_state"]["lock"]["state"], "absent");
+            assert_eq!(
+                result["data"]["starting_state"]["consistency"],
+                "rechecked_non_atomic_observation"
+            );
             assert!(!project.path().join("tapid.lock").exists());
             assert!(!project.path().join("node_modules").exists());
         } else {
@@ -1367,6 +1373,10 @@ fn candidate_exclusions_survive_install_preview_and_replay() {
             let (output, lock_preview) = invoke(&project, &lock_preview_args);
             assert!(output.status.success(), "{lock_preview}");
             assert!(lock_preview["data"].get("candidate_exclusions").is_none());
+            assert_eq!(
+                lock_preview["data"]["starting_state"]["lock"]["state"],
+                "present"
+            );
             let (output, refreshed) = invoke(
                 &project,
                 &[
