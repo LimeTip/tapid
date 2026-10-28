@@ -174,3 +174,82 @@ fn authorization_never_falls_back_or_leaks_credentials_to_another_origin() {
 fn credential_sources_remain_distinct_on_case_insensitive_environments() {
     assert!(ProviderConfig::parse(br#"{"version":1,"origin":"https://cloud.example","accountCredentialEnv":"AUDIT_TOKEN","headlessCredentialEnv":"audit_token","cache":"disabled"}"#).is_err());
 }
+
+#[test]
+fn consent_documents_bind_exact_inventory_to_the_configured_origin() {
+    let config = ProviderConfig::parse(
+        br#"{"version":1,"origin":"https://cloud.example","cache":"disabled"}"#,
+    )
+    .unwrap();
+    let request = request();
+    let document =
+        serde_json::json!({"version":1,"origin":"https://cloud.example","requests":[request]});
+    let consented = config
+        .parse_consent(&serde_json::to_vec(&document).unwrap())
+        .unwrap();
+    assert_eq!(consented, vec![request.clone()]);
+    assert!(
+        config
+            .authorize(
+                &request,
+                &consented,
+                CredentialMode::Anonymous,
+                "https://cloud.example",
+                &mut |_| panic!("anonymous")
+            )
+            .is_ok()
+    );
+    let mut changed = request.clone();
+    changed.subject.requested_name = "different-alias".into();
+    assert!(matches!(
+        config.authorize(
+            &changed,
+            &consented,
+            CredentialMode::Anonymous,
+            "https://cloud.example",
+            &mut |_| panic!("changed inventory")
+        ),
+        Err(RetrievalError::NotAuthorized)
+    ));
+    for (field, value) in [
+        ("version", serde_json::json!(2)),
+        ("origin", serde_json::json!("https://other.example")),
+        ("origin", serde_json::json!("https://cloud.example/")),
+        (
+            "requests",
+            serde_json::json!([request.clone(), request.clone()]),
+        ),
+        ("requests", serde_json::json!([{}])),
+        ("allowAll", serde_json::json!(true)),
+    ] {
+        let mut invalid = document.clone();
+        invalid[field] = value;
+        assert!(
+            config
+                .parse_consent(&serde_json::to_vec(&invalid).unwrap())
+                .is_err(),
+            "{field}"
+        );
+    }
+    assert!(
+        config
+            .parse_consent(
+                br#"{"version":1,"version":1,"origin":"https://cloud.example","requests":[]}"#
+            )
+            .is_err()
+    );
+    assert!(config.parse_consent(&vec![b' '; 1024 * 1024 + 1]).is_err());
+    let mut excessive = document.clone();
+    excessive["requests"] = serde_json::json!(vec![request; 1001]);
+    assert!(
+        config
+            .parse_consent(&serde_json::to_vec(&excessive).unwrap())
+            .is_err()
+    );
+    assert!(
+        config
+            .parse_consent(br#"{"version":1,"origin":"https://cloud.example","requests":[]}"#)
+            .unwrap()
+            .is_empty()
+    );
+}

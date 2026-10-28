@@ -45,7 +45,8 @@ and policy thresholds. Transport timeouts and collection deadlines remain the
 adapter's responsibility; this synchronous interface cannot interrupt a blocked read.
 
 This is the retrieval foundation, not a complete audit service. Credential
-provisioning, cache bodies and CLI provider activation remain unimplemented.
+provisioning and cache bodies remain unimplemented. CLI activation requires explicit
+trusted inputs; see the CLI README.
 Callers must supply trusted replay floors and persist accepted
 sequence/digest state before using evidence for policy. A verified response alone
 does not establish collection completeness. No project, verified-package store,
@@ -67,8 +68,8 @@ the directory before returning. Interrupted staging never replaces the old floor
 a retry discards it under the lock. Errors withhold evidence, even if publication
 may already have happened. Equal-sequence retries still sync publication. Cache
 body eviction must never delete this directory. There is no eviction API.
-Windows persistence, CLI configuration loading and live provider activation remain
-unimplemented; the Unix adapter alone does not enable network requests.
+Windows persistence remains unimplemented; the Unix adapter alone does not enable
+network requests.
 
 `HttpsProvider` is an explicitly constructed query adapter for the configured
 origin's `POST /v1/security/evidence/query` endpoint. It requires exact inventory
@@ -111,3 +112,10 @@ must disable transport redirects and pass the actual destination origin. Existin
 credentials require no browser refresh at this gate; Cloud must still enforce
 current authorization and fail closed if its authority is unavailable. Parsing
 and authorization perform no network requests, browser operations or writes.
+
+`ProviderConfig::parse_consent` parses a separate version-1 JSON document with
+exact `origin` and `requests`. It validates every v2 request, rejects duplicates,
+unknown fields and mismatched destinations, and bounds input to 1 MiB and the
+shared 1,000-request collection limit. Empty requests deny all inventory. The
+caller must explicitly choose a trusted consent document; parsing is never
+authorization to discover project files or infer consent from credentials.

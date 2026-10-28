@@ -12,6 +12,28 @@ pub(crate) struct Args {
     /// Minimum advisory severity that fails CI; malware and unknown severity always fail.
     #[arg(long, value_enum, default_value = "any")]
     pub(crate) threshold: Threshold,
+    /// Explicit provider configuration; never discovered in a project.
+    #[arg(long, value_name = "PATH", requires_all = ["inventory_consent", "provider_trust", "replay_state", "credential_mode"])]
+    pub(crate) provider_config: Option<PathBuf>,
+    /// Separately authorized exact inventory disclosure document.
+    #[arg(long, value_name = "PATH", requires = "provider_config")]
+    pub(crate) inventory_consent: Option<PathBuf>,
+    /// Independently provisioned issuer trust and freshness policy.
+    #[arg(long, value_name = "PATH", requires = "provider_config")]
+    pub(crate) provider_trust: Option<PathBuf>,
+    /// Durable private security state outside the audited project.
+    #[arg(long, value_name = "PATH", requires = "provider_config")]
+    pub(crate) replay_state: Option<PathBuf>,
+    /// Explicit credential source; headless never falls back to account credentials.
+    #[arg(long, value_enum, requires = "provider_config")]
+    pub(crate) credential_mode: Option<CredentialMode>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub(crate) enum CredentialMode {
+    Anonymous,
+    Account,
+    Headless,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -46,8 +68,27 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         },
         None => None,
     };
-    let report = crate::application::audit::inspect(&args.project_dir)
-        .map(|report| report.with_threshold(args.threshold.into()));
+    let report = if let Some(config) = &args.provider_config {
+        crate::application::audit::inspect_configured(
+            &args.project_dir,
+            config,
+            args.inventory_consent
+                .as_deref()
+                .expect("clap requires consent"),
+            args.provider_trust.as_deref().expect("clap requires trust"),
+            args.replay_state
+                .as_deref()
+                .expect("clap requires replay state"),
+            match args.credential_mode.expect("clap requires credential mode") {
+                CredentialMode::Anonymous => tapid_security_provider::CredentialMode::Anonymous,
+                CredentialMode::Account => tapid_security_provider::CredentialMode::Account,
+                CredentialMode::Headless => tapid_security_provider::CredentialMode::Headless,
+            },
+        )
+    } else {
+        crate::application::audit::inspect(&args.project_dir)
+    }
+    .map(|report| report.with_threshold(args.threshold.into()));
     if json {
         return crate::output::json::audit(&args.project_dir, report);
     }

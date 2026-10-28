@@ -312,6 +312,14 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         br#"{"version":1,"origin":"https://cloud.example","headlessCredentialEnv":"AUDIT_CI","cache":"disabled"}"#,
     )
     .unwrap();
+    let consented = config
+        .parse_consent(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1, "origin": "https://cloud.example", "requests": consented,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     let consent_enabled = std::cell::Cell::new(false);
     let mut configured_authorize = |request: &tapid_protocol::SecurityRequest| {
         config

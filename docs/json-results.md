@@ -283,7 +283,8 @@ an inclusive advisory severity floor; malware and unknown severity always meet
 it. Threshold selection never changes incomplete coverage into success. Audit
 exits 0 below threshold with complete coverage, 1 for complete coverage with
 qualifying findings, 2 for invalid invocation and 3 for incomplete coverage or
-operational failure. CLI provider activation remains unavailable.
+operational failure. Live retrieval requires the explicit provider, trust, consent,
+replay-state and credential-mode inputs documented in the CLI README.
 
 Read after Tapid exits, validate `schema_version` and `operation`, and reject empty,
 partial, missing or malformed records. Delivery errors exit 3 and are reported on
@@ -543,7 +544,7 @@ verification reason), plus `not_checked` counts. Evidence includes the signed
 request, issuer, source revision, report revision, classification, fix versions,
 check time, expiry and explicit status. Incomplete evidence takes exit 3 precedence
 over known findings; complete findings at the threshold exit 1 and complete results
-below it exit 0. The CLI has no provider activation yet and still exits 3.
+below it exit 0. Without explicit provider inputs the CLI remains unchecked and exits 3.
 JSON displays at most 100 evidence records, findings and failures each; scalar
 text uses the existing sanitization and 4096-byte bound. Display truncation sets
 `truncated_fields`, incomplete coverage and exit 3. Provider evidence does not

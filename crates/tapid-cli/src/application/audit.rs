@@ -4,8 +4,10 @@ use std::path::Path;
 use tapid_lockfile::{ImportedNpmLockfile, Lockfile};
 
 mod collection;
+mod configured;
 mod requests;
 pub(crate) use collection::{AuditEvidence, AuditFailure, Provider};
+pub(crate) use configured::inspect_configured;
 
 pub(crate) struct AuditReport {
     pub(crate) failures: Vec<AuditFailure>,
@@ -37,7 +39,7 @@ impl AuditReport {
 }
 
 /// Inspect recorded inputs only. Projected requests do not authorize disclosure;
-/// provider activation is unavailable, so empty graphs remain not checked too.
+/// absent explicit provider configuration, empty graphs remain not checked too.
 pub(crate) fn inspect(project: &Path) -> Result<AuditReport, &'static str> {
     inspect_with_provider(project, None)
 }

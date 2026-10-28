@@ -448,12 +448,10 @@ Windows contained runs with network access disabled require one administrator se
 
 ## Inspect a project before operating
 
-`tapid audit [--project-dir PATH] [--json]` currently validates the persisted
-native or imported lock graph, reports recorded subject counts, and returns
-**not checked / provider unavailable (exit 3)**. It cannot yet retrieve reports
-or establish a clean audit, including for empty graphs. It makes zero live
-requests, does not load Cloud credentials, and does not recover pending project
-transactions or touch installed/store content. Invalid or manifest-mismatched
+`tapid audit [--project-dir PATH] [--json]` validates the persisted native or
+imported lock graph. Without explicit provider inputs it returns **not checked /
+provider unavailable (exit 3)**, makes zero live requests and loads no credentials.
+Audit never recovers pending project transactions or touches installed/store content. Invalid or manifest-mismatched
 locks produce typed errors without repair. Native graph counts distinguish
 reachable identities from orphan records and report missing roots and unresolved
 peer candidates. Native request projection preserves incoming aliases, exact
@@ -474,13 +472,12 @@ The application prepares at most 1,000 occurrences per collection, using the
 provider's shared request limit before loading freshness, replay floors or consent.
 Remaining occurrences are reported as unchecked and force incomplete coverage,
 even when every processed occurrence has current signed clean evidence.
-The adapter is tested with raw signed fixtures; no command-line activation,
-production keys or credentials are supplied. Windows durable security state remains
-unimplemented.
+The adapter is tested with raw signed fixtures. No production keys or credentials
+are supplied. Windows durable security state remains unimplemented.
 Imported selection traverses recorded root and workspace entry points without
 host filtering, preserves exact peer placements and excludes workspace sources
 and unrepresentable platform predicates. Local placement paths are hashed before
-projection; disclosure still requires separate authorization. Live activation is pending;
+projection; disclosure still requires separate authorization.
 recorded subject counts are not a completed coverage assessment.
 
 `audit --result-file PATH` writes the same versioned envelope as `audit --json`
@@ -499,8 +496,7 @@ Complete verified coverage returns exit 1 for findings meeting the threshold
 and exit 0 otherwise. Incomplete or unchecked coverage always returns exit 3,
 including when every known finding is below the selected threshold. Invalid
 threshold values return exit 2. JSON and result-file reports record the selected
-level in `data.threshold`. Provider activation remains unavailable, so this option
-currently cannot produce a successful command-line assessment.
+level in `data.threshold`.
 
 `tapid status [--project-dir PATH] [--workspace NAME] [--json]` inspects local
 project metadata offline. The project directory is the explicit workspace root,
@@ -548,3 +544,44 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+### Explicit security provider inputs
+
+On Unix, live retrieval requires all five options together:
+
+```text
+tapid audit --provider-config /trusted/provider.json --provider-trust /trusted/trust.json --inventory-consent /trusted/consent.json --replay-state /trusted/security-state --credential-mode headless --json
+```
+
+These paths are caller-selected, never discovered from a project. Input files
+and the replay directory must be outside the canonical project root. Supply
+files from a trusted directory; this path check does not authenticate their
+contents or protect against a malicious process running as the same user.
+The replay parent must already exist and meet `ReplayStore` ownership and
+permission requirements. Invalid inputs fail before creating replay state.
+Windows returns `AUDIT_REPLAY_PLATFORM_UNSUPPORTED` before transport.
+
+Provider configuration uses the security-provider version-1 format: canonical
+HTTPS `origin`, explicit `cache: "disabled"`, and optional distinct
+`accountCredentialEnv` and `headlessCredentialEnv` names. Credential mode is
+explicitly `anonymous`, `account` or `headless`; no fallback or browser refresh
+occurs. Only consented exact requests may consult those environment variables.
+
+The separately provisioned trust document contains `version: 1`, `issuer`,
+`validUntil` (Unix seconds), `maxAge` (positive seconds) and `keyring` in the
+existing embedded keyring format. Obtain and authenticate issuer keys independently;
+release signing keys are never loaded implicitly as security evidence roots.
+Expired trust and empty keyrings are rejected.
+
+The consent document contains `version: 1`, the exact provider `origin`, and
+`requests`: an array of complete v2 `SecurityRequest` values. It admits at most
+1,000 distinct validated requests within 1 MiB; unknown fields and duplicate
+requests fail closed. An empty array denies all disclosure. Consent covers
+registry, alias, audience, peer and placement contexts, not merely package names.
+No sign-in, public report access or project configuration grants consent.
+Requests absent from this document remain explicitly unchecked.
+
+Live collection uses the existing signed verification and durable replay gates,
+with 15-second request and 60-second collection deadlines, no redirects, retries,
+proxies or body cache. Unavailable credentials or evidence remain operational
+failures; unrelated local commands require no Cloud account or service.

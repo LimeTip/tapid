@@ -33,6 +33,14 @@ struct Document {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentDocument {
+    version: u32,
+    origin: String,
+    requests: Vec<SecurityRequest>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CachePolicy {
     Disabled,
@@ -42,6 +50,34 @@ enum CachePolicy {
 pub struct InvalidProviderConfig;
 
 impl ProviderConfig {
+    /// Parse separately supplied disclosure consent for this destination. No
+    /// wildcard, name-only or sign-in-derived grants are accepted. Callers must
+    /// explicitly select a trusted consent document; never discover it in an
+    /// untrusted project or infer consent from provider configuration.
+    pub fn parse_consent(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Vec<SecurityRequest>, InvalidProviderConfig> {
+        if bytes.len() > 1024 * 1024 {
+            return Err(InvalidProviderConfig);
+        }
+        let document: ConsentDocument =
+            serde_json::from_slice(bytes).map_err(|_| InvalidProviderConfig)?;
+        if document.version != 1
+            || document.origin != self.origin.as_str()
+            || document.requests.len() > crate::MAX_COLLECTION_REQUESTS
+        {
+            return Err(InvalidProviderConfig);
+        }
+        for (index, request) in document.requests.iter().enumerate() {
+            request.validate_v2().map_err(|_| InvalidProviderConfig)?;
+            if document.requests[..index].contains(request) {
+                return Err(InvalidProviderConfig);
+            }
+        }
+        Ok(document.requests)
+    }
+
     /// Parse a bounded version-1 JSON adapter configuration. Evidence body caching
     /// must explicitly be disabled until a verified body cache is implemented.
     /// Errors deliberately contain no input, origins, variable names or secrets.
