@@ -133,6 +133,106 @@ fn command_request_with_policy(
 }
 
 #[test]
+fn windows_socket_provider_initialization_with_registry_read_capability() {
+    let project = tapid_test_support::TempProject::new("windows-provider-inputs").unwrap();
+    windows_acl::initialize_inheritance(project.path());
+    let root = fs::canonicalize(project.path()).unwrap();
+    let child = root.join("provider-probe.exe");
+    fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+    let arguments = [
+        "--exact",
+        "windows_socket_provider_probe_helper",
+        "--nocapture",
+    ];
+    let host = Command::new(&child)
+        .args(arguments)
+        .env("TAPID_TEST_MARKER", "provider-host")
+        .output()
+        .unwrap();
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    assert!(String::from_utf8_lossy(&host.stdout).contains("provider:host:socket-created"));
+    let request = ExecutionRequest::builder(child.as_os_str())
+        .args(arguments)
+        .executable_search_path(&root)
+        .project_root(&root)
+        .policy(managed_policy())
+        .env("TAPID_TEST_MARKER", "provider-contained")
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("provider probe must execute");
+    let stdout = String::from_utf8_lossy(outcome.stdout());
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "stdout={stdout}; stderr={}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(stdout.contains("provider:startup:ok"), "{stdout}");
+    assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    println!("{stdout}");
+}
+
+#[test]
+fn windows_socket_provider_probe_helper() {
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM, WSA_FLAG_NO_HANDLE_INHERIT,
+        WSACleanup, WSADATA, WSAEACCES, WSAGetLastError, WSASocketW, WSAStartup, closesocket,
+    };
+    let mode = std::env::var("TAPID_TEST_MARKER").unwrap_or_default();
+    if !matches!(mode.as_str(), "provider-host" | "provider-contained") {
+        return;
+    }
+    // SAFETY: WSADATA is an output structure; successful startup is balanced below.
+    let mut data: WSADATA = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { WSAStartup(0x202, &mut data) },
+        0,
+        "provider startup"
+    );
+    println!("provider:startup:ok");
+    for family in [AF_INET, AF_INET6] {
+        // SAFETY: fixed TCP parameters, no protocol pointer or inherited handle.
+        // No bind, connect, DNS lookup, or external network service is used.
+        let socket = unsafe {
+            WSASocketW(
+                family as i32,
+                SOCK_STREAM,
+                IPPROTO_TCP,
+                std::ptr::null(),
+                0,
+                WSA_FLAG_NO_HANDLE_INHERIT,
+            )
+        };
+        if socket == INVALID_SOCKET {
+            // SAFETY: read the error immediately after the failed socket operation.
+            let error = unsafe { WSAGetLastError() };
+            assert_eq!(mode, "provider-contained", "host positive control: {error}");
+            assert_eq!(error, WSAEACCES, "unexpected provider failure");
+            println!("provider:contained:socket-denied:{family}");
+        } else {
+            // SAFETY: close exactly the socket returned above.
+            assert_eq!(unsafe { closesocket(socket) }, 0);
+            let label = if mode == "provider-host" {
+                "host"
+            } else {
+                "contained"
+            };
+            println!("provider:{label}:socket-created:{family}");
+        }
+    }
+    // SAFETY: balances this helper's successful WSAStartup call.
+    assert_eq!(unsafe { WSACleanup() }, 0);
+}
+
+#[test]
 fn windows_profile_storage_is_fresh_and_not_readable_by_the_next_execution() {
     let project = tapid_test_support::TempProject::new("windows-profile-isolation").unwrap();
     windows_acl::initialize_inheritance(project.path());

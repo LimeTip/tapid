@@ -211,6 +211,16 @@ profile initial bytes, registry state, or cross-profile broker authority. Native
 Windows execution with guard setup is required before claiming these assertions
 hold.
 
+`windows_socket_provider_initialization_with_registry_read_capability` adds a
+paired host/contained Rust control for the current `registryRead` launch. It
+requires Winsock 2.2 initialization and probes IPv4/IPv6 TCP socket creation,
+without binding, connecting, or resolving a hostname. Host socket creation must
+succeed; contained creation is recorded as successful or permission denied, and
+other provider errors fail the control. Socket creation alone does not establish
+network access or denial. Native results are pending. This baseline does not
+test a capability-free token, enumerate readable registry values, or justify
+removing `registryRead`; those remain closure work before runtime identity.
+
 ## Private Windows dependency write and key validation
 
 The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).
