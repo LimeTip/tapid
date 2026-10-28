@@ -93,6 +93,27 @@ and replaces managed node_modules. Imported locks use install with --frozen.
 
 Ordinary install and mutating lifecycle results contain `data.package_count` and `data.replayed`. They exclude graphs, artifact URLs, raw metadata, credentials, source error chains, and uncontrolled diagnostic messages.
 
+Successful installation results additionally contain `data.compatibility` with
+`facts`, `runtime.state`, `evidence_complete`, and `strict_satisfied`. Each fact
+records `location`, `identity`, `provenance`, `classification`, `status`, `reason`,
+and an optional string `requirement`. These are advisory observations; the
+strict assessment does not mean an enforcement option was requested. Runtime
+identification is currently `not_requested`; valid Node ranges are
+`unchecked_runtime`. Known absence is `not_declared`, malformed declarations
+are `unsupported`, and unavailable selected-package evidence is
+`unknown_evidence`. Exact Tapid manager versions can be `satisfied` or
+`incompatible` independently of Node evidence.
+
+Compatibility strings use the envelope's sanitization and text bounds. The
+presentation includes at most 1,024 facts, `omitted_facts`, and
+`details_complete`; any omission or shortened string is also named in
+`truncated_fields`. `strict_satisfied` evaluates all internal facts before
+presentation bounds. Evidence completeness describes declaration availability,
+not runtime identification or display completeness. Native/imported replay
+currently reports unknown selected-package evidence without fetching metadata
+or enriching frozen locks. See the [current CLI scope](../crates/tapid-cli/README.md#advisory-compatibility-observations).
+
+
 `tapid --json install --dry-run`, `add --dry-run`, `remove --dry-run`, and `update --dry-run` instead return a resolved graph preview under the version 1 envelope. The operation retains its canonical command name. Successful previews use `outcome: "success"`, `changes.state: "unchanged"`, empty affected-file lists, null retry advice, and exit 0. This payload is an observation, not an executable plan or a prepared installation.
 
 | Preview data field | Meaning |

@@ -493,3 +493,27 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+### Advisory compatibility observations
+
+Install and graph-changing lifecycle results include advisory compatibility facts
+for root/member `engines.node`, `packageManager`, and `devEngines`, plus selected
+npm metadata when newly resolved. Human output warns about unsupported or
+unchecked requirements; version-1 JSON results expose `data.compatibility` with
+per-declaration reasons, source-qualified dependency instance keys, evidence
+completeness, and the full report's `strict_satisfied` assessment. JSON shows up
+to 1,024 facts and human output up to 100, with omitted counts. This assessment
+is advisory; strict rejection and runtime identification are not yet implemented.
+
+No Node executable is probed. Supported Node range syntax uses the resolver's
+npm semantics, including empty wildcards; valid declarations remain
+`unchecked_runtime`. Only exact `tapid@<version>` manager declarations are
+compared with this Tapid version. Other managers, manager ranges/integrity
+suffixes, and any declared `devEngines` are unsupported. No declaration runs
+Corepack or delegates to another manager.
+
+Native/imported replay currently reports selected-package evidence as unknown;
+these observations are not yet persisted in native locks. Offline replay does
+not fetch metadata or rewrite locks to enrich the report. Inspected absence is
+`not_declared`, never a claim of universal runtime support. Status and explain
+have not yet acquired this install report.

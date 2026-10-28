@@ -1481,3 +1481,257 @@ fn terminal_candidate_exclusions_are_structured_in_json() {
         }
     }
 }
+
+#[test]
+fn fresh_install_reports_project_compatibility_without_probing_node() {
+    let project = TempProject::new("json-compatibility").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"engines":{"node":">=22"},"packageManager":"npm@10.0.0"}"#).unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"1.0.0","engines":{"node":"latest"},"devEngines":null}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    let (output, result) = invoke(
+        &project,
+        &["install", "--json", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{result}");
+    let report = &result["data"]["compatibility"];
+    assert_eq!(report["runtime"]["state"], "not_requested");
+    assert_eq!(report["strict_satisfied"], false);
+    let facts = report["facts"].as_array().expect("compatibility facts");
+    assert!(facts.iter().any(
+        |f| f["location"] == "package.json#/engines/node" && f["status"] == "unchecked_runtime"
+    ));
+    assert!(
+        facts.iter().any(
+            |f| f["location"] == "package.json#/packageManager" && f["status"] == "unsupported"
+        )
+    );
+    assert!(facts.iter().any(
+        |f| f["location"] == "packages/member/package.json#/engines/node"
+            && f["status"] == "unsupported"
+    ));
+    assert!(facts.iter().any(
+        |f| f["location"] == "packages/member/package.json#/devEngines"
+            && f["status"] == "unsupported"
+    ));
+}
+
+#[test]
+fn fresh_install_reports_only_selected_registry_node_declarations() {
+    let project = TempProject::new("json-selected-compatibility").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    fixture["packages"][0]["engines"] = serde_json::json!({"node":">=99"});
+    fixture["packages"][1]["engines"] = serde_json::json!({"node":false});
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let (output, result) = invoke(
+        &project,
+        &[
+            "install",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{result}");
+    let report = &result["data"]["compatibility"];
+    assert_eq!(report["evidence_complete"], true);
+    let facts = report["facts"].as_array().unwrap();
+    let selected: Vec<_> = facts
+        .iter()
+        .filter(|f| f["provenance"] == "registry_metadata")
+        .collect();
+    assert_eq!(selected.len(), 1, "{report}");
+    assert_eq!(
+        selected[0]["identity"],
+        "https://registry.npmjs.org|h3@1.0.0|peer=-|platform=os=;cpu=;libc="
+    );
+    assert_eq!(selected[0]["status"], "unchecked_runtime");
+    assert_eq!(selected[0]["requirement"], ">=99");
+}
+
+#[test]
+fn advisory_compatibility_distinguishes_absent_malformed_and_manager_requirements() {
+    for (engines, manager, dev_engines, node_status, manager_status, dev_status) in [
+        (
+            None,
+            None,
+            None,
+            "not_declared",
+            "not_declared",
+            "not_declared",
+        ),
+        (
+            Some(serde_json::json!({"node":""})),
+            Some(format!("tapid@{}", env!("CARGO_PKG_VERSION"))),
+            None,
+            "unchecked_runtime",
+            "satisfied",
+            "not_declared",
+        ),
+        (
+            Some(serde_json::json!(null)),
+            Some("tapid@999.0.0".into()),
+            Some(serde_json::json!({})),
+            "unsupported",
+            "incompatible",
+            "unsupported",
+        ),
+        (
+            Some(serde_json::json!({"node":42})),
+            Some("tapid@^1.0.0".into()),
+            None,
+            "unsupported",
+            "unsupported",
+            "not_declared",
+        ),
+        (
+            Some(serde_json::json!({"node":">=not-a-version"})),
+            Some("tapid@1.0.0+sha224.integrity".into()),
+            None,
+            "unsupported",
+            "unsupported",
+            "not_declared",
+        ),
+    ] {
+        let project = TempProject::new("json-compatibility-classifications").unwrap();
+        let mut manifest = serde_json::json!({"name":"app","version":"1.0.0"});
+        if let Some(engines) = engines {
+            manifest["engines"] = engines;
+        }
+        if let Some(manager) = manager {
+            manifest["packageManager"] = manager.into();
+        }
+        if let Some(dev_engines) = dev_engines {
+            manifest["devEngines"] = dev_engines;
+        }
+        project
+            .write("package.json", manifest.to_string().as_bytes())
+            .unwrap();
+        let store = project.path().join("store");
+        let args = ["install", "--json", "--store-dir", store.to_str().unwrap()];
+        let (output, result) = invoke(&project, &args);
+        assert!(output.status.success(), "{result}");
+        let report = &result["data"]["compatibility"];
+        assert_eq!(report["facts"][0]["status"], node_status);
+        assert_eq!(report["facts"][1]["status"], manager_status);
+        assert_eq!(report["facts"][2]["status"], dev_status);
+        assert_eq!(report["evidence_complete"], true);
+        assert_eq!(
+            report["strict_satisfied"],
+            node_status == "not_declared"
+                && manager_status == "not_declared"
+                && dev_status == "not_declared"
+        );
+    }
+}
+
+#[test]
+fn native_replay_reports_unknown_selected_evidence_without_rewriting_lock() {
+    let project = TempProject::new("json-compatibility-replay").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let store = project.path().join("store");
+    let (output, fresh) = invoke(
+        &project,
+        &[
+            "install",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{fresh}");
+    assert_eq!(fresh["data"]["compatibility"]["evidence_complete"], true);
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    fs::remove_file(project.path().join("registry.json")).unwrap();
+    let (output, replay) = invoke(
+        &project,
+        &[
+            "install",
+            "--offline",
+            "--json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{replay}");
+    assert_eq!(replay["data"]["replayed"], true);
+    let report = &replay["data"]["compatibility"];
+    assert_eq!(report["evidence_complete"], false);
+    assert_eq!(report["strict_satisfied"], false);
+    assert!(
+        report["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["status"] == "unknown_evidence" && f["provenance"] == "unavailable")
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+}
+
+#[test]
+fn compatibility_presentation_bounds_do_not_hide_full_report_rejection() {
+    let project = TempProject::new("json-compatibility-bounds").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    for index in 0..341 {
+        let mut manifest =
+            serde_json::json!({"name":format!("member-{index:03}"),"version":"1.0.0"});
+        if index == 340 {
+            manifest["devEngines"] = serde_json::Value::Null;
+        }
+        project
+            .write(
+                format!("packages/member-{index:03}/package.json"),
+                manifest.to_string().as_bytes(),
+            )
+            .unwrap();
+    }
+    let store = project.path().join("store");
+    let (output, result) = invoke(
+        &project,
+        &["install", "--json", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{result}");
+    let report = &result["data"]["compatibility"];
+    assert_eq!(report["facts"].as_array().unwrap().len(), 1024);
+    assert_eq!(report["omitted_facts"], 2);
+    assert_eq!(report["details_complete"], false);
+    assert_eq!(report["evidence_complete"], true);
+    assert_eq!(report["strict_satisfied"], false);
+    assert!(
+        result["truncated_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("/data/compatibility/facts"))
+    );
+}

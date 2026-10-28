@@ -403,6 +403,7 @@ impl fmt::Display for Warning {
 
 #[derive(Debug)]
 pub(crate) struct OperationOutcome {
+    pub(crate) compatibility: Option<crate::compatibility::Report>,
     pub(crate) project_dir: PathBuf,
     pub(crate) state: ChangeState,
     /// Project outputs actually changed, or requiring inspection after failed recovery.
@@ -426,6 +427,7 @@ impl OperationOutcome {
     pub(crate) fn unchanged(project: &Path) -> Self {
         Self {
             project_dir: project.to_owned(),
+            compatibility: None,
             state: ChangeState::Unchanged,
             changed_files: Vec::new(),
             warnings: Vec::new(),

@@ -81,6 +81,28 @@ impl Reporter {
 
     pub(crate) fn summary(&self, report: &InstallReport) {
         super::report_warnings(&self.remaining_warnings(&report.outcome.warnings));
+        if let Some(compatibility) = &report.outcome.compatibility {
+            for fact in compatibility.facts.iter().take(100) {
+                if !matches!(fact.status, "satisfied" | "not_declared") {
+                    let (location, _) = super::json::text(&fact.location);
+                    let (identity, _) = super::json::text(&fact.identity);
+                    let (requirement, _) =
+                        super::json::text(fact.requirement.as_deref().unwrap_or("unspecified"));
+                    eprintln!(
+                        "Compatibility warning: {identity} {location}: {} ({}, requirement: {requirement}).",
+                        fact.status, fact.reason
+                    );
+                }
+            }
+        }
+        if let Some(compatibility) = &report.outcome.compatibility
+            && compatibility.facts.len() > 100
+        {
+            eprintln!(
+                "Compatibility details: {} additional fact(s) omitted.",
+                compatibility.facts.len() - 100
+            );
+        }
         if report.replayed {
             println!(
                 "Replayed lockfile: {} package(s) in {:.2}s",

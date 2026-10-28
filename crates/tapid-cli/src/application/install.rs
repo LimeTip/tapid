@@ -501,6 +501,7 @@ fn perform_install(
     } else {
         read_manifest(&root_manifest_path)?
     };
+    session.outcome.compatibility = Some(crate::compatibility::Report::project(&root_manifest));
     let store = Store::new(match store_root {
         Some(path) => path.to_owned(),
         None => {
@@ -557,6 +558,7 @@ fn perform_install(
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {
+            node_engines,
             candidate_exclusions,
             mut lock,
             layout:
@@ -593,6 +595,13 @@ fn perform_install(
             )?
         };
         session.candidate_exclusions = candidate_exclusions;
+        record_compatibility(
+            &mut session.outcome,
+            &project_dir,
+            &workspace_plan.links,
+            &lock,
+            &node_engines,
+        )?;
 
         session
             .outcome
@@ -769,6 +778,13 @@ fn perform_install(
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+    record_compatibility(
+        &mut session.outcome,
+        &project_dir,
+        &workspace.links,
+        &lock,
+        &BTreeMap::new(),
+    )?;
     if !online::workspace_matches_lock(&workspace, &lock) {
         return Err(
             "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
@@ -1239,3 +1255,33 @@ mod tests {
 #[cfg(test)]
 #[path = "install_outcome_tests.rs"]
 mod outcome_tests;
+
+fn record_compatibility(
+    outcome: &mut OperationOutcome,
+    project: &Path,
+    links: &tapid_linker::WorkspaceLinkPlan,
+    lock: &Lockfile,
+    node_engines: &BTreeMap<String, tapid_registry_client::NodeEngineRequirement>,
+) -> Result<(), OperationalError> {
+    let report = outcome
+        .compatibility
+        .as_mut()
+        .expect("root compatibility initialized");
+    for link in &links.links {
+        let path = link.source.join("package.json");
+        let manifest = read_manifest(&path)?;
+        let location = path
+            .strip_prefix(project)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        report.manifest(&manifest, &location);
+    }
+    for key in lock.packages().keys() {
+        match node_engines.get(key) {
+            Some(requirement) => report.selected_package(key, requirement),
+            None => report.unknown_package(key),
+        }
+    }
+    Ok(())
+}

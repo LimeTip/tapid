@@ -451,6 +451,7 @@ pub(crate) fn fetch_imported(
             .contains_key(&format!("node_modules/{}", link.name))
     });
     Ok(PreparedInstall {
+        node_engines: Default::default(),
         candidate_exclusions: Default::default(),
         lock,
         layout: PreparedLayout {

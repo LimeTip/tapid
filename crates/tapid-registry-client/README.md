@@ -60,3 +60,10 @@ redirect permission, or non-HTTPS protocol permission. No checkout or package
 preparation code executes. Revision expressions and semver selectors are rejected.
 The caller pins the returned archive digest and applies archive/store verification.
 `RegistryPackageId` reuses core's source-qualified `PackageInstanceId`.
+
+Selected npm install metadata (`RegistryArtifact::node_engine`) and exact-version
+inspection (`NpmPackageEvidence::node_engine`) preserve Node engine declarations.
+`NodeEngineRequirement` distinguishes inspected absence, a raw range string,
+malformed fields, and unavailable evidence. Extraction does not evaluate a range,
+execute Node, or establish archive-authenticated compatibility. JSR metadata
+currently reports unavailable evidence.

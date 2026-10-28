@@ -137,6 +137,8 @@ impl RegistrySnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryArtifact {
+    /// Node declaration reported by this selected version metadata.
+    pub node_engine: crate::NodeEngineRequirement,
     /// Dist-tags pointing to this exact version in the fetched packument.
     pub dist_tags: BTreeSet<String>,
     pub identity: RegistryPackageId,

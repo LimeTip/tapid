@@ -236,17 +236,26 @@ fn install_output_counts_exact_lock_selections() {
     let manifest = br#"{"name":"output","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#;
     project.write("package.json", manifest).unwrap();
     let args = ["install", "--registry-fixture", "registry.json"];
-    for expected in [
+    for (index, expected) in [
         "Lock selections: 1 added, 0 changed, 0 reused, 0 removed",
         "Lock selections: 0 added, 0 changed, 1 reused, 0 removed",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let output = run(project.path(), &args);
         assert!(output.status.success(), "{output:?}");
         assert!(
             String::from_utf8_lossy(&output.stdout).contains(expected),
             "{output:?}"
         );
-        assert!(output.stderr.is_empty(), "{output:?}");
+        if index == 0 {
+            assert!(output.stderr.is_empty(), "{output:?}");
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("Compatibility warning:"), "{stderr}");
+            assert!(stderr.contains("unknown_evidence (selected_package_evidence_unavailable, requirement: unspecified)"), "{stderr}");
+        }
     }
     let output = run(project.path(), &["install", "--offline", "--frozen"]);
     assert!(output.status.success(), "{output:?}");

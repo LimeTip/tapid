@@ -76,6 +76,7 @@ static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
 type ResolveAndFetchOutput = Result<PreparedInstall, OperationalError>;
 
 pub(crate) struct PreparedInstall {
+    pub node_engines: BTreeMap<String, tapid_registry_client::NodeEngineRequirement>,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub lock: Lockfile,
     pub layout: PreparedLayout,
@@ -156,6 +157,8 @@ impl Drop for TemporaryTree {
 
 #[derive(Debug, Deserialize, Clone)]
 struct FixturePackage {
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     git_ref: Option<String>,
     #[serde(default)]
@@ -180,6 +183,7 @@ struct Fixture {
 
 #[derive(Clone)]
 struct PackageRecord {
+    node_engine: tapid_registry_client::NodeEngineRequirement,
     git_reference: Option<String>,
     copied_archive: Option<std::sync::Arc<Vec<u8>>>,
     dist_tags: BTreeSet<String>,
@@ -640,6 +644,7 @@ fn remote_records(
     Ok(artifacts
         .into_iter()
         .map(|a| PackageRecord {
+            node_engine: a.node_engine,
             git_reference: None,
             copied_archive: None,
             dist_tags: a.dist_tags,
@@ -1314,6 +1319,10 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     Ok(PreparedInstall {
+        node_engines: packages
+            .iter()
+            .map(|(key, (_, record, _))| (key.clone(), record.node_engine.clone()))
+            .collect(),
         candidate_exclusions,
         lock,
         layout: PreparedLayout {

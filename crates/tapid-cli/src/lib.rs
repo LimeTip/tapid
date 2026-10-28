@@ -2,6 +2,7 @@
 
 mod application;
 mod commands;
+mod compatibility;
 mod filesystem;
 mod online;
 mod output;

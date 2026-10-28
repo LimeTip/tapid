@@ -6,6 +6,24 @@ use std::process::ExitCode;
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
+    if let Some(compatibility) = &report.outcome.compatibility {
+        let mut data = serde_json::to_value(compatibility).expect("compatibility facts");
+        let facts = data["facts"].as_array_mut().expect("compatibility facts");
+        let omitted = facts.len().saturating_sub(1024);
+        facts.truncate(1024);
+        let mut truncated = Vec::new();
+        if omitted > 0 {
+            truncated.push("/data/compatibility/facts".into());
+        }
+        super::status_text(&mut data, "/data/compatibility", &mut truncated);
+        data["omitted_facts"] = json!(omitted);
+        data["details_complete"] = json!(truncated.is_empty());
+        result["data"]["compatibility"] = data;
+        result["truncated_fields"]
+            .as_array_mut()
+            .unwrap()
+            .extend(truncated.into_iter().map(Value::String));
+    }
     if !report.candidate_exclusions.is_empty() {
         result["data"]["candidate_exclusions"] =
             serde_json::to_value(&report.candidate_exclusions).expect("bounded exclusions");

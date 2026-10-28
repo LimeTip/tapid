@@ -3,6 +3,7 @@
 
 mod artifact;
 mod client;
+mod engines;
 mod errors;
 mod jsr;
 mod models;
@@ -12,6 +13,7 @@ mod transport;
 
 pub use artifact::download_artifact;
 pub use client::{RegistryClient, RegistryTransport};
+pub use engines::NodeEngineRequirement;
 pub use errors::{ClientError, MetadataError, RegistryClientError, TransportError};
 pub use jsr::JsrRegistry;
 pub use models::{
