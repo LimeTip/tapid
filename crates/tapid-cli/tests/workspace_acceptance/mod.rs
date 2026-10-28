@@ -606,6 +606,42 @@ fn discovery_rejections_preserve_existing_project_and_store() {
     }
 }
 
+#[test]
+fn inferred_run_rejects_member_grants_above_root_policy_before_launch() {
+    let fixture = Fixture::new();
+    let root = fixture.project.path();
+    fixture
+        .project
+        .write(
+            "tapid.toml",
+            b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nsubprocess=true\nnetwork=false\n",
+        )
+        .unwrap();
+    fixture
+        .project
+        .write(
+            "apps/news/tapid.toml",
+            b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['.']\nsubprocess=true\nnetwork=true\n",
+        )
+        .unwrap();
+    fs::create_dir_all(root.join("apps/news/src/deep")).unwrap();
+    let before = snapshot(root);
+    for relative in ["apps/news", "apps/news/src/deep"] {
+        for grant in [vec!["--allow-write", "."], vec!["--allow-network"]] {
+            let mut args = vec!["run", "probe"];
+            args.extend(grant);
+            let output = fixture.command_at(&args, false, &root.join(relative));
+            assert!(!output.status.success(), "{relative}: {args:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("exceeds the configured run policy"),
+                "{relative}: {args:?}: {stderr}"
+            );
+            assert_eq!(snapshot(root), before);
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn inferred_run_uses_member_cwd_and_root_relative_policy() {
