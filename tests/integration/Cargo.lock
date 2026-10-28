@@ -1210,6 +1210,7 @@ version = "0.0.6"
 dependencies = [
  "flate2",
  "hex",
+ "rustix",
  "sha2",
  "tar",
 ]

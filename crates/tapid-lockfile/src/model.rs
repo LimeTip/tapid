@@ -7,9 +7,10 @@ use tapid_core::{
 };
 
 use crate::{
-    COPIED_SOURCE_LOCKFILE_VERSION, LEGACY_LOCKFILE_VERSION, LIFECYCLE_LOCKFILE_VERSION,
-    LOCKFILE_VERSION, LockfileError, PROVENANCE_LEGACY_LOCKFILE_VERSION,
-    REGISTRY_ONLY_LOCKFILE_VERSION, ROOTS_LEGACY_LOCKFILE_VERSION, validation,
+    COPIED_SOURCE_LOCKFILE_VERSION, DIRECTORY_SOURCE_LOCKFILE_VERSION, LEGACY_LOCKFILE_VERSION,
+    LIFECYCLE_LOCKFILE_VERSION, LOCKFILE_VERSION, LockfileError,
+    PROVENANCE_LEGACY_LOCKFILE_VERSION, REGISTRY_ONLY_LOCKFILE_VERSION,
+    ROOTS_LEGACY_LOCKFILE_VERSION, validation,
 };
 
 fn encode(value: &str) -> String {
@@ -434,7 +435,10 @@ impl std::str::FromStr for LockfilePackageKey {
             .ok_or_else(|| LockfileError::InvalidPackageKey(value.into()))?;
         let source = if p[0].starts_with("workspace:") {
             LockfilePackageSource::Workspace(p[0].parse()?)
-        } else if p[0].starts_with("file:") || p[0].starts_with("git+") {
+        } else if p[0].starts_with("file:")
+            || p[0].starts_with("git+")
+            || p[0].starts_with("directory-v1:")
+        {
             LockfilePackageSource::Copied(p[0].parse().map_err(LockfileError::Domain)?)
         } else {
             let origin: RegistryOrigin = p[0].parse().map_err(LockfileError::Domain)?;
@@ -774,7 +778,14 @@ impl Lockfile {
                 .source()
                 .is_some_and(|source| source.registry().is_none())
         }) {
-            self.lockfile_version = COPIED_SOURCE_LOCKFILE_VERSION;
+            self.lockfile_version = self.lockfile_version.max(COPIED_SOURCE_LOCKFILE_VERSION);
+        }
+        if registry_packages.iter().any(|package| {
+            package
+                .source()
+                .is_some_and(|source| source.directory_parts().is_some())
+        }) {
+            self.lockfile_version = self.lockfile_version.max(DIRECTORY_SOURCE_LOCKFILE_VERSION);
         }
         self.packages.extend(
             registry_packages
@@ -920,6 +931,15 @@ impl Lockfile {
     }
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        if self.lockfile_version < DIRECTORY_SOURCE_LOCKFILE_VERSION
+            && self.packages.values().any(|package| {
+                package
+                    .source()
+                    .is_some_and(|source| source.directory_parts().is_some())
+            })
+        {
+            return Err(LockfileError::UnsupportedVersion(self.lockfile_version));
+        }
         if self.lockfile_version < LIFECYCLE_LOCKFILE_VERSION
             && self
                 .packages
@@ -984,7 +1004,8 @@ impl Lockfile {
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
-        if lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
+        if lockfile.lockfile_version != DIRECTORY_SOURCE_LOCKFILE_VERSION
+            && lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LOCKFILE_VERSION
             && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION
