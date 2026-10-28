@@ -1731,3 +1731,135 @@ fn npm_import_records_absent_root_and_nested_aliases_and_replays_without_metadat
         marker
     );
 }
+
+/// Explicit development oracle: never consults a registry or a user's npm cache.
+#[test]
+fn optional_failure_stages_match_pinned_npm_baseline() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let Some(npm) = std::env::var_os("TAPID_NPM_OPTIONAL_ORACLE") else {
+        return;
+    };
+    let fixtures: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-import/registry.json")).unwrap();
+    let package = &fixtures["packages"][0];
+    let name = package["name"].as_str().unwrap();
+    let archive = STANDARD
+        .decode(
+            package["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    for stage in ["download", "archive", "integrity", "platform"] {
+        for optional in [false, true] {
+            let project = TempProject::new("npm-optional-failure-oracle").unwrap();
+            let home = TempHome::new("npm-optional-failure-oracle").unwrap();
+            project.write("empty.npmrc", b"").unwrap();
+            project.write("global.npmrc", b"").unwrap();
+            if stage != "download" {
+                project
+                    .write(
+                        "artifact.tgz",
+                        if stage == "archive" {
+                            b"invalid archive"
+                        } else {
+                            &archive
+                        },
+                    )
+                    .unwrap();
+            }
+            let section = if optional {
+                "optionalDependencies"
+            } else {
+                "dependencies"
+            };
+            let manifest =
+                serde_json::json!({"name":"oracle", "version":"1.0.0", section:{name:"1.0.0"}});
+            project
+                .write("package.json", &serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+            let mut entry = serde_json::json!({"name":name,"version":"1.0.0","resolved":"file:artifact.tgz", "optional":optional});
+            if stage == "integrity" {
+                entry["integrity"] = format!("sha512-{}", STANDARD.encode([0u8; 64])).into();
+            }
+            if stage == "platform" {
+                entry["os"] = serde_json::json!(["tapid-nonexistent-os"]);
+            }
+            let lock = serde_json::json!({"name":"oracle","version":"1.0.0","lockfileVersion":3,"packages":{"":manifest,format!("node_modules/{name}"):entry}});
+            project
+                .write("package-lock.json", &serde_json::to_vec(&lock).unwrap())
+                .unwrap();
+            let run = |args: &[&str]| {
+                let mut command = Command::new(&npm);
+                command.env_clear();
+                for variable in [
+                    "PATH",
+                    "SystemRoot",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TMP",
+                    "TEMP",
+                    "TMPDIR",
+                ] {
+                    if let Some(value) = std::env::var_os(variable) {
+                        command.env(variable, value);
+                    }
+                }
+                command
+                    .current_dir(project.path())
+                    .args(args)
+                    .args([
+                        "--offline",
+                        "--ignore-scripts",
+                        "--no-audit",
+                        "--no-fund",
+                        "--fetch-retries=0",
+                        "--cache",
+                        home.path().join("cache").to_str().unwrap(),
+                        "--userconfig",
+                        project.path().join("empty.npmrc").to_str().unwrap(),
+                        "--globalconfig",
+                        project.path().join("global.npmrc").to_str().unwrap(),
+                    ])
+                    .env("HOME", home.path())
+                    .env("USERPROFILE", home.path())
+                    .output()
+                    .unwrap()
+            };
+            let version = run(&["--version"]);
+            assert!(version.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&version.stdout).trim(),
+                "10.9.9",
+                "oracle requires pinned npm 10.9.9"
+            );
+            let output = run(&["ci"]);
+            assert_eq!(
+                output.status.success(),
+                optional,
+                "{stage}, optional={optional}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !optional {
+                let code = match stage {
+                    "download" => "ENOENT",
+                    "archive" => "TAR_BAD_ARCHIVE",
+                    "integrity" => "EINTEGRITY",
+                    "platform" => "EBADPLATFORM",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(code),
+                    "{stage}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert!(
+                !project.path().join(format!("node_modules/{name}")).exists(),
+                "failed package must not be installed: {stage}"
+            );
+        }
+    }
+}

@@ -4274,10 +4274,11 @@ fn install_rolls_back_when_a_required_peer_is_incompatible() {
     cleanup(dir);
 }
 
-fn run_lifecycle_recovery_crash_case(crash_point: &str) {
+fn run_lifecycle_recovery_crash_case(crash_point: &str, optional: bool) {
     use tapid_store::Store;
 
-    let dir = temp_dir("lifecycle-crash-recovery");
+    let project = tapid_test_support::TempProject::new("lifecycle-crash-recovery").unwrap();
+    let dir = project.path().to_path_buf();
     let original_manifest = r#"{"name":"demo","version":"1.0.0"}"#;
     fs::write(dir.join("package.json"), original_manifest).unwrap();
     let original_lock = lock_for_manifest(original_manifest).to_json().unwrap();
@@ -4314,19 +4315,18 @@ fn run_lifecycle_recovery_crash_case(crash_point: &str) {
     )
     .unwrap();
 
-    let crash = run_with_env(
-        &dir,
-        &[
-            "add",
-            "plugin@1.0.0",
-            "--store-dir",
-            store_dir.to_str().unwrap(),
-            "--registry-fixture",
-            fixture.to_str().unwrap(),
-        ],
-        "TAPID_TEST_CRASH_POINT",
-        crash_point,
-    );
+    let mut args = vec![
+        "add",
+        "plugin@1.0.0",
+        "--store-dir",
+        store_dir.to_str().unwrap(),
+        "--registry-fixture",
+        fixture.to_str().unwrap(),
+    ];
+    if optional {
+        args.push("--optional");
+    }
+    let crash = run_with_env(&dir, &args, "TAPID_TEST_CRASH_POINT", crash_point);
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
@@ -4392,6 +4392,15 @@ fn run_lifecycle_recovery_crash_case(crash_point: &str) {
             fs::read(dir.join("tapid.lock")).unwrap(),
             original_lock.as_bytes()
         );
+        let committed_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("package.json")).unwrap()).unwrap();
+        let section = if optional {
+            "optionalDependencies"
+        } else {
+            "dependencies"
+        };
+        assert_eq!(committed_manifest[section]["plugin"], "1.0.0");
+        assert!(dir.join("node_modules/plugin/package.json").is_file());
         assert!(!dir.join("node_modules/KEEP").exists());
         assert_eq!(
             fs::read(dir.join(".tapid-managed")).unwrap(),
@@ -4430,27 +4439,40 @@ fn run_lifecycle_recovery_crash_case(crash_point: &str) {
 
 #[test]
 fn lifecycle_recovers_previous_state_after_node_modules_backup_crash() {
-    run_lifecycle_recovery_crash_case("node_modules_backed_up");
+    run_lifecycle_recovery_crash_case("node_modules_backed_up", false);
 }
 
 #[test]
 fn lifecycle_recovers_previous_state_after_store_publication_crash() {
-    run_lifecycle_recovery_crash_case("store_published");
+    run_lifecycle_recovery_crash_case("store_published", false);
 }
 
 #[test]
 fn lifecycle_recovers_previous_state_after_lockfile_replacement_crash() {
-    run_lifecycle_recovery_crash_case("lockfile_replaced");
+    run_lifecycle_recovery_crash_case("lockfile_replaced", false);
 }
 
 #[test]
 fn lifecycle_recovers_previous_state_after_activation_completion_crash() {
-    run_lifecycle_recovery_crash_case("activation_complete");
+    run_lifecycle_recovery_crash_case("activation_complete", false);
 }
 
 #[test]
 fn lifecycle_finishes_committed_state_after_commit_decision_crash() {
-    run_lifecycle_recovery_crash_case("commit_decision");
+    run_lifecycle_recovery_crash_case("commit_decision", false);
+}
+
+#[test]
+fn optional_dependency_recovery_preserves_transaction_decision() {
+    for checkpoint in [
+        "node_modules_backed_up",
+        "store_published",
+        "lockfile_replaced",
+        "activation_complete",
+        "commit_decision",
+    ] {
+        run_lifecycle_recovery_crash_case(checkpoint, true);
+    }
 }
 
 #[test]
@@ -6108,87 +6130,131 @@ fn write_dependency_script_fixture(project: &tapid_test_support::TempProject, ar
 
 #[test]
 fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
-    let project = tapid_test_support::TempProject::new("unsafe-hook-rollback").unwrap();
-    let home = tapid_test_support::TempHome::new("unsafe-hook-rollback").unwrap();
-    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#;
-    project.write("package.json", manifest).unwrap();
-    write_dependency_script_fixture(
-        &project,
-        "H4sIAAAAAAAAE+3PQQrCMBAF0B6l/HWNEy1Z5DahBom2ScjEUii9u1AXgrgRirrI2/zhb2Ymmu5qznYfHykuHHy1MSIi1bZrEtFrkpTPee2lVFJVNW19yDs3ziZV9JVdf2iGN4OFhjfZjXZ3skNAg9EmdsFDQwoShAbcJRczQ89wnrPpe2jYyeX6cMSy/PqPoiiK4jN3HmGcyAAIAAA=",
-    );
-    let install = |flags: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
-            .args([
-                "install",
-                "--registry-fixture",
-                "registry.json",
-                "--store-dir",
-            ])
-            .arg(home.path().join("store"))
-            .args(flags)
-            .env_remove("PATH")
-            .output()
-            .unwrap()
-    };
-    assert!(install(&[]).status.success());
-    project
-        .write("node_modules/previous-marker", b"preserved")
-        .unwrap();
-    project
-        .write("package-lock.json", b"npm lock sentinel\n")
-        .unwrap();
-    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
-    let output = install(&[
-        "--allow-unapproved-dependency-scripts",
-        "--unsafe-no-dependency-sandbox",
-    ]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Exited(23)"));
-    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
-    assert_eq!(
-        fs::read(project.path().join("package.json")).unwrap(),
-        manifest
-    );
-    assert_eq!(
-        fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
-        b"preserved"
-    );
-    let output = install(&[
-        "--allow-unapproved-dependency-scripts",
-        "--unsafe-no-dependency-sandbox",
-        "--json",
-    ]);
-    assert!(!output.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
-    assert_eq!(
-        result["lifecycle"]["packages"][0]["hooks"][0]["disposition"],
-        "blocked"
-    );
-    assert_eq!(
-        result["lifecycle"]["packages"][0]["hooks"][0]["reason"],
-        "execution_or_output_failed"
-    );
-    assert_eq!(
-        fs::read(project.path().join("package-lock.json")).unwrap(),
-        b"npm lock sentinel\n"
-    );
-    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
-    assert_eq!(
-        fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
-        b"preserved"
-    );
-    for package in Lockfile::from_json(std::str::from_utf8(&lock).unwrap())
-        .unwrap()
-        .packages()
-        .values()
-    {
-        tapid_store::Store::new(home.path().join("store"))
-            .verified_tree_path(&package.tree_digest().parse().unwrap())
+    for section in ["dependencies", "optionalDependencies"] {
+        let project = tapid_test_support::TempProject::new("unsafe-hook-rollback").unwrap();
+        let home = tapid_test_support::TempHome::new("unsafe-hook-rollback").unwrap();
+        let manifest =
+            format!(r#"{{"name":"demo","version":"1.0.0","{section}":{{"native-demo":"1.0.0"}}}}"#)
+                .into_bytes();
+        project.write("package.json", &manifest).unwrap();
+        write_dependency_script_fixture(
+            &project,
+            "H4sIAAAAAAAAE+3PQQrCMBAF0B6l/HWNEy1Z5DahBom2ScjEUii9u1AXgrgRirrI2/zhb2Ymmu5qznYfHykuHHy1MSIi1bZrEtFrkpTPee2lVFJVNW19yDs3ziZV9JVdf2iGN4OFhjfZjXZ3skNAg9EmdsFDQwoShAbcJRczQ89wnrPpe2jYyeX6cMSy/PqPoiiK4jN3HmGcyAAIAAA=",
+        );
+        let install = |flags: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_tapid"))
+                .current_dir(project.path())
+                .args([
+                    "install",
+                    "--registry-fixture",
+                    "registry.json",
+                    "--store-dir",
+                ])
+                .arg(home.path().join("store"))
+                .args(flags)
+                .env_remove("PATH")
+                .output()
+                .unwrap()
+        };
+        assert!(install(&[]).status.success());
+        project
+            .write("node_modules/previous-marker", b"preserved")
             .unwrap();
+        project
+            .write("package-lock.json", b"npm lock sentinel\n")
+            .unwrap();
+        let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+        let output = install(&[
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+        ]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Exited(23)"));
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
+            b"preserved"
+        );
+        let output = install(&[
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+        assert_eq!(
+            result["lifecycle"]["packages"][0]["hooks"][0]["disposition"],
+            "blocked"
+        );
+        assert_eq!(
+            result["lifecycle"]["packages"][0]["hooks"][0]["reason"],
+            "execution_or_output_failed"
+        );
+        assert_eq!(
+            fs::read(project.path().join("package-lock.json")).unwrap(),
+            b"npm lock sentinel\n"
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
+            b"preserved"
+        );
+        for package in Lockfile::from_json(std::str::from_utf8(&lock).unwrap())
+            .unwrap()
+            .packages()
+            .values()
+        {
+            tapid_store::Store::new(home.path().join("store"))
+                .verified_tree_path(&package.tree_digest().parse().unwrap())
+                .unwrap();
+        }
+        #[cfg(unix)]
+        {
+            let sh = fs::canonicalize("/bin/sh").unwrap();
+            let registry: serde_json::Value =
+                serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap())
+                    .unwrap();
+            let policy = toml::to_string(&serde_json::json!({"schema":1,"approvals":[{
+            "package":"native-demo", "version":"1.0.0",
+            "archive-digest":registry["packages"][0]["integrity"],
+            "hook":"install", "script-digest":format!("sha256-{:x}", Sha256::digest(b"exit 23")), "system-toolchain":true,
+            "read":["."], "write":["."], "network":false, "environment":{},
+            "timeout-seconds":5, "max-output-bytes":1024, "max-processes":32,
+            "max-memory-bytes":134217728,
+            "tools":[{"name":"sh", "path":sh, "digest":format!("sha256-{:x}", Sha256::digest(fs::read(&sh).unwrap()))}]
+        }]})).unwrap();
+            project
+                .write("tapid.lifecycle.toml", policy.as_bytes())
+                .unwrap();
+            let human = install(&["--unsafe-no-dependency-sandbox"]);
+            assert!(
+                String::from_utf8_lossy(&human.stderr).contains("Exited(23)"),
+                "{}",
+                String::from_utf8_lossy(&human.stderr)
+            );
+            let output = install(&["--unsafe-no-dependency-sandbox", "--json"]);
+            assert!(!output.status.success());
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let hook = &result["lifecycle"]["packages"][0]["hooks"][0];
+            assert_eq!(hook["authorization"], "exact_policy", "{result}");
+            assert_eq!(hook["reason"], "execution_or_output_failed", "{result}");
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest
+            );
+            assert_eq!(
+                fs::read(project.path().join("node_modules/previous-marker")).unwrap(),
+                b"preserved"
+            );
+        }
+        assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
     }
-    assert!(!home.path().join("store/.tapid-lifecycle-key").exists());
 }
 
 #[test]
@@ -9669,56 +9735,122 @@ fn why_confirmed_absent_package_still_exits_one() {
 fn why_reports_a_deterministic_path_from_a_direct_root_without_mutation() {
     use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
 
-    let project = tapid_test_support::TempProject::new("why-transitive").unwrap();
-    let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
-    project.write("package.json", manifest.as_bytes()).unwrap();
-    let mut lock = lock_for_manifest(manifest);
-    let mut app = LockedPackage::new_with_provenance(
-        "https://registry.npmjs.org",
-        "app",
-        "1.0.0",
-        &format!("sha512-{}==", "A".repeat(86)),
-        &format!("sha256-{}", "a".repeat(64)),
-        RegistryIntegrityProvenance::RegistryDeclared,
-    )
-    .unwrap();
-    let target = LockedPackage::new_with_provenance(
-        "https://registry.npmjs.org",
-        "target",
-        "2.0.0",
-        &format!("sha512-{}==", "A".repeat(86)),
-        &format!("sha256-{}", "b".repeat(64)),
-        RegistryIntegrityProvenance::RegistryDeclared,
-    )
-    .unwrap();
-    app.add_dependency("target", &target.key()).unwrap();
-    let app_key = app.key();
-    lock.insert_packages([app, target]).unwrap();
-    lock.set_roots([app_key.clone()]).unwrap();
-    lock.set_root_bindings(std::collections::BTreeMap::from([(
-        "app".to_owned(),
-        app_key,
-    )]))
-    .unwrap();
-    let lock_bytes = lock.to_json().unwrap();
-    project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
-    let before = fs::read(project.path().join("tapid.lock")).unwrap();
-    let text = run(project.path(), &["why", "target"]);
-    assert!(text.status.success());
-    assert!(String::from_utf8_lossy(&text.stdout).contains("dependencies (app)"));
-    assert!(String::from_utf8_lossy(&text.stdout).contains("dependency (target)"));
-    let json = run(project.path(), &["why", "target", "--json"]);
-    assert!(json.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(
-        result["data"]["paths"][0]["steps"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(result["changes"]["state"], "unchanged");
-    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+    for section in [
+        None,
+        Some(tapid_lockfile::DeclarationSection::OptionalDependencies),
+        Some(tapid_lockfile::DeclarationSection::Dependencies),
+    ] {
+        let project = tapid_test_support::TempProject::new("why-transitive").unwrap();
+        let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"app":"1.0.0"}}"#;
+        project.write("package.json", manifest.as_bytes()).unwrap();
+        let mut lock = lock_for_manifest(manifest);
+        let mut app = LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            "app",
+            "1.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &format!("sha256-{}", "a".repeat(64)),
+            RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let target = LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            "target",
+            "2.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &format!("sha256-{}", "b".repeat(64)),
+            RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        app.add_dependency("target", &target.key()).unwrap();
+        let app_key = app.key();
+        let target_key = target.key();
+        lock.insert_packages([app, target]).unwrap();
+        lock.set_roots([app_key.clone()]).unwrap();
+        lock.set_root_bindings(std::collections::BTreeMap::from([(
+            "app".to_owned(),
+            app_key.clone(),
+        )]))
+        .unwrap();
+        if let Some(section) = section {
+            let mut declarations = vec![tapid_lockfile::RetainedDeclaration {
+                origin: tapid_lockfile::OmissionOrigin::Root,
+                section: tapid_lockfile::DeclarationSection::Dependencies,
+                name: "app".into(),
+                requirement: "1.0.0".into(),
+                original_requirement: None,
+                target: app_key.clone(),
+            }];
+            // Keep both declarations when the same package edge is required and optional.
+            for kind in [
+                tapid_lockfile::DeclarationSection::OptionalDependencies,
+                section,
+            ] {
+                declarations.push(tapid_lockfile::RetainedDeclaration {
+                    origin: tapid_lockfile::OmissionOrigin::Package {
+                        key: app_key.clone(),
+                    },
+                    section: kind,
+                    name: "target".into(),
+                    requirement: "2.0.0".into(),
+                    original_requirement: None,
+                    target: target_key.clone(),
+                });
+            }
+            declarations.sort();
+            declarations.dedup();
+            lock.set_selection(tapid_lockfile::LockedSelection {
+                target: tapid_lockfile::SelectionTarget {
+                    os: "linux".into(),
+                    cpu: "x86_64".into(),
+                    libc: None,
+                },
+                profile: tapid_lockfile::SelectionProfile::Development,
+                declarations,
+                omissions: vec![],
+            })
+            .unwrap();
+        }
+        let expected_kind = match section {
+            None => "dependency",
+            Some(tapid_lockfile::DeclarationSection::OptionalDependencies) => {
+                "optionalDependencies"
+            }
+            _ => "dependencies",
+        };
+        let lock_bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        let before = fs::read(project.path().join("tapid.lock")).unwrap();
+        let text = run(project.path(), &["why", "target"]);
+        assert!(text.status.success());
+        assert!(String::from_utf8_lossy(&text.stdout).contains("dependencies (app)"));
+        assert!(
+            String::from_utf8_lossy(&text.stdout).contains(&format!("{expected_kind} (target)"))
+        );
+        let json = run(project.path(), &["why", "target", "--json"]);
+        assert!(json.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(
+            result["data"]["paths"][0]["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            result["data"]["paths"][0]["steps"][1]["edgeKind"],
+            expected_kind
+        );
+        assert_eq!(
+            result["data"]["graph_warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            section.is_some()
+        );
+        assert_eq!(result["changes"]["state"], "unchanged");
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), before);
+    }
 }
 
 #[test]

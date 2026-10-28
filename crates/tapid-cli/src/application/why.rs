@@ -393,6 +393,33 @@ struct WhyGraph {
 }
 
 fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
+    let mut declaration_kinds = BTreeMap::new();
+    if let Some(selection) = lock.selection() {
+        for declaration in &selection.declarations {
+            let parent = match &declaration.origin {
+                tapid_lockfile::OmissionOrigin::Root => continue,
+                tapid_lockfile::OmissionOrigin::Package { key }
+                | tapid_lockfile::OmissionOrigin::Workspace { key } => key.as_str(),
+            };
+            let kind = match declaration.section {
+                tapid_lockfile::DeclarationSection::Dependencies => "dependencies",
+                tapid_lockfile::DeclarationSection::DevDependencies => "devDependencies",
+                tapid_lockfile::DeclarationSection::OptionalDependencies => "optionalDependencies",
+            };
+            let entry = declaration_kinds
+                .entry((
+                    parent,
+                    declaration.name.as_str(),
+                    declaration.target.as_str(),
+                ))
+                .or_insert(kind);
+            // Multiple manifest sections can describe one selected edge.
+            // A required declaration takes precedence over an optional one.
+            if kind != "optionalDependencies" {
+                *entry = kind;
+            }
+        }
+    }
     let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
     let mut nodes = BTreeMap::new();
     for (key, package) in lock.packages_typed().map_err(OperationalError::from)? {
@@ -405,7 +432,10 @@ fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
                 .map(|(name, target)| Edge {
                     name: name.clone(),
                     target: target.clone(),
-                    kind: "dependency",
+                    kind: declaration_kinds
+                        .get(&(key.to_string().as_str(), name.as_str(), target.as_str()))
+                        .copied()
+                        .unwrap_or("dependency"),
                 })
                 .collect(),
         );
@@ -423,7 +453,10 @@ fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
                 .map(|(name, target)| Edge {
                     name: name.clone(),
                     target: target.clone(),
-                    kind: "dependency",
+                    kind: declaration_kinds
+                        .get(&(key.to_string().as_str(), name.as_str(), target.as_str()))
+                        .copied()
+                        .unwrap_or("dependency"),
                 })
                 .collect(),
         );
