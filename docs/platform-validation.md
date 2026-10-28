@@ -165,6 +165,14 @@ Authenticated dependency builds remain disabled on Windows at
 mechanisms and unresolved inputs, not native acceptance. No complete Windows
 runtime identity or prepared execution authority exists yet.
 
+The existing native Windows dependency acceptance step runs the runner library's
+`authority_tests` with `--show-output` before the general workspace suite, alongside
+the separate `windows_containment` target. It retains each command's exit status
+and fails if any command fails. This ensures an earlier CLI failure in the
+workspace suite cannot prevent the paired registry/provider/COM controls and
+host-supervisor regressions from running. Their successful status validates
+sampled controls; it does not resolve the inventory below or enable authentication.
+
 | Input channel | Current mechanism / concrete input | Required closure and evidence |
 | --- | --- | --- |
 | All Application Packages | LPAC opt-out and actual suspended-token access checks; explicit per-profile project grants | The root/descendant Rust probe attempts an AAP-granted copied executable, reads, and absolute/searched DLL loads. Host controls validate the executable and DLL; approved copies load inside containment. Undeclared operations must fail with `PermissionDenied`. Native execution of these extended probes is pending. |

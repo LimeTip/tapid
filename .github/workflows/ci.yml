@@ -201,8 +201,12 @@ jobs:
           $keyStatus = $LASTEXITCODE
           cargo test -p tapid-runner --test windows_containment --locked -- --show-output
           $writeStatus = $LASTEXITCODE
-          if ($keyStatus -ne 0 -or $writeStatus -ne 0) {
-            throw "Native dependency acceptance failed: key=$keyStatus write=$writeStatus"
+          # Run library authority controls before the workspace suite: an earlier
+          # CLI failure must not hide paired registry/provider/COM observations.
+          cargo test -p tapid-runner --lib --locked authority_tests -- --show-output
+          $authorityStatus = $LASTEXITCODE
+          if ($keyStatus -ne 0 -or $writeStatus -ne 0 -or $authorityStatus -ne 0) {
+            throw "Native dependency acceptance failed: key=$keyStatus write=$writeStatus authority=$authorityStatus"
           }
       - name: Run tests
         # Retain success output so each Node assertion branch has a receipt.
