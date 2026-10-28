@@ -8,8 +8,9 @@ struct ProcThreadAttributeList {
     initialized: bool,
     // UpdateProcThreadAttribute retains these pointers until the list is deleted.
     security_capabilities: Box<SECURITY_CAPABILITIES>,
-    _registry_read: super::token::RegistryReadCapability,
+    _registry_read: Option<super::token::RegistryReadCapability>,
     all_application_packages_policy: Box<u32>,
+    mitigation_policy: Box<u64>,
     inherited_handles: Option<Box<[HANDLE]>>,
 }
 
@@ -17,12 +18,11 @@ impl ProcThreadAttributeList {
     fn for_appcontainer(
         container: &WindowsAppContainer,
         inherited_handles: &[HANDLE],
+        registry_read: Option<super::token::RegistryReadCapability>,
     ) -> Result<Self, ExecutionError> {
-        // Derive before initializing native list storage so failure needs no list cleanup.
-        let registry_read = super::token::RegistryReadCapability::new()?;
         let inherited_handles =
             (!inherited_handles.is_empty()).then(|| inherited_handles.to_vec().into_boxed_slice());
-        let attribute_count = if inherited_handles.is_some() { 3 } else { 2 };
+        let attribute_count = if inherited_handles.is_some() { 4 } else { 3 };
         let mut required = 0usize;
         // SAFETY: the null probe is the documented first call used to obtain the allocation size.
         unsafe { InitializeProcThreadAttributeList(null_mut(), attribute_count, 0, &mut required) };
@@ -43,8 +43,10 @@ impl ProcThreadAttributeList {
         }
         let security_capabilities = Box::new(SECURITY_CAPABILITIES {
             AppContainerSid: container.sid(),
-            Capabilities: registry_read.entry(),
-            CapabilityCount: 1,
+            Capabilities: registry_read
+                .as_ref()
+                .map_or(null_mut(), |capability| capability.entry()),
+            CapabilityCount: u32::from(registry_read.is_some()),
             Reserved: 0,
         });
         let attributes = Self {
@@ -57,6 +59,9 @@ impl ProcThreadAttributeList {
             // LPAC removes ambient All Application Packages access. Explicit per-run
             // grants remain necessary; this is not a complete toolchain identity.
             all_application_packages_policy: Box::new(1),
+            // PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON.
+            // Deny legacy automatic DLL extension points without disabling Node's JIT.
+            mitigation_policy: Box::new(1u64 << 32),
             inherited_handles,
         };
         // SAFETY: the boxed capabilities and attribute-list storage remain alive until the list is
@@ -95,6 +100,23 @@ impl ProcThreadAttributeList {
             return Err(unsupported_job(
                 "require Less-Privileged AppContainer launch",
             ));
+        }
+        // SAFETY: the boxed u64 retains its address through CreateProcessW and the
+        // attribute list was sized for this additional creation-time policy.
+        if unsafe {
+            UpdateProcThreadAttribute(
+                attributes.list,
+                0,
+                windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+                    as usize,
+                (&*attributes.mitigation_policy as *const u64).cast::<c_void>(),
+                size_of::<u64>(),
+                null_mut(),
+                null(),
+            )
+        } == 0
+        {
+            return Err(unsupported_job("disable legacy DLL extension points"));
         }
         if let Some(handles) = &attributes.inherited_handles {
             // SAFETY: the boxed handle array remains alive through CreateProcessW; every listed
@@ -369,6 +391,7 @@ impl WindowsSuspendedChild {
             environment,
             current_directory,
             None,
+            Some(super::token::RegistryReadCapability::new()?),
         )
     }
 
@@ -387,6 +410,7 @@ impl WindowsSuspendedChild {
             environment,
             current_directory,
             Some(stdio),
+            Some(super::token::RegistryReadCapability::new()?),
         )
     }
 
@@ -397,6 +421,7 @@ impl WindowsSuspendedChild {
         environment: &[u16],
         current_directory: &[u16],
         stdio: Option<&mut WindowsStdioPipes>,
+        registry_read: Option<super::token::RegistryReadCapability>,
     ) -> Result<Self, ExecutionError> {
         if !is_single_nul_terminated(application)
             || !is_single_nul_terminated(command_line)
@@ -418,7 +443,11 @@ impl WindowsSuspendedChild {
         } else {
             &[]
         };
-        let attributes = ProcThreadAttributeList::for_appcontainer(container, handles_to_inherit)?;
+        let attributes = ProcThreadAttributeList::for_appcontainer(
+            container,
+            handles_to_inherit,
+            registry_read,
+        )?;
         let mut mutable_command_line = command_line.to_vec();
         // SAFETY: zero is the documented default for optional STARTUPINFOEXW fields.
         let mut startup = unsafe { zeroed::<STARTUPINFOEXW>() };
@@ -478,7 +507,40 @@ impl WindowsSuspendedChild {
             exited: false,
         };
         child.verify_appcontainer(container.sid())?;
+        child.verify_loader_mitigation()?;
         Ok(child)
+    }
+
+    fn verify_loader_mitigation(&self) -> Result<(), ExecutionError> {
+        use windows_sys::Win32::System::SystemServices::PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY;
+        use windows_sys::Win32::System::Threading::{
+            GetProcessMitigationPolicy, ProcessExtensionPointDisablePolicy,
+        };
+        // SAFETY: the native output structure accepts all-zero initialization.
+        let mut policy: PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY = unsafe { zeroed() };
+        // SAFETY: self owns the suspended child's query-capable process handle;
+        // policy is writable and has the exact size required by this selector.
+        if unsafe {
+            GetProcessMitigationPolicy(
+                self.process,
+                ProcessExtensionPointDisablePolicy,
+                (&mut policy as *mut PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY).cast(),
+                size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
+            )
+        } == 0
+        {
+            return Err(unsupported_job(
+                "query child legacy DLL extension-point policy",
+            ));
+        }
+        // SAFETY: the successful query initialized the native bitfield union.
+        if unsafe { policy.Anonymous.Anonymous._bitfield } & 1 == 0 {
+            return Err(ExecutionError::new(
+                ExecutionErrorCategory::UnsupportedContainment,
+                "Windows child legacy DLL extension points remain enabled; refusing to resume it",
+            ));
+        }
+        Ok(())
     }
 
     fn verify_appcontainer(
@@ -735,3 +797,19 @@ fn is_double_nul_terminated(buffer: &[u16]) -> bool {
                     .is_some_and(|equals| equals > 0)
         })
 }
+
+#[cfg(test)]
+#[path = "../tests/support/windows_provider.rs"]
+mod provider_probe;
+
+#[cfg(test)]
+#[path = "windows_process_tests.rs"]
+mod authority_tests;
+
+#[cfg(test)]
+#[path = "windows_registry_probe.rs"]
+mod registry_probe;
+
+#[cfg(test)]
+#[path = "windows_com_probe.rs"]
+mod com_probe;

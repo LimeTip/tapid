@@ -783,6 +783,15 @@ fn run_hook(
         }
     }
     builder = builder.executable_search_paths(search_paths);
+    // Retain the same approved bytes used by the recipe, including secondary
+    // executables. Node additionally receives its platform-specific PATH binding.
+    for tool in approval.tools() {
+        builder = builder.verified_executable(
+            fs::canonicalize(prepared_tools.get(tool.name()).unwrap()).map_err(error)?,
+            tool.digest(),
+        );
+    }
+
     if let Some(node) = approval.tools().iter().find(|tool| tool.name() == "node") {
         builder = builder.trusted_node_runtime(prepared_tools.get(node.name()).unwrap());
     }

@@ -453,6 +453,109 @@ fn trusted_node_runtime_identity_is_retained_and_revalidated() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn trusted_node_runtime_rejects_in_place_byte_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("trusted-node-bytes").unwrap();
+    project.write("node", b"first").unwrap();
+    let runtime = fs::canonicalize(project.path().join("node")).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let request = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap();
+    request.validate_trusted_node_runtime().unwrap();
+    // Same file object and same length: native file identity alone misses this.
+    fs::write(&runtime, b"other").unwrap();
+    assert_eq!(
+        request
+            .validate_trusted_node_runtime()
+            .unwrap_err()
+            .category(),
+        ExecutionErrorCategory::PolicyViolation
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn trusted_node_runtime_retains_windows_write_and_delete_exclusion_across_clones() {
+    let project = tapid_test_support::TempProject::new("trusted-node-pin").unwrap();
+    project.write("node.exe", b"runtime").unwrap();
+    let runtime = fs::canonicalize(project.path().join("node.exe")).unwrap();
+    let writer = fs::OpenOptions::new().write(true).open(&runtime).unwrap();
+    assert!(
+        ExecutionRequest::builder(&runtime)
+            .trusted_node_runtime(&runtime)
+            .executable_search_path(runtime.parent().unwrap())
+            .build()
+            .is_err(),
+        "an existing writer prevents acquiring the runtime pin"
+    );
+    drop(writer);
+    let request = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap();
+    let retained = request.clone();
+    drop(request);
+    retained.validate_trusted_node_runtime().unwrap();
+    assert!(
+        fs::read(&runtime).is_ok(),
+        "approved reads remain available"
+    );
+    let write = fs::OpenOptions::new()
+        .write(true)
+        .open(&runtime)
+        .unwrap_err();
+    assert_eq!(write.raw_os_error(), Some(32), "write sharing violation");
+    let rename = fs::rename(&runtime, project.path().join("replaced.exe")).unwrap_err();
+    assert_eq!(rename.raw_os_error(), Some(32), "delete sharing violation");
+    drop(retained);
+    fs::write(&runtime, b"changed").unwrap();
+    fs::rename(&runtime, project.path().join("replaced.exe")).unwrap();
+}
+
+#[test]
+fn trusted_node_runtime_rejects_oversized_images_before_hashing() {
+    let project = tapid_test_support::TempProject::new("trusted-node-size").unwrap();
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    project.write(name, b"").unwrap();
+    let runtime = fs::canonicalize(project.path().join(name)).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&runtime)
+        .unwrap()
+        .set_len(512 * 1024 * 1024 + 1)
+        .unwrap();
+    let error = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeds 512 MiB"));
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_node_runtime_rejects_a_fifo_without_waiting_for_a_writer() {
+    use std::os::unix::ffi::OsStrExt;
+    let project = tapid_test_support::TempProject::new("trusted-node-fifo").unwrap();
+    let runtime = project.path().join("node");
+    let name = std::ffi::CString::new(runtime.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a live NUL-terminated pathname in this isolated project.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let runtime = fs::canonicalize(runtime).unwrap();
+    let error = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap_err();
+    assert!(error.to_string().contains("must be a regular file"));
+}
+
 #[test]
 fn request_builder_preserves_windows_verbatim_boundary_contract() {
     let request = ExecutionRequest::builder("cmd.exe")
@@ -3021,4 +3124,264 @@ fn native_write_grant_does_not_imply_read_authority() {
     let outcome = execute(&request).unwrap();
     assert_ne!(outcome.termination(), &Termination::Exited(0));
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn declared_executable_rejects_hard_link_alias_under_disjoint_write_grant() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("aliased-declared-tool").unwrap();
+    project.write("tools/tool", b"abc").unwrap();
+    project.write("output/result", b"").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let tool = root.join("tools/tool");
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![], vec!["output".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::default(),
+    )
+    .unwrap();
+    let request = ExecutionRequest::builder(&tool)
+        .project_root(&root)
+        .policy(policy)
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    assert!(resolve_policy(&request, RuntimeFilesystemAdditions::default()).is_ok());
+    // Introduce the alias after construction: digest and canonical path remain unchanged.
+    fs::hard_link(&tool, root.join("output/alias")).unwrap();
+    let error = resolve_policy(&request, RuntimeFilesystemAdditions::default()).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    fs::remove_file(root.join("output/alias")).unwrap();
+    assert!(resolve_policy(&request, RuntimeFilesystemAdditions::default()).is_ok());
+}
+
+#[test]
+fn declared_executable_rejects_child_write_authority() {
+    let project = tapid_test_support::TempProject::new("writable-declared-tool").unwrap();
+    project.write("tools/tool", b"abc").unwrap();
+    project.write("output/result", b"").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let tool = root.join("tools/tool");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for write in ["tools/tool", "tools", ".", "output"] {
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![], vec![write.into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::default(),
+        )
+        .unwrap();
+        let request = ExecutionRequest::builder(&tool)
+            .project_root(&root)
+            .policy(policy)
+            .verified_executable(
+                &tool,
+                "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            )
+            .build()
+            .unwrap();
+        let resolved = resolve_policy(&request, RuntimeFilesystemAdditions::default());
+        if write == "output" {
+            assert!(resolved.is_ok(), "disjoint output must remain writable");
+            let additions =
+                RuntimeFilesystemAdditions::checked(vec![], vec![tool.clone()]).unwrap();
+            assert_eq!(
+                resolve_policy(&request, additions).unwrap_err().category(),
+                ExecutionErrorCategory::PolicyViolation,
+                "backend write additions must obey the same exclusion"
+            );
+        } else {
+            assert_eq!(
+                resolved.unwrap_err().category(),
+                ExecutionErrorCategory::PolicyViolation,
+                "child must not be able to change its declared tool through {write}"
+            );
+        }
+    }
+}
+
+#[test]
+fn declared_executable_rejects_bytes_outside_the_approved_digest() {
+    let project = tapid_test_support::TempProject::new("declared-executable-digest").unwrap();
+    project.write("tool", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("tool")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // SHA-256 of "abd", not the bytes in the executable.
+    let result = ExecutionRequest::builder(&tool)
+        .verified_executable(
+            &tool,
+            "sha256-a52d159f262b2c6ddb724a61840befc36eb30c88877a4030b65cbe86298449c9",
+        )
+        .build();
+    assert_eq!(
+        result.unwrap_err().category(),
+        ExecutionErrorCategory::PolicyViolation
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn declared_executable_mutation_rejects_execution_before_capture_or_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("secondary-executable-mutation").unwrap();
+    project.write("tool", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("tool")).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let request = ExecutionRequest::builder("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    fs::write(&tool, b"abd").unwrap();
+    let capture = project.path().join("capture");
+    let error = execute_uncontained(&request, &capture).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    assert!(
+        !capture.exists(),
+        "changed secondary bytes must fail before capture setup"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn declared_executable_retains_windows_pins_until_last_request_clone_drops() {
+    let project = tapid_test_support::TempProject::new("secondary-executable-pin").unwrap();
+    project.write("tool.exe", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("tool.exe")).unwrap();
+    let request = ExecutionRequest::builder(&tool)
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    let retained = request.clone();
+    drop(request);
+    assert!(fs::OpenOptions::new().write(true).open(&tool).is_err());
+    assert!(fs::rename(&tool, project.path().join("moved.exe")).is_err());
+    drop(retained);
+    fs::OpenOptions::new().write(true).open(&tool).unwrap();
+    fs::rename(&tool, project.path().join("moved.exe")).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn declared_executable_rejects_existing_earlier_path_candidate_at_construction() {
+    let project = tapid_test_support::TempProject::new("declared-tool-existing-shadow").unwrap();
+    project.write("approved/tool.exe", b"abc").unwrap();
+    project.write("earlier/tool.exe", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("approved/tool.exe")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let earlier = fs::canonicalize(project.path().join("earlier")).unwrap();
+    let build = || {
+        ExecutionRequest::builder(&tool)
+            .executable_search_paths([earlier.clone(), tool.parent().unwrap().to_owned()])
+            .verified_executable(
+                &tool,
+                "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            )
+            .build()
+    };
+    assert_eq!(
+        build().unwrap_err().category(),
+        ExecutionErrorCategory::PolicyViolation
+    );
+    fs::remove_file(earlier.join("tool.exe")).unwrap();
+    build().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn declared_executable_rejects_windows_search_variants_before_capture() {
+    let project =
+        tapid_test_support::TempProject::new("declared-tool-extensionless-shadow").unwrap();
+    project.write("approved/tool.exe", b"abc").unwrap();
+    fs::create_dir(project.path().join("earlier")).unwrap();
+    let tool = fs::canonicalize(project.path().join("approved/tool.exe")).unwrap();
+    let earlier = fs::canonicalize(project.path().join("earlier")).unwrap();
+    let request = ExecutionRequest::builder(&tool)
+        .executable_search_paths([earlier, tool.parent().unwrap().to_owned()])
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    // The native adapter tries an extensionless name before appending .exe.
+    for shadow in ["earlier/tool.exe", "earlier/tool", "approved/tool"] {
+        project.write(shadow, b"abd").unwrap();
+        let capture = project.path().join("capture");
+        let error = execute_uncontained(&request, &capture).unwrap_err();
+        assert_eq!(
+            error.category(),
+            ExecutionErrorCategory::PolicyViolation,
+            "{shadow}"
+        );
+        assert!(!capture.exists());
+        fs::remove_file(project.path().join(shadow)).unwrap();
+        request.validate().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn declared_executable_rejects_new_earlier_path_candidate_before_execution() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("declared-tool-search-order").unwrap();
+    project.write("approved/tool", b"abc").unwrap();
+    fs::create_dir(project.path().join("earlier")).unwrap();
+    let tool = fs::canonicalize(project.path().join("approved/tool")).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let earlier = fs::canonicalize(project.path().join("earlier")).unwrap();
+    let request = ExecutionRequest::builder("/bin/sh")
+        .args(["-c", "exit 0"])
+        .executable_search_paths([earlier.clone(), tool.parent().unwrap().to_owned()])
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    // The approved image is unchanged. Only resolution precedence has changed.
+    fs::copy(&tool, earlier.join("tool")).unwrap();
+    let capture = project.path().join("capture");
+    fs::create_dir(&capture).unwrap();
+    let error = execute_uncontained(&request, &capture).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    assert_eq!(
+        fs::read_dir(&capture).unwrap().count(),
+        0,
+        "shadowing must fail before opening capture files"
+    );
+    fs::remove_file(earlier.join("tool")).unwrap();
+    assert_eq!(
+        execute_uncontained(&request, &capture).unwrap(),
+        Termination::Exited(0)
+    );
 }

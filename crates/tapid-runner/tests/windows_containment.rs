@@ -16,6 +16,8 @@ use tapid_runner::{
 mod windows_acl;
 #[path = "support/windows_node.rs"]
 mod windows_node;
+#[path = "support/windows_provider.rs"]
+mod windows_provider;
 
 fn temporary_project(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -133,11 +135,255 @@ fn command_request_with_policy(
 }
 
 #[test]
-fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants() {
+fn windows_socket_provider_initialization_with_registry_read_capability() {
+    let project = tapid_test_support::TempProject::new("windows-provider-inputs").unwrap();
+    windows_acl::initialize_inheritance(project.path());
+    let root = fs::canonicalize(project.path()).unwrap();
+    let child = root.join("provider-probe.exe");
+    fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+    let arguments = [
+        "--exact",
+        "windows_socket_provider_probe_helper",
+        "--nocapture",
+    ];
+    let host = Command::new(&child)
+        .args(arguments)
+        .env("TAPID_TEST_MARKER", "provider-host")
+        .output()
+        .unwrap();
+    assert!(
+        host.status.success(),
+        "{}",
+        String::from_utf8_lossy(&host.stderr)
+    );
+    assert!(String::from_utf8_lossy(&host.stdout).contains("provider:host:socket-created"));
+    let request = ExecutionRequest::builder(child.as_os_str())
+        .args(arguments)
+        .executable_search_path(&root)
+        .project_root(&root)
+        .policy(managed_policy())
+        .env("TAPID_TEST_MARKER", "provider-contained")
+        .build()
+        .unwrap();
+    let outcome = execute(&request).expect("provider probe must execute");
+    let stdout = String::from_utf8_lossy(outcome.stdout());
+    assert_eq!(
+        outcome.termination(),
+        &Termination::Exited(0),
+        "stdout={stdout}; stderr={}",
+        String::from_utf8_lossy(outcome.stderr())
+    );
+    assert!(stdout.contains("provider:startup:ok"), "{stdout}");
+    assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
+    assert_eq!(
+        outcome.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    println!("{stdout}");
+}
+
+#[test]
+fn windows_socket_provider_probe_helper() {
+    windows_provider::probe(&std::env::var("TAPID_TEST_MARKER").unwrap_or_default());
+}
+
+#[test]
+fn windows_profile_storage_is_fresh_and_not_readable_by_the_next_execution() {
+    let project = tapid_test_support::TempProject::new("windows-profile-isolation").unwrap();
+    windows_acl::initialize_inheritance(project.path());
+    let root = fs::canonicalize(project.path()).unwrap();
+    let child = root.join("profile-probe.exe");
+    fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+    let mut profiles = Vec::new();
+    for mode in ["profile-first", "profile-second"] {
+        let request = ExecutionRequest::builder(child.as_os_str())
+            .args([
+                "--exact",
+                "windows_profile_storage_probe_helper",
+                "--nocapture",
+            ])
+            .executable_search_path(&root)
+            .project_root(&root)
+            .policy(managed_policy())
+            .env("TAPID_TEST_MARKER", mode)
+            .build()
+            .unwrap();
+        let outcome = execute(&request).expect("profile probe must execute");
+        let stdout = String::from_utf8_lossy(outcome.stdout());
+        assert_eq!(
+            outcome.termination(),
+            &Termination::Exited(0),
+            "stdout={stdout}; stderr={}",
+            String::from_utf8_lossy(outcome.stderr())
+        );
+        assert_eq!(
+            outcome.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        if mode == "profile-second" {
+            assert!(
+                stdout.contains("previous-profile-input:unavailable"),
+                "{stdout}"
+            );
+        }
+        let profile = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("profile-storage:"))
+            .expect("actual-token profile path");
+        let profile = PathBuf::from(profile);
+        assert!(profile.is_absolute());
+        assert!(
+            !profile.join("tapid-cross-run-input").try_exists().unwrap(),
+            "profile sentinel survived cleanup"
+        );
+        profiles.push(profile.clone());
+        project
+            .write(
+                "previous-profile.txt",
+                profile.as_os_str().to_str().unwrap().as_bytes(),
+            )
+            .unwrap();
+    }
+    assert_ne!(
+        profiles[0], profiles[1],
+        "profile storage must not be reused"
+    );
+}
+
+#[test]
+fn windows_profile_storage_probe_helper() {
+    let mode = std::env::var("TAPID_TEST_MARKER").unwrap_or_default();
+    if !matches!(mode.as_str(), "profile-first" | "profile-second") {
+        return;
+    }
+    let profile = current_appcontainer_storage();
+    let sentinel = profile.join("tapid-cross-run-input");
+    assert!(
+        !sentinel.try_exists().unwrap(),
+        "fresh profile contains a previous sentinel"
+    );
+    fs::write(&sentinel, b"private-profile-input").expect("own profile write control");
+    assert_eq!(fs::read(&sentinel).unwrap(), b"private-profile-input");
+    if mode == "profile-second" {
+        let previous =
+            fs::read_to_string("previous-profile.txt").expect("prior profile path input");
+        assert_ne!(profile, PathBuf::from(&previous));
+        let error = fs::read(PathBuf::from(previous).join("tapid-cross-run-input"))
+            .expect_err("prior profile must not provide an input");
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            ),
+            "{error}"
+        );
+        println!("previous-profile-input:unavailable");
+    }
+    println!("profile-storage:{}", profile.display());
+}
+
+fn current_appcontainer_storage() -> PathBuf {
+    use std::{mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, LocalFree},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation,
+            Isolation::GetAppContainerFolderPath, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
+            TokenAppContainerSid,
+        },
+        System::{
+            Com::CoTaskMemFree,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+    let mut token = 0;
+    // SAFETY: valid current-process pseudo-handle and writable output handle.
+    assert_ne!(
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+        0
+    );
+    let mut required = 0;
+    // SAFETY: null/zero requests the required buffer size.
+    unsafe { GetTokenInformation(token, TokenAppContainerSid, null_mut(), 0, &mut required) };
+    assert!(required as usize >= size_of::<TOKEN_APPCONTAINER_INFORMATION>());
+    let mut buffer = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: aligned buffer has the size returned by the API.
+    let queried = unsafe {
+        GetTokenInformation(
+            token,
+            TokenAppContainerSid,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    };
+    // SAFETY: release the handle opened above, after the query.
+    unsafe { CloseHandle(token) };
+    assert_ne!(queried, 0);
+    // SAFETY: successful query returned TOKEN_APPCONTAINER_INFORMATION and its SID.
+    let info = unsafe { &*buffer.as_ptr().cast::<TOKEN_APPCONTAINER_INFORMATION>() };
+    assert!(!info.TokenAppContainer.is_null());
+    let mut sid = null_mut();
+    // SAFETY: SID remains owned by buffer through conversion.
+    assert_ne!(
+        unsafe { ConvertSidToStringSidW(info.TokenAppContainer, &mut sid) },
+        0
+    );
+    let mut path = null_mut();
+    // SAFETY: sid is a NUL-terminated API allocation; path is a writable output.
+    let result = unsafe { GetAppContainerFolderPath(sid, &mut path) };
+    // SAFETY: release exactly the string allocated by conversion.
+    unsafe { LocalFree(sid.cast()) };
+    assert!(result >= 0, "profile folder query: {result:#x}");
+    assert!(!path.is_null());
+    let mut length = 0;
+    // SAFETY: successful API output is a NUL-terminated UTF-16 string.
+    while unsafe { *path.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: the scan established this initialized slice's length.
+    let owned = OsString::from_wide(unsafe { std::slice::from_raw_parts(path, length) });
+    // SAFETY: this API's output is allocated with CoTaskMemAlloc.
+    unsafe { CoTaskMemFree(path.cast()) };
+    PathBuf::from(owned)
+}
+
+#[test]
+fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_and_descendants() {
+    ambient_authority_probe("AAP", "*S-1-15-2-1:(OI)(CI)(RX)");
+}
+
+#[test]
+fn windows_inventories_all_restricted_application_packages_authority() {
+    // Characterization, not a denial claim: LPAC's AAP opt-out does not prove
+    // exclusion of ARAP. Record each operation for the authority checkpoint.
+    ambient_authority_probe("ARAP", "*S-1-15-2-2:(OI)(CI)(RX)");
+}
+
+fn ambient_authority_probe(trustee: &str, grant: &str) {
     let project = tapid_test_support::TempProject::new("windows-lpac-project").unwrap();
     let outside = tapid_test_support::TempProject::new("windows-lpac-outside").unwrap();
     project.write("approved.txt", b"approved-input").unwrap();
     let secret = outside.write("undeclared.txt", b"ambient-input").unwrap();
+    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let undeclared_executable = outside.path().join("undeclared.exe");
+    fs::copy(&executable, &undeclared_executable).unwrap();
+    // Reuse the native addon fixture: it resolves Node exports only when called,
+    // so ordinary LoadLibrary/GetProcAddress can validate it without Node.
+    let undeclared_library = outside.path().join("tapid-search-order.dll");
+    windows_node::compile_launcher(&undeclared_library);
+    fs::copy(&undeclared_library, project.path().join("approved.dll")).unwrap();
+    for directory in ["search-first", "search-second"] {
+        fs::create_dir(project.path().join(directory)).unwrap();
+        fs::copy(
+            &undeclared_library,
+            project
+                .path()
+                .join(directory)
+                .join("tapid-search-order.dll"),
+        )
+        .unwrap();
+    }
     windows_acl::initialize_inheritance(project.path());
     windows_acl::initialize_inheritance(outside.path());
     let system32 =
@@ -145,7 +391,7 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
             .unwrap();
     let grant = Command::new(system32.join("icacls.exe"))
         .arg(outside.path())
-        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+        .args(["/grant", grant])
         .output()
         .unwrap();
     assert!(
@@ -153,16 +399,68 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
         "{}",
         String::from_utf8_lossy(&grant.stderr)
     );
-    // The host can read the fixture. Its only package-side grant is ambient AAP;
+    // The host can read the fixture. Its added package-side grant is ambient;
     // neither this file nor its directory appears in the execution policy.
     assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
+    // A valid PE image and successful host launch distinguish access denial
+    // from a missing executable, loader dependency, or invalid fixture.
+    let host_control = Command::new(&undeclared_executable)
+        .args([
+            "--exact",
+            "windows_ambient_execution_target_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-target")
+        .env("TAPID_TEST_LIBRARY", &undeclared_library)
+        .output()
+        .unwrap();
+    assert!(host_control.status.success(), "{host_control:?}");
+    assert!(String::from_utf8_lossy(&host_control.stdout).contains("undeclared-target-executed"));
+    assert!(String::from_utf8_lossy(&host_control.stdout).contains("host-dynamic-library-valid"));
+    resolved_process_probe(&undeclared_executable).expect("host resolved-process positive control");
+    // Use an executable outside the undeclared DLL directory: Windows searches
+    // the application directory before SetDllDirectoryW. Otherwise this host
+    // control would select the ambient fixture for reasons unrelated to the
+    // search-directory switch under test.
+    let host_order_executable = project.path().join("host-order.exe");
+    fs::copy(&executable, &host_order_executable).unwrap();
+    let host_order = Command::new(&host_order_executable)
+        .args([
+            "--exact",
+            "windows_ambient_execution_target_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-target")
+        .env("TAPID_TEST_SEARCH_ROOT", project.path())
+        .env_remove("TAPID_TEST_LIBRARY")
+        .output()
+        .unwrap();
+    assert!(host_order.status.success(), "{host_order:?}");
+    assert!(
+        String::from_utf8_lossy(&host_order.stdout)
+            .contains("dynamic-library-search-order:verified")
+    );
     let baseline = project_dacl(outside.path());
     let root = fs::canonicalize(project.path()).unwrap();
-    let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let child = root.join("probe.exe");
     fs::copy(&executable, &child).unwrap();
     project
+        .write("ambient-trustee.txt", trustee.as_bytes())
+        .unwrap();
+    project
         .write("outside-path.txt", secret.to_str().unwrap().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "outside-executable.txt",
+            undeclared_executable.to_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+    project
+        .write(
+            "outside-library.txt",
+            undeclared_library.to_str().unwrap().as_bytes(),
+        )
         .unwrap();
     let request = ExecutionRequest::builder(child.as_os_str())
         .args([
@@ -197,10 +495,38 @@ fn windows_denies_ambient_all_application_packages_reads_in_root_and_descendants
         stdout.contains("approved-child"),
         "descendant positive control missing: {stdout}"
     );
-    assert!(
-        !stdout.contains("ambient-input"),
-        "undeclared AAP input was readable: {stdout}"
+    assert_eq!(
+        stdout
+            .matches("dynamic-library-search-order:verified")
+            .count(),
+        2
     );
+    for mode in ["ambient-root", "ambient-child"] {
+        for operation in [
+            "read",
+            "execute",
+            "resolved-execute",
+            "load-library",
+            "search-library",
+            "resolved-load-library",
+            "altered-search-library",
+            "restricted-search-library",
+        ] {
+            let denied = format!("{trustee}:{mode}:{operation}:denied");
+            let allowed = format!("{trustee}:{mode}:{operation}:allowed");
+            if trustee == "AAP" {
+                assert!(stdout.contains(&denied), "{stdout}");
+                assert!(!stdout.contains(&allowed), "{stdout}");
+            } else {
+                assert!(
+                    stdout.contains(&denied) ^ stdout.contains(&allowed),
+                    "{stdout}"
+                );
+            }
+        }
+    }
+    // --show-output in the native workspace lane retains these observations.
+    println!("ambient authority inventory ({trustee}):\n{stdout}");
     assert_eq!(project_dacl(outside.path()), baseline);
 }
 
@@ -210,10 +536,111 @@ fn windows_ambient_read_probe_helper() {
     if mode != "ambient-root" && mode != "ambient-child" {
         return;
     }
+    probe_library_search_order(&std::env::current_dir().unwrap());
     assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
+    let trustee = fs::read_to_string("ambient-trustee.txt").unwrap();
+    assert!(matches!(trustee.as_str(), "AAP" | "ARAP"));
     let outside = fs::read_to_string("outside-path.txt").unwrap();
-    let denied = fs::read(outside).expect_err("undeclared AAP file must be denied");
-    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    match fs::read(outside) {
+        Ok(bytes) => {
+            assert_eq!(bytes, b"ambient-input");
+            assert_ne!(trustee, "AAP", "undeclared AAP file must be denied");
+            println!("{trustee}:{mode}:read:allowed");
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("{trustee}:{mode}:read:denied");
+        }
+    }
+    let outside_executable = fs::read_to_string("outside-executable.txt").unwrap();
+    let launch = Command::new(&outside_executable)
+        .args([
+            "--exact",
+            "windows_ambient_execution_target_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-target")
+        .output();
+    match launch {
+        Ok(output) => {
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("undeclared-target-executed"));
+            assert_ne!(trustee, "AAP", "undeclared AAP executable must be denied");
+            println!("{trustee}:{mode}:execute:allowed");
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("{trustee}:{mode}:execute:denied");
+        }
+    }
+    resolved_process_probe(&std::env::current_exe().unwrap())
+        .expect("approved executable must launch through resolved CreateProcessW");
+    match resolved_process_probe(std::path::Path::new(&outside_executable)) {
+        Ok(()) => {
+            assert_ne!(
+                trustee, "AAP",
+                "resolved launch of undeclared AAP executable"
+            );
+            println!("{trustee}:{mode}:resolved-execute:allowed");
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("{trustee}:{mode}:resolved-execute:denied");
+        }
+    }
+    load_authority_probe_library(
+        &fs::canonicalize("approved.dll").unwrap(),
+        ProbeLoader::Direct,
+    )
+    .expect("approved dynamic DLL must load");
+    load_searched_authority_probe_library(&fs::canonicalize("approved.dll").unwrap())
+        .expect("approved searched DLL must load");
+    load_authority_probe_library(
+        &fs::canonicalize("approved.dll").unwrap(),
+        ProbeLoader::Resolved,
+    )
+    .expect("approved DLL must load through dynamically resolved loader");
+    for (_, flags) in EXTENDED_LOADERS {
+        load_authority_probe_library(
+            &fs::canonicalize("approved.dll").unwrap(),
+            ProbeLoader::Extended(flags),
+        )
+        .expect("approved extended DLL load");
+    }
+    let outside_library = fs::read_to_string("outside-library.txt").unwrap();
+    let outside_library = std::path::Path::new(&outside_library);
+    for (operation, result) in [
+        (
+            "load-library",
+            load_authority_probe_library(outside_library, ProbeLoader::Direct),
+        ),
+        (
+            "resolved-load-library",
+            load_authority_probe_library(outside_library, ProbeLoader::Resolved),
+        ),
+        (
+            "search-library",
+            load_searched_authority_probe_library(outside_library),
+        ),
+    ]
+    .into_iter()
+    .chain(EXTENDED_LOADERS.map(|(operation, flags)| {
+        (
+            operation,
+            load_authority_probe_library(outside_library, ProbeLoader::Extended(flags)),
+        )
+    })) {
+        match result {
+            Ok(_) => {
+                assert_ne!(trustee, "AAP", "undeclared AAP DLL must be denied");
+                println!("{trustee}:{mode}:{operation}:allowed");
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                println!("{trustee}:{mode}:{operation}:denied");
+            }
+        }
+    }
     if mode == "ambient-root" {
         println!("approved-root");
         let status = Command::new(std::env::current_exe().unwrap())
@@ -231,6 +658,266 @@ fn windows_ambient_read_probe_helper() {
         );
     } else {
         println!("approved-child");
+    }
+}
+
+// Bypass application import adaptation deliberately. The kernel token and Job
+// must constrain this launch independently of the compatibility hooks.
+fn resolved_process_probe(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Security::SECURITY_ATTRIBUTES,
+        System::Threading::{
+            GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+            WaitForSingleObject,
+        },
+    };
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> isize;
+        fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
+    }
+    type CreateProcess = unsafe extern "system" fn(
+        *const u16,
+        *mut u16,
+        *const SECURITY_ATTRIBUTES,
+        *const SECURITY_ATTRIBUTES,
+        i32,
+        u32,
+        *const std::ffi::c_void,
+        *const u16,
+        *const STARTUPINFOW,
+        *mut PROCESS_INFORMATION,
+    ) -> i32;
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: owns exactly one successful CreateProcessW handle.
+            assert_ne!(unsafe { CloseHandle(self.0) }, 0);
+        }
+    }
+    let kernel: Vec<_> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: borrow the already loaded system module, which remains loaded.
+    let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
+    assert_ne!(kernel, 0);
+    // SAFETY: the module is live and the symbol is NUL terminated.
+    let address = unsafe { GetProcAddress(kernel, c"CreateProcessW".as_ptr().cast()) };
+    assert!(!address.is_null());
+    // SAFETY: exact ABI of the named Windows export.
+    let create = unsafe { std::mem::transmute::<*const std::ffi::c_void, CreateProcess>(address) };
+    let mut program: Vec<_> = path.as_os_str().encode_wide().collect();
+    assert!(path.is_absolute());
+    assert!(!program.contains(&0) && !program.contains(&u16::from(b'"')));
+    let mut command = vec![u16::from(b'"')];
+    command.extend_from_slice(&program);
+    command
+        .extend("\" --exact windows_resolved_execution_target_helper --nocapture".encode_utf16());
+    command.push(0);
+    program.push(0);
+    // SAFETY: these native structures admit all-zero initialization.
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    // SAFETY: output storage is initialized by a successful CreateProcessW.
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: owned terminated argv, explicit absolute program, no inherited
+    // handles, and valid native structures. Environment/current directory inherit
+    // from the isolated helper; the target performs no filesystem operations.
+    if unsafe {
+        create(
+            program.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let process = (Handle(process.hProcess), Handle(process.hThread));
+    // SAFETY: held process handle has synchronization rights.
+    let wait = unsafe { WaitForSingleObject(process.0.0, 5_000) };
+    if wait != WAIT_OBJECT_0 {
+        // SAFETY: stop only the held fixture process, then require its exit.
+        assert_ne!(unsafe { TerminateProcess(process.0.0, 1) }, 0);
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.0.0, 5_000) },
+            WAIT_OBJECT_0
+        );
+        panic!("resolved process probe failed to finish: wait={wait}, timeout={WAIT_TIMEOUT}");
+    }
+    let mut exit = 0;
+    // SAFETY: process is held and has exited; output storage is writable.
+    assert_ne!(unsafe { GetExitCodeProcess(process.0.0, &mut exit) }, 0);
+    assert_eq!(exit, 71, "resolved process target did not run");
+    Ok(())
+}
+
+#[test]
+fn windows_resolved_execution_target_helper() {
+    // A distinctive exit proves this test body ran; a misspelled libtest filter
+    // would otherwise exit successfully with zero tests. Ordinary suite execution
+    // does not select this helper by its exact name and must return normally.
+    if std::env::args().any(|arg| arg == "windows_resolved_execution_target_helper") {
+        std::process::exit(71);
+    }
+}
+
+fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetDllDirectoryW(path: *const u16) -> i32;
+    }
+    let directory: Vec<_> = path
+        .parent()
+        .unwrap()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: this helper changes loader state only in the isolated probe process.
+    if unsafe { SetDllDirectoryW(directory.as_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = load_authority_probe_library(
+        std::path::Path::new(path.file_name().unwrap()),
+        ProbeLoader::Direct,
+    );
+    // SAFETY: null restores the default search path before returning the observation.
+    assert_ne!(unsafe { SetDllDirectoryW(std::ptr::null()) }, 0);
+    let loaded = result?;
+    assert_eq!(loaded, fs::canonicalize(path)?);
+    Ok(loaded)
+}
+
+// Each load releases its module before changing the search directory. Identical
+// basenames and exports ensure the assertion detects resolution, not PE validity.
+fn probe_library_search_order(root: &std::path::Path) {
+    for directory in ["search-first", "search-second", "search-first"] {
+        let expected = root.join(directory).join("tapid-search-order.dll");
+        load_searched_authority_probe_library(&expected)
+            .expect("DLL search order must select input");
+    }
+    println!("dynamic-library-search-order:verified");
+}
+
+#[derive(Clone, Copy)]
+enum ProbeLoader {
+    Direct,
+    Resolved,
+    Extended(u32),
+}
+
+// Executable-image loads only: never use LOAD_LIBRARY_AS_DATAFILE or
+// DONT_RESOLVE_DLL_REFERENCES, which would bypass normal loader initialization.
+const EXTENDED_LOADERS: [(&str, u32); 2] = [
+    ("altered-search-library", 0x8), // LOAD_WITH_ALTERED_SEARCH_PATH
+    ("restricted-search-library", 0x100 | 0x800), // DLL_LOAD_DIR | SYSTEM32
+];
+
+fn load_authority_probe_library(
+    path: &std::path::Path,
+    loader: ProbeLoader,
+) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryW(path: *const u16) -> isize;
+        fn LoadLibraryExW(path: *const u16, file: isize, flags: u32) -> isize;
+        fn GetModuleHandleW(name: *const u16) -> isize;
+        fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
+        fn FreeLibrary(module: isize) -> i32;
+        fn GetModuleFileNameW(module: isize, path: *mut u16, size: u32) -> u32;
+    }
+    let expected = path.is_absolute().then(|| path.to_path_buf());
+    let path: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let direct_loader: unsafe extern "system" fn(*const u16) -> isize =
+        if matches!(loader, ProbeLoader::Resolved) {
+            let kernel: Vec<_> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
+            // SAFETY: kernel32 is already loaded; this borrows its handle without
+            // acquiring a reference, so it must not be passed to FreeLibrary.
+            let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
+            assert_ne!(kernel, 0, "loaded kernel32 module");
+            // SAFETY: the borrowed module remains loaded throughout this helper.
+            let address = unsafe { GetProcAddress(kernel, c"LoadLibraryW".as_ptr().cast()) };
+            assert!(!address.is_null(), "resolve native LoadLibraryW export");
+            // SAFETY: the named Windows export has this exact system ABI/signature.
+            unsafe {
+                std::mem::transmute::<
+                    *const std::ffi::c_void,
+                    unsafe extern "system" fn(*const u16) -> isize,
+                >(address)
+            }
+        } else {
+            LoadLibraryW
+        };
+    // SAFETY: both loaders accept the owned NUL-terminated fixture path.
+    let module = unsafe {
+        match loader {
+            ProbeLoader::Extended(flags) => LoadLibraryExW(path.as_ptr(), 0, flags),
+            _ => direct_loader(path.as_ptr()),
+        }
+    };
+    if module == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: module remains loaded through symbol lookup; no N-API code is called.
+    let export = unsafe { GetProcAddress(module, c"napi_register_module_v1".as_ptr().cast()) };
+    let mut loaded_path = vec![0_u16; 32_768];
+    // SAFETY: module is live and the owned buffer has the advertised capacity.
+    let length =
+        unsafe { GetModuleFileNameW(module, loaded_path.as_mut_ptr(), loaded_path.len() as u32) };
+    // Capture errors before FreeLibrary can change the thread's last error.
+    let path_error = std::io::Error::last_os_error();
+    // SAFETY: release exactly the reference returned by LoadLibraryW.
+    let released = unsafe { FreeLibrary(module) };
+    assert_ne!(released, 0, "release dynamic fixture");
+    assert!(!export.is_null(), "loaded the expected native fixture");
+    if length == 0 {
+        return Err(path_error);
+    }
+    assert!(
+        (length as usize) < loaded_path.len(),
+        "loaded path truncated"
+    );
+    use std::os::windows::ffi::OsStringExt;
+    let loaded = fs::canonicalize(PathBuf::from(OsString::from_wide(
+        &loaded_path[..length as usize],
+    )))?;
+    if let Some(expected) = expected {
+        assert_eq!(loaded, fs::canonicalize(expected)?);
+    }
+    Ok(loaded)
+}
+
+#[test]
+fn windows_ambient_execution_target_helper() {
+    if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-target") {
+        if let Some(root) = std::env::var_os("TAPID_TEST_SEARCH_ROOT") {
+            probe_library_search_order(std::path::Path::new(&root));
+        }
+        if let Some(library) = std::env::var_os("TAPID_TEST_LIBRARY") {
+            let library = PathBuf::from(library);
+            load_authority_probe_library(&library, ProbeLoader::Direct)
+                .expect("valid host DLL control");
+            load_authority_probe_library(&library, ProbeLoader::Resolved)
+                .expect("valid host dynamically resolved DLL control");
+            load_searched_authority_probe_library(&library)
+                .expect("valid host searched DLL control");
+            for (_, flags) in EXTENDED_LOADERS {
+                load_authority_probe_library(&library, ProbeLoader::Extended(flags))
+                    .expect("valid host extended DLL load");
+            }
+            println!("host-dynamic-library-valid");
+        }
+        println!("undeclared-target-executed");
     }
 }
 

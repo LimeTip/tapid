@@ -158,7 +158,340 @@ node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked
 node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked uncontained
 ```
 
+## Windows dependency authority closure checkpoint (#273)
+
+Authenticated dependency builds remain disabled on Windows at
+`dependency_toolchain_identity`. The following inventory describes source
+mechanisms and unresolved inputs, not native acceptance. No complete Windows
+runtime identity or prepared execution authority exists yet.
+
+Declared lifecycle executables now use the same bounded byte/native-identity
+reader as Node. Request construction compares each prepared tool with its
+approved SHA-256 (already included in generated-output recipes); generic
+prelaunch validation rechecks secondary tools even when a reserved macOS Node
+binding is present. Windows retains their read-only handles until the last
+request clone drops. Controls reject a mismatched approval digest and same-inode
+secondary-byte mutation before execution, plus native Windows write/rename
+attempts while a request clone survives. These changes do not bind ordered loader
+resolution, registry inputs, DLLs or the complete executable search directories.
+Native Windows pin controls still require the existing Windows CI lane.
+
+Unix request validation now rejects earlier same-named PATH candidates for a
+declared tool whose canonical parent appears in the explicit search list, unless
+the candidate resolves to that same canonical file. Inspection failures and
+dangling links fail closed without opening candidate files. The regression adds
+a shadow after construction while keeping approved bytes unchanged, requires
+rejection before capture files open, and requires execution to work again after
+removal. This is a preflight precedence check, not retained directory authority:
+later writes, shell resolution rules, secondary libraries and Windows loader
+search remain outside it. It does not enable authenticated Windows builds.
+
+Common contained preflight also rejects resolved write grants covering a declared
+executable path, including backend write additions, before backend preparation.
+Portable controls cover exact-file and ancestor-directory grants, plus a disjoint
+writable output directory. Unix preflight additionally requires exactly one hard
+link for each declared executable whenever resolved write grants are nonempty.
+This conservatively rejects existing aliases without traversing writable trees;
+the regression creates an alias after request construction beneath an otherwise
+disjoint output directory, requires rejection, then removes it and requires the
+same request to pass again. This does not prevent subsequent host topology races,
+dynamic inputs or the remaining authority inventory. Windows retains its separate
+held-file and writable-topology checks. It does not enable Windows authentication.
+
+Trusted Node requests now bind a streaming SHA-256 of the primary executable
+(bounded to 512 MiB) as well as its native file identity. Revalidation rejects
+in-place changes that preserve file identity and length. On Windows the request
+retains the hashed file handle with read sharing only, rejecting existing writers
+and denying subsequent write/delete opens until the last request clone is
+dropped. The contained execution path keeps its request through Job cleanup.
+This is a primary-runtime pin, not a snapshot of tools, libraries or loader
+configuration, and it does not close ancestor-path replacement, preexisting
+writable mappings, privileged-host mutation, registry or broker inputs. Unix
+byte revalidation alone does not prevent post-validation writes. The native
+Windows write/delete and clone-lifetime regression requires Windows CI; compiling
+it elsewhere does not establish enforcement. Recipe integration remains gated.
+
+The existing native Windows dependency acceptance step runs the runner library's
+`authority_tests` with `--show-output` before the general workspace suite, alongside
+the separate `windows_containment` target. It retains each command's exit status
+and fails if any command fails. This ensures an earlier CLI failure in the
+workspace suite cannot prevent the paired registry/provider/COM controls and
+host-supervisor regressions from running. Their successful status validates
+sampled controls; it does not resolve the inventory below or enable authentication.
+
+| Input channel | Current mechanism / concrete input | Required closure and evidence |
+| --- | --- | --- |
+| All Application Packages | LPAC opt-out and actual suspended-token access checks; explicit per-profile project grants | The root/descendant Rust probe attempts an AAP-granted copied executable, reads, and absolute/searched DLL loads. Host controls validate the executable and DLL; approved copies load inside containment. Undeclared operations must fail with `PermissionDenied`. Native execution of these extended probes is pending. |
+| All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
+| Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | The native cross-run control derives each profile folder from the actual child token, writes and rereads a private sentinel, requires its removal after completion, and checks that a second execution gets a different folder and cannot read the previous sentinel. Native execution is pending. Full initial contents and deletion-failure controls remain unresolved. Unique names alone do not identify initial profile bytes or registry state. |
+| Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
+| COM / brokers | Paired host/LPAC in-process ShellLink and disposable running Rust local-server activation probes; no complete activation or response inventory | Native observations are pending. The local-server control checks dispatch counts and exact registration revocation, covers fresh-class LPAC-triggered SCM launch and host-positive controls, but does not establish arbitrary broker closure. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
+| Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
+| KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
+| Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
+| Dynamic DLL loads | Native token/ACL checks apply; compatibility interception is incomplete | Add absolute, searched, altered-search, secondary-dependency and manual-load controls. Static imports and observed loads cannot establish closure. |
+| Descendant executables | Suspended root is verified and assigned to a non-breakaway Job before resume; token restrictions propagate | Extended AAP fixture pairs approved root/descendant execution with undeclared executable denial, including `CreateProcessW` resolved directly from kernel32. Native execution and DLL-initialization bypass controls remain outstanding. |
+| Declared tools / runtime snapshots | CLI verifies declared tool bytes; Windows system identity is rejected before authenticated lookup | Retain the same bounded authority for hashing and execution. Secondary-byte, resolution-order and mutation controls must precede enabling recipe reuse. |
+
+Kernel enforcement and privileged-host integrity are trust assumptions. They do
+not cover mutable user registry state, undeclared application bytes, or arbitrary
+broker responses. The unresolved rows block runtime identity integration, not
+further fixture development. The extended AAP control is owned by the existing
+native Windows workspace test suite and requires its guard setup. Compilation
+or a zero-test macOS invocation is not an enforcement receipt. This checkpoint
+does not establish #157 project-script acceptance or #274 integrated adoption.
+
+The AAP/ARAP executable controls additionally resolve `CreateProcessW` through
+`GetProcAddress`, bypassing application import adaptation. The host must launch
+the undeclared fixture, and both contained root and descendant must launch their
+approved copy through that same API. A distinctive target exit code rejects a
+zero-test libtest success. Each launch uses an absolute program, no inherited
+handles, a five-second wait, held process/thread handles and bounded termination
+on timeout. AAP launches outside the declared grants must return access denied;
+ARAP results remain characterization. These controls have compile-only coverage
+until the native Windows acceptance lane executes them. They do not establish
+arbitrary process-API closure, runtime identity or recipe authentication.
+
+The nonignored `windows_inventories_all_restricted_application_packages_authority`
+test emits `ARAP:<process>:<operation>:allowed|denied` observations through the
+native workspace lane's `--show-output`. Its passing status validates the probe
+and approved controls; it does **not** certify ARAP exclusion. Any allowed result
+is an input outside the declared project/tool set and must be resolved before
+prepared authority or recipe integration. The AAP test retains strict denial
+assertions. Both tests reuse the Rust native addon fixture and resolve its export
+without calling Node APIs. Searched loads change `SetDllDirectoryW` only inside
+isolated helper processes and restore the default search path afterward.
+Both root and descendant helpers also resolve `LoadLibraryW` from the already
+loaded `kernel32.dll` using `GetProcAddress`, then attempt the same absolute DLL
+load through that function pointer. Host and approved contained loads must
+succeed through this path; AAP-only loads must fail with access denial. ARAP
+results remain characterization and emit `resolved-load-library` observations.
+The fixture borrows the kernel module handle, following the
+[GetModuleHandleW ownership contract](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlew),
+and releases only successfully loaded fixture modules. This exercises dynamically resolved loader calls without
+relying on compatibility interception; native Windows execution is still pending.
+The same host, approved, root and descendant controls also call `LoadLibraryExW`
+with `LOAD_WITH_ALTERED_SEARCH_PATH`, and separately with
+`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, using absolute
+fixture paths. Both modes perform executable-image loads and validate the fixture
+export before releasing the module. They retain strict AAP denial assertions and
+ARAP characterization, with separate `altered-search-library` and
+`restricted-search-library` observations. Native execution remains pending; these
+flags do not establish closure of secondary dependencies or loader search order.
+These sampled controls do not cover secondary DLL dependencies, manual mapping,
+side-by-side assemblies or arbitrary broker inputs.
+
+The ambient DLL controls also check `GetModuleFileNameW` against the expected
+canonical fixture path before accepting a successful load. An export name alone
+cannot distinguish two valid fixtures with the same export. Host, LPAC root and
+direct descendant controls switch `SetDllDirectoryW` between two approved
+subdirectories containing the same DLL basename, then switch back. Each load
+must select the expected path and release its module before the next switch;
+the parent requires both contained search-order observations. The undeclared DLL
+shares that basename, so the subsequent AAP denial controls also reject reuse of
+a previously approved module when loading the undeclared path. These checks reuse
+the existing Rust DLL fixture and explicit project grant. They characterize
+resolution changes, without claiming held-object identity, complete loader closure
+or recipe binding. Native Windows execution remains pending.
+
+`windows_profile_storage_is_fresh_and_not_readable_by_the_next_execution` uses
+two executions of a private Rust fixture through the existing runner interface.
+The fixture queries `TokenAppContainerSid` and `GetAppContainerFolderPath` rather
+than trusting an environment variable for the storage location. It requires own
+profile write/read success and prior-sentinel absence or access denial, while
+the host checks sentinel removal after kernel-owned cleanup. The sentinel name
+is fixed only within each fresh OS-owned profile; no existing user profile or
+credentials are read. This is a sampled storage control, not an inventory of all
+profile initial bytes, registry state, or cross-profile broker authority. Native
+Windows execution with guard setup is required before claiming these assertions
+hold.
+
+`windows_socket_provider_initialization_with_registry_read_capability` adds a
+paired host/contained Rust control for the current `registryRead` launch. It
+requires Winsock 2.2 initialization and probes IPv4/IPv6 TCP socket creation,
+without binding, connecting, or resolving a hostname. Host socket creation must
+succeed; contained creation is recorded as successful or permission denied, and
+other provider errors fail the control. Socket creation alone does not establish
+network access or denial. Native results are pending. This baseline does not
+enumerate readable registry values or justify removing `registryRead`.
+
+The nonignored runner library control
+`lpac_provider_initialization_compares_registry_read_and_capability_free_tokens`
+adds the capability-free comparison through the same private suspended-launch
+implementation. Production launch entry points still require `registryRead`.
+The control copies the Rust test executable into a disposable `TempProject`,
+proves host socket creation, applies the existing explicit filesystem grants,
+and checks the actual suspended token has exactly one or zero capabilities.
+Both variants retain LPAC access verification and Job assignment before resume,
+bounded output/time, empty-Job confirmation, grant restoration and profile cleanup.
+It reuses the baseline's IPv4/IPv6 provider fixture; only the capability-free
+variant additionally records `WSAEPROVIDERFAILEDINIT` as
+`socket-provider-unavailable`. That diagnostic is a compatibility obstacle,
+not successful socket initialization or an authority-denial acceptance claim.
+Unexpected failures still fail the control. No bind, connection or DNS operation
+is performed, and this low-level probe does not issue a containment receipt or
+exercise the network guard/broker. Native Windows observations remain pending.
+Run through `scripts/dev.ts test -p tapid-runner --lib --locked
+lpac_provider_initialization_compares_registry_read_and_capability_free_tokens -- --show-output`
+on Windows. A successful compile or a zero-test invocation on another platform
+cannot decide whether the capability is removable. Disposable registry-value
+controls, broker closure and complete runtime binding remain implementation work.
+
+The library capability comparison also creates a disposable DWORD input in
+`HKEY_USERS/<host-token-user-SID>/Software/TapidAuthority-<TempProject-name>`.
+The host helper must read the expected value before either contained launch.
+Both token variants query that same absolute host-hive path, avoiding ambiguous
+AppContainer `HKCU` redirection, and emit `registry:host-input:readable`,
+`access-denied`, or `unavailable`. Unexpected errors or incorrect values fail.
+The fixture refuses to modify a preexisting key, closes query handles, and
+requires deletion of its exact key and a host absence check after both Jobs
+are empty. A drop fallback attempts exact-key removal on assertion failure.
+It neither enumerates existing registry values nor reads credentials or changes
+parent ACLs. These are sampled observations under inherited key permissions;
+an unavailable result does not establish denial of all host registry inputs,
+and a readable result identifies an input that must be denied or bound. Native
+observations remain pending. This control does not justify capability removal,
+complete registry identity, broker closure, or authenticated Windows builds.
+
+The same disposable helper now samples in-process `CLSID_ShellLink` activation
+with `IID_IUnknown`, after the existing registry and provider probes. The host
+must activate successfully. Each LPAC variant reports `com:shell-link:activated`,
+`access-denied`, or `class-unavailable`; other HRESULTs fail the control. A class
+registration failure is recorded separately from access denial. Each successful
+COM initialization is balanced on the same helper thread, and each returned
+interface is released before COM teardown. No shell methods, shortcut writes,
+UI, remote activation or existing user documents are used.
+
+This follows Microsoft's [ShellLink activation example](https://learn.microsoft.com/en-us/windows/win32/shell/links)
+and [CoCreateInstance contract](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cocreateinstance).
+Activation success identifies an additional loader/configuration channel to
+deny or bind; it does not demonstrate that later object methods succeed.
+In-process activation cannot establish local-server or broker closure. An
+isolated Rust local-server fixture now extends the same capability comparison.
+The test process registers a fresh GUID with `CoRegisterClassObject`, local-server
+context only and `REGCLS_MULTI_SEPARATE`. Separate helper processes request
+`IID_IUnknown`; host activation must succeed and increment the Rust factory's
+server-side creation count. Each LPAC variant records activation, access denial,
+or class unavailability, and its observation must match the creation-count delta.
+This samples cross-process COM dispatch under the host's default COM security;
+each root helper also launches the same isolated Rust executable directly as a
+descendant, with inherited controlled environment and output handles. Host root
+and descendant activation must both succeed. Each LPAC run requires separate
+root and descendant observations, and their combined successful activation count
+must match the server-side creation delta. The outer timeout and Job supervision
+cover the contained descendant, and cleanup still requires an empty Job before
+revocation. This checks a direct descendant, not arbitrary broker closure or
+detached process topology. Descendant waits reuse the host supervisor's bounded
+native wait, termination and reaping, without creating capture files from inside
+the LPAC. Native execution remains required.
+No custom security descriptor, elevation, shell action, or persistent registry
+entry is installed. The inert factory uses atomic reference accounting and exposes
+no host operations. Helpers retain the existing bounded waits/output supervision.
+After both helpers and Jobs exit, normal cleanup checks revocation of the exact
+registration cookie; drop attempts revocation on assertion failure and balances
+COM initialization on the registering thread. A fresh bounded host helper must
+then observe class unavailability with no further server creation. This uses Microsoft's
+[running EXE server contract](https://learn.microsoft.com/en-us/windows/win32/com/registering-a-running-exe-server).
+It does not test SCM launch from registry registration, arbitrary brokers, or
+response/input binding. Native paired observations and authority closure remain
+required before identity work can claim closure. No native results exist yet.
+
+`standalone_com_server_activates_and_revokes_its_supplied_class` adds an
+independently running server process using that same Rust factory. A test-only
+Windows CRT initializer dispatches its exact private argument prefix before
+libtest parses COM's `-Embedding` argument. Production binaries contain no such
+dispatch. The parent supplies a fresh GUID and disposable directory; create-new
+readiness evidence follows registration, and a stop file requests exact-cookie
+revocation. The server has a forty-second internal deadline and the existing
+bounded host supervisor owns termination and reaping. A separate client must
+activate the class, the server must report exactly one dispatch, and a fresh
+client must observe class unavailability after server exit. Native execution is
+pending. This is a prerequisite for a
+[LocalServer32 command](https://learn.microsoft.com/en-us/windows/win32/com/localserver32),
+not an SCM-launched control: that test still starts the server directly.
+
+`scm_com_server_activates_and_removes_its_exact_registration` adds a separate
+host-positive SCM launch control. It opens the existing per-user CLSID parent,
+creates only a fresh GUID key and its `LocalServer32` child, and installs the
+existing Windows serializer's quoted Rust test-executable command. An attempted
+collision must fail without replacing the original command; subsequent host
+root and descendant activation must still reach the original server exactly
+twice. No direct server
+spawn occurs in this control. The server publishes readiness and its PID in the
+disposable directory. The parent retains a process handle, requests stop, waits
+at most five seconds for exit, and checks both the exit code and final dispatch
+count. Unwinding attempts termination through that held handle; the server's
+internal deadline also bounds attempts that fail before readiness. This is
+trusted-fixture supervision, not Job ownership or broker containment.
+
+Cleanup deletes only the exact two newly created registry keys, child first,
+checks their absence, and requires class unavailability from a fresh client.
+It neither creates nor deletes shared registry ancestors. A missing per-user
+CLSID parent or an execution context that ignores per-user COM registration
+fails the host-positive control rather than falling back to machine registration.
+Each registryRead and capability-free variant now receives a fresh disposable
+class with no running server. The verified suspended-launch helper runs the LPAC
+root first, followed by its direct descendant; mandatory host root and descendant
+activation follows, even if the LPAC reports denial or class unavailability. This
+separates inactive-server activation from access to a host-started server without
+requiring either contained activation outcome. Each run requires separate root
+and descendant observations. The final server dispatch
+count must equal the two host activations plus all reported contained activations;
+class unavailability and access denial remain characterization, not broker closure.
+The forty-second server deadline covers the bounded host and paired client waits.
+Native Windows execution, complete broker authority closure and recipe identity
+remain required.
+
+The capability comparison's host-positive helper has a ten-second native process
+wait. Timeout terminates the helper and requires termination observation within
+five seconds before returning failure. File-backed stdout/stderr avoid waiting
+for EOF on handles retained by an activated server; each returned stream is
+limited to 16 KiB. This is test supervision of a trusted Rust fixture, not a
+tree-containment guarantee or a live output/disk quota. The nonignored
+`host_authority_probe_timeout_terminates_and_reaps_helper` control exercises the
+stalled-helper path. The nonignored
+`host_authority_probe_preserves_output_and_rejects_each_oversized_stream` control
+pairs successful stdout/stderr capture with separate stdout-only and stderr-only
+overflow helpers, using direct native stream writes rather than libtest capture.
+Native Windows execution of these controls remains required.
+
 ## Private Windows dependency write and key validation
+
+Declared executable request validation now also checks Windows PATH precedence.
+It rejects existing or newly introduced earlier same-named candidates, and an
+extensionless candidate before a declared `.exe` in its own PATH directory,
+before capture setup or backend preparation. The checks reuse bounded executable
+identity verification and platform path comparison; they do not open candidate
+files. The construction control runs on Unix and Windows; the extensionless
+mutation control is nonignored and Windows-only. Native execution of the new
+Windows assertions remains required. This is a pathname preflight, not retained
+resolution authority: current/system-directory searches, shell resolution,
+registry, brokers, dynamic libraries and post-check host races are outside this
+check. Authenticated Windows dependency builds remain gated.
+
+The suspended launcher now supplies
+`PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON` through
+the process attribute list. Its boxed policy storage survives `CreateProcessW`.
+Before returning a child, the launcher queries
+`ProcessExtensionPointDisablePolicy` on the actual suspended process and rejects
+query failure or a clear `DisableExtensionPoints` bit. The existing child owner
+terminates rejected children; Job assignment and resume ordering are unchanged.
+No dynamic-code prohibition is requested, so this does not deliberately disable
+Node's JIT.
+
+The existing paired LPAC provider/COM controls now require a native policy query
+and marker from both the root and its ordinary Rust descendant for each token
+variant. Exact marker counts reject a missing descendant or zero-test success.
+These controls have not executed on this macOS worker. A compiler check does not
+prove policy installation, inheritance, or rejection of an injected DLL.
+
+Microsoft's [creation attribute contract](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+limits this mitigation to legacy extension points (AppInit DLLs, Winsock LSPs,
+global hooks and legacy IMEs); local hooks remain possible. Ordinary explicit
+DLL loads, KnownDLL/API-set and side-by-side resolution, registry and COM/broker
+authority, ARAP access and profile storage are still outside a complete bound
+identity. This mitigation neither supplies an ordered runtime snapshot nor
+changes recipe identity or the Windows authenticated dependency gate.
 
 The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).
 

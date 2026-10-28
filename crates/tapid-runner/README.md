@@ -9,6 +9,14 @@
 
 Policy-aware package execution foundations for Tapid. Existing approval APIs bind an exact artifact digest to the SHA-256 hash of a normalized script.
 
+Contained preflight rejects declared executable paths beneath resolved child write
+grants, including backend write additions. Disjoint output grants remain usable.
+On Unix, requests with write grants also require declared tools to have exactly
+one hard link at preflight, rejecting aliases without scanning writable trees.
+These checks do not prevent subsequent host topology races or establish immutable
+loader inputs or complete toolchain authority. Explicit uncontained execution
+retains its separate contract and produces no attestation.
+
 `execute_uncontained` is a separate, explicitly authorized path for the CLI's dependency containment override. It reuses validated requests and controlled environment/PATH construction, returns termination without an enforcement receipt, and provides no filesystem/network restrictions or descendant cleanup guarantee. File-backed output and root timeout/output polling are supervisor safety checks only. The contained `execute` API never falls back to it. Override-created outputs receive no authenticated build-cache attestation. See [ADR 0009](../../docs/adr/0009-explicit-dependency-execution-overrides.md).
 
 Windows uses standard, unchanged Node with a Rust compatibility DLL built by Cargo and embedded in Tapid. Each execution pins a byte-verified copy outside project write authority, initializes it in the verified suspended AppContainer/Job child, and propagates compatibility through suspended children launched by application `CreateProcessW` imports. Normal `LoadLibrary*` loads, including later native addons and their dependencies, receive these launch hooks before returning to the caller. Only generated libuv pipe names are translated to the AppContainer LOCAL namespace. Finite exact ancestor directories receive delegated FILE_READ_ATTRIBUTES-only handles rather than ACL changes; normalized NT paths are translated through their bound volumes. Receipts disclose the component SHA-256, intentional delegated handles and typed ReadMetadata/ExactDirectory/BackendRuntime grants. Startup checks every delegated ancestor for stronger duplicate/reopen rights, permitting reopens only where those rights are already part of the resolved read/write grants. No host filesystem RPC, custom Node, shared-root ACL mutation or uncontained fallback is used. Explicit Node network grants use a request-owned standard-user socket broker, with no administrator setup or firewall exemption. The token retains zero network capability SIDs. Private channels delegate IPv4/IPv6 TCP/UDP sockets only to held processes verified in the exact AppContainer and Job. Application imports and normal later addon loads receive socket hooks; dynamically resolved APIs remain kernel-contained without promised compatibility. Native GetAddrInfoW hostname lookup also uses that channel, with cancellable Windows DNS work and child-owned address results; names/services and result counts are bounded. Winsock workloads should explicitly allowlist SystemRoot. Native Windows 11 Home x64 development acceptance passes the news-site build/test and standard Node 22/24 descendant controls; broader platform and mitigation-policy acceptance remains separate. Exact-directory metadata ACL mutation itself remains rejected. See `docs/windows-tapid-run-scope.md`.
@@ -57,6 +65,14 @@ Private Windows dependency writes now have a separate experimental path describe
 
 ## Dependency lifecycle execution
 
+Trusted Node execution requests bind the primary executable's SHA-256 and native
+file identity, with a 512 MiB streaming verification bound. Windows retains a
+read-only handle denying write/delete sharing across request clones. This does
+not identify libraries, loader configuration or other accessible inputs, and
+does not enable authenticated Windows dependency builds. See the [authority
+closure checkpoint](../../docs/platform-validation.md#windows-dependency-authority-closure-checkpoint-273)
+for limitations and native validation requirements.
+
 `DependencyLifecyclePolicy` validates exact checked-in approvals and derives keys bound to source, policy, script, toolchain, and graph. `dependency_toolchain_identity` fingerprints the Linux backend runtime and Tapid executable. Windows owner-only lifecycle keys and low-integrity private write copies have native component acceptance, but default contained Windows dependency builds remain gated on toolchain identity and integrated CLI acceptance. ManagedTree requires all four ceilings and initialized private-launcher dispatch. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) and [ADR 0008](../../docs/adr/0008-dependency-lifecycle-derived-trees.md) for authority, delegation, accounting, cleanup, and replay limitations.
 
 Windows project Read grants include native image loading within the explicitly declared target, using the same read/execute ACL mechanism as backend runtime files. This lets standard Node load native addons without granting writes. ReadData and ReadMetadata remain narrower grants; neither implies image execution. Subprocess permission remains a separate process-creation boundary.
@@ -66,3 +82,31 @@ Where Windows denies libuv's `NUL` reopen for ignored stdin, the compatibility c
 Compatibility import coverage excludes Windows system DLL internals, launches during DLL initialization, manually mapped modules, and dynamically resolved process-creation calls. These paths retain AppContainer and Job containment but are not promised Node compatibility propagation. Unrecognized application import tables or failed import patching reject startup or terminate the contained process before returning from the load.
 
 Windows `network=false` additionally requires the administrator-installed network guard. Run `tapid sandbox install` once from an administrator terminal; ordinary runs then register denial without elevation. `tapid sandbox status` inspects service state. The deny-only LocalSystem service owns persistent WFP filters for each verified execution's exact package SID and removes them only after a fresh empty-Job check. Missing guard setup fails before project code starts. Service-crash orphans retain denial and prevent blanket uninstallation. This guard is separate from the existing standard-user `network=true` socket/DNS broker. Native service installation and bind-denial acceptance are pending; see the scope document above.
+
+Dependency lifecycle requests also retain each declared tool through
+`ExecutionRequestBuilder::verified_executable`, checked against the approval's
+SHA-256 used in its recipe. The existing bounded executable reader and native
+identity checks cover secondary executables as well as Node. Windows retains
+read-only handles across request clones; Unix rechecks bytes before execution.
+This does not close loader, registry, search-order or host mutation races and
+does not enable authenticated Windows dependency builds.
+
+Windows suspended launches additionally request the creation-time legacy
+extension-point disable mitigation and query the actual child policy before
+returning the suspended child. Failure to install or observe the policy rejects
+launch without resuming the target. This narrows automatic DLL injection through
+AppInit DLLs, Winsock LSPs, global hooks and legacy IMEs. It does not bound ordinary
+DLL loads, COM, registry values, or system runtime identity. Native root and
+descendant mitigation controls remain required; Windows authentication stays gated.
+
+On Unix, a declared tool whose canonical parent is in the explicit PATH is
+also checked for earlier same-named candidates at construction and prelaunch.
+Existing candidates must resolve to that exact canonical tool; uninspectable or
+dangling candidates fail closed without opening them. Absolute-only tools retain
+their existing byte binding. This checks PATH precedence at validation time;
+it does not reserve names against later writes, cover shell aliases/functions,
+or identify dynamic libraries and Windows loader resolution. Windows applies the
+same preflight to declared tools exposed through PATH, including extensionless
+candidates preceding `.exe` in the approved directory. Case comparisons reuse
+the platform path rules. These checks do not constrain current-directory,
+system-directory, shell, or DLL searches, or reserve directory entries.
