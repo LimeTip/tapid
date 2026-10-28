@@ -220,7 +220,7 @@ pub(crate) fn replay_input_with_publication(
         report_progress,
         |_, package| {
             let digest = package
-                .tree_digest()
+                .tree_digest()?
                 .parse()
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
             let snapshot = match publication {
@@ -291,7 +291,7 @@ pub(crate) fn replay_input_with_tree_source(
             id,
             peer_context: peer,
             platform_context: platform,
-            tree: VerifiedTreeReference::new(package.tree_digest(), &tree)
+            tree: VerifiedTreeReference::new(package.tree_digest()?, &tree)
                 .map_err(|e| e.to_string())?,
         };
         keys.insert(encoded.clone(), InstanceKey::from(&instance));

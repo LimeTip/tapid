@@ -9,7 +9,7 @@
 
 Deterministic lockfile models and canonical JSON serialization for Tapid.
 
-`LockedPackage::artifact_url()` and `artifact_integrity()` expose the pinned download URL and SHA-512 integrity. The model permits omitted URLs for older or fixture-generated locks; `tapid ci` requires every registry URL regardless of cache contents, except when an explicit local registry fixture supplies artifacts. `tapid ci` uses these fields to fetch missing artifacts without resolving versions, and also verifies the extracted tree against `tree_digest()`.
+`LockedPackage::artifact_url()` and `artifact_integrity()` expose the pinned download URL and SHA-512 integrity. The model permits omitted URLs for older or fixture-generated locks; `tapid ci` requires every registry URL regardless of cache contents, except when an explicit local registry fixture supplies artifacts. `tapid ci` uses these fields to fetch missing artifacts without resolving versions, and also verifies the extracted tree against `tree_digest()`. Digest access now returns a `Result`: a selected artifact without tree verification has no digest to return.
 
 The current contract provides:
 
@@ -59,3 +59,27 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+Schema 11 adds native selections with explicit source-tree receipt absence.
+`Lockfile::new_selection` and `LockedPackage::select_with_context_and_provenance`
+construct selections without inventing tree evidence. Each serialized package
+requires `sourceTreeReceipt`, either `null` or a complete receipt containing both
+SHA-256 unpacked and replay tree digests. The receipt binds the canonical package
+key (including source and peer/platform context), artifact URL, SHA-512 integrity,
+and registry-integrity provenance. Legacy digest fields are forbidden in schema
+11; previous schemas continue requiring both legacy digests and reject receipt
+fields. Native and imported parsers share duplicate-field rejection.
+
+`has_pending_receipts` inspects completeness. `source_tree_receipt` exposes real
+evidence, and `attach_source_tree_receipt` validates its binding before changing
+the lock. Attachment retains schema 11 and cannot rebind lifecycle output to
+different source trees. Receipt construction records caller-supplied verification
+evidence; it does not download or verify an archive. Producers must perform those
+checks before attachment. Pending receipts cannot carry lifecycle output records.
+
+The schema model is groundwork for selection-only writes. The CLI does not yet
+expose `--lockfile-only` or hydrate pending native receipts. It rejects pending
+receipts for replay. When no earlier transaction needs recovery, ci/offline
+preflight rejects them before project exclusion or mutation; existing recovery
+still precedes classification of the restored lock. Complete native locks retain their serialization and replay
+contract. Imported schema 8 remains a separate placement and hydration contract.

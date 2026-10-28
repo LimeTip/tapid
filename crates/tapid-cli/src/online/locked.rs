@@ -115,7 +115,7 @@ fn hydrate_with_fetch(
     let mut staged = BTreeSet::new();
     for (key, package) in lock.packages_typed()? {
         let digest: ArtifactDigest = package
-            .tree_digest()
+            .tree_digest()?
             .parse()
             .map_err(|error: tapid_core::DomainError| error.to_string())?;
         if staged.contains(digest.as_str()) {
@@ -468,7 +468,7 @@ pub(crate) fn prepare_locked_install(
         |key, package| {
             let tree_digest: ArtifactDigest =
                 package
-                    .tree_digest()
+                    .tree_digest()?
                     .parse()
                     .map_err(|error: tapid_core::DomainError| {
                         OperationalError::from_source(ErrorKind::Lockfile, error)

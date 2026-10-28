@@ -2,6 +2,186 @@ use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfil
 use proptest::prelude::*;
 
 #[test]
+fn schema_11_pending_receipt_round_trips_without_inventing_tree_evidence() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value["lockfileVersion"] = 11.into();
+    let record = value["packages"][&key].as_object_mut().unwrap();
+    record.remove("unpackedDigest");
+    record.remove("treeDigest");
+    record.insert("sourceTreeReceipt".into(), serde_json::Value::Null);
+    let parsed = Lockfile::from_json(&value.to_string()).unwrap();
+    assert!(parsed.has_pending_receipts());
+    assert!(parsed.packages()[&key].source_tree_receipt().is_none());
+    let serialized = parsed.to_json().unwrap();
+    let roundtrip: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(roundtrip, value);
+    assert_eq!(Lockfile::from_json(&serialized).unwrap(), parsed);
+    assert!(
+        parsed
+            .validate_replay(parsed.root_manifest_digest())
+            .is_err()
+    );
+}
+
+#[test]
+fn schema_11_receipt_attachment_preserves_selection_and_rejects_rebinding() {
+    let package = package_fixture();
+    let key = package.key();
+    let receipt = package.source_tree_receipt().unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    value["lockfileVersion"] = 11.into();
+    let record = value["packages"][&key].as_object_mut().unwrap();
+    record.remove("unpackedDigest");
+    record.remove("treeDigest");
+    record.insert("sourceTreeReceipt".into(), serde_json::Value::Null);
+    let mut pending = Lockfile::from_json(&value.to_string()).unwrap();
+    let before = pending.clone();
+    let mut changed = serde_json::to_value(&receipt).unwrap();
+    for (field, replacement) in [
+        (
+            "package",
+            serde_json::json!("https://other.example|example@1.0.0|peer=-|platform=-"),
+        ),
+        (
+            "artifactUrl",
+            serde_json::json!("https://other.example/archive.tgz"),
+        ),
+        (
+            "artifactIntegrity",
+            serde_json::json!(format!("sha512-{}==", "B".repeat(86))),
+        ),
+        ("registryIntegrityDeclared", serde_json::json!(false)),
+        ("treeDigest", serde_json::json!("sha256-invalid")),
+    ] {
+        let original = changed[field].clone();
+        changed[field] = replacement;
+        let invalid = serde_json::from_value(changed.clone()).unwrap();
+        assert!(
+            pending.attach_source_tree_receipt(&key, invalid).is_err(),
+            "accepted changed {field}"
+        );
+        assert_eq!(pending, before);
+        changed[field] = original;
+    }
+    pending
+        .attach_source_tree_receipt(&key, receipt.clone())
+        .unwrap();
+    assert!(!pending.has_pending_receipts());
+    assert_eq!(pending.roots(), before.roots());
+    assert_eq!(
+        pending.packages()[&key].source_tree_receipt(),
+        Some(receipt)
+    );
+    let serialized = pending.to_json().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&serialized).unwrap()["lockfileVersion"],
+        11
+    );
+    let complete = Lockfile::from_json(&serialized).unwrap();
+    complete
+        .validate_replay(complete.root_manifest_digest())
+        .unwrap();
+    assert_eq!(complete, pending);
+    let mut rebound = complete.packages()[&key].clone();
+    // Round-tripped receipts cannot silently acquire a different download origin.
+    let original = rebound.clone();
+    assert!(
+        rebound
+            .set_artifact_url("https://other.example/archive.tgz")
+            .is_err()
+    );
+    assert_eq!(rebound, original);
+}
+
+#[test]
+fn schema_11_rejects_ambiguous_missing_and_partial_receipts() {
+    let package = package_fixture();
+    let key = package.key();
+    let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let legacy: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    let mut pending = legacy.clone();
+    pending["lockfileVersion"] = 11.into();
+    let record = pending["packages"][&key].as_object_mut().unwrap();
+    record.remove("unpackedDigest");
+    record.remove("treeDigest");
+    assert!(Lockfile::from_json(&pending.to_string()).is_err());
+    pending["packages"][&key]["sourceTreeReceipt"] = serde_json::Value::Null;
+    for version in [4, 5, 6, 7, 9, 10] {
+        let mut invalid = pending.clone();
+        invalid["lockfileVersion"] = version.into();
+        assert!(Lockfile::from_json(&invalid.to_string()).is_err());
+        let mut mixed = legacy.clone();
+        mixed["lockfileVersion"] = version.into();
+        mixed["packages"][&key]["sourceTreeReceipt"] = serde_json::Value::Null;
+        assert!(Lockfile::from_json(&mixed.to_string()).is_err());
+    }
+    let receipt = lock.packages()[&key].source_tree_receipt().unwrap();
+    let complete = serde_json::to_value(receipt).unwrap();
+    for field in ["unpackedDigest", "treeDigest"] {
+        let mut partial = complete.clone();
+        partial.as_object_mut().unwrap().remove(field);
+        pending["packages"][&key]["sourceTreeReceipt"] = partial;
+        assert!(Lockfile::from_json(&pending.to_string()).is_err());
+    }
+    pending["packages"][&key]["sourceTreeReceipt"] = serde_json::Value::Null;
+    pending["packages"][&key]["derivedHooks"] = serde_json::json!([{
+        "attestation": format!("hmac-sha256-{}", "e".repeat(64)), "hook": "install",
+        "key": format!("sha256-{}", "c".repeat(64)), "treeDigest": format!("sha256-{}", "d".repeat(64))
+    }]);
+    assert!(Lockfile::from_json(&pending.to_string()).is_err());
+}
+
+#[test]
+fn schema_11_selection_constructor_preserves_copied_sources_and_mixed_receipts() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let complete = package_fixture();
+    let selected = LockedPackage::select_with_context_and_provenance(
+        &format!("file:vendor/tool.tgz#{digest}"),
+        "tool",
+        "1.0.0",
+        complete.artifact_integrity(),
+        (
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        ),
+        super::RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    assert!(selected.source_tree_receipt().is_none());
+    assert!(selected.tree_digest().is_err());
+    let keys = [selected.key(), complete.key()];
+    let mut lock = Lockfile::new_selection(&digest).unwrap();
+    lock.insert_packages([selected, complete]).unwrap();
+    lock.set_roots(keys).unwrap();
+    let json = lock.to_json().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["lockfileVersion"],
+        11
+    );
+    let roundtrip = Lockfile::from_json(&json).unwrap();
+    assert!(roundtrip.has_pending_receipts());
+    assert_eq!(roundtrip, lock);
+    assert_eq!(roundtrip.to_json().unwrap(), json);
+    let mut legacy = Lockfile::new(&digest).unwrap();
+    assert!(
+        legacy
+            .insert_packages(roundtrip.packages().values().cloned())
+            .is_err()
+    );
+    assert!(legacy.packages().is_empty());
+}
+
+#[test]
 fn copied_sources_require_schema_10_and_cannot_claim_registry_authentication() {
     let digest = format!("sha256-{}", "a".repeat(64));
     let source = format!("file:vendor/tool.tgz#{digest}");

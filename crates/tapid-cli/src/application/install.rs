@@ -399,7 +399,7 @@ fn perform_install(
     {
         let bytes = fs::read(&lock_path)
             .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
-        parse_install_lock(&bytes, &lock_path, ci, overrides)?;
+        parse_install_lock(&bytes, &lock_path, ci, offline, overrides)?;
     }
     #[cfg(test)]
     outcome_tests::checkpoint("before_acquire", &project_dir, "")?;
@@ -440,7 +440,7 @@ fn perform_install(
     // under the project lock, before choosing native replay or npm hydration.
     let current_lock = original_lock
         .as_deref()
-        .map(|bytes| parse_install_lock(bytes, &lock_path, ci, overrides))
+        .map(|bytes| parse_install_lock(bytes, &lock_path, ci, offline, overrides))
         .transpose()?;
     let (previous_lock, mut imported) = match current_lock {
         Some(InstallLock::Native(lock)) => (Some(lock), None),
@@ -994,6 +994,7 @@ fn parse_install_lock(
     bytes: &[u8],
     path: &Path,
     ci: bool,
+    offline: bool,
     overrides: super::dependency_scripts::ExecutionOverrides,
 ) -> Result<InstallLock, OperationalError> {
     let input = std::str::from_utf8(bytes)
@@ -1013,6 +1014,12 @@ fn parse_install_lock(
                     .context(format!("invalid lockfile {}", path.display()))
             })?
     };
+    if (ci || offline)
+        && let InstallLock::Native(native) = &lock
+        && native.has_pending_receipts()
+    {
+        native.validate_replay(native.root_manifest_digest())?;
+    }
     if overrides.enabled() && matches!(lock, InstallLock::Imported(_)) {
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,

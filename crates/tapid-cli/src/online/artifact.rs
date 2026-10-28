@@ -18,7 +18,7 @@ impl ArtifactFetcher<'_> {
         let store = self.store;
         if let Some(package) = pinned {
             let digest: ArtifactDigest = package
-                .tree_digest()
+                .tree_digest()?
                 .parse()
                 .map_err(|error: tapid_core::DomainError| error.to_string())?;
             match store.verified_tree_snapshot(&digest) {
@@ -155,7 +155,11 @@ impl ArtifactFetcher<'_> {
             .map_err(|e: tapid_core::DomainError| {
                 OperationalError::from_source(ErrorKind::Archive, e)
             })?;
-        if pinned.is_some_and(|package| package.tree_digest() != tree_digest.as_str()) {
+        if pinned
+            .map(|package| package.tree_digest())
+            .transpose()?
+            .is_some_and(|expected| expected != tree_digest.as_str())
+        {
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 format!(
@@ -166,7 +170,7 @@ impl ArtifactFetcher<'_> {
             .with_diagnostic(crate::application::outcome::DiagnosticContext::comparison(
                 "tree_digest",
                 Some("sha256"),
-                pinned.expect("mismatched pinned tree").tree_digest(),
+                pinned.expect("mismatched pinned tree").tree_digest()?,
                 &tree_digest,
             ))
             .for_package(id.into()));
