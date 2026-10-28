@@ -89,3 +89,16 @@ test('source verification permits reviewed historical commits and rejects arbitr
     assert.equal(await git(checkout, 'rev-parse', 'HEAD'), before, 'validation must not check out candidate code');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('draft expectations run only after trusted source verification and before downloads', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/release-draft-verify.yml', import.meta.url), 'utf8');
+  const source = workflow.indexOf('run: bash tools/release/verify-source.sh');
+  const expectations = workflow.indexOf('candidate.ts expected-assets');
+  const download = workflow.indexOf('releases/assets/$asset_id');
+  assert(source >= 0 && expectations > source && download > expectations);
+  const names = workflow.indexOf('cut -f1 "$RUNNER_TEMP/assets.tsv" | diff');
+  const checksums = workflow.indexOf('sha256sum -c SHA256SUMS');
+  const upload = workflow.indexOf('Publish exact verified assets');
+  assert(names > expectations && names < download);
+  assert(checksums > download && upload > checksums);
+});

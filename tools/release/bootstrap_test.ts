@@ -54,7 +54,7 @@ test('publication and draft verification automate bootstrap pin generation and r
   match(draft, /tools\/release\/bootstrap.ts/);
   match(draft, /cmp "\$generated\/install.sh"/);
   match(draft, /cmp "\$generated\/install.ps1"/);
-  match(draft, /exactly eleven draft assets/);
+  match(draft, /candidate.ts expected-assets/);
   match(draft, /__verify-release-record/);
 });
 

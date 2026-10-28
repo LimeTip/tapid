@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checksumLines, releaseRecord } from './release.ts';
 import { renderInstallers, templatesForCommit } from './bootstrap.ts';
-import { candidateFingerprint, selectCandidate, attestCandidate, attestUnsignedCandidate, validateUnsignedCandidate, unwrapCandidate, createDraftCandidate, downloadCandidate, publishCandidate, validateReleaseIntent, type ReleaseAdapter, type ReleaseState } from './candidate.ts';
+import { validateCandidate, expectedAssets, candidateFingerprint, selectCandidate, attestCandidate, attestUnsignedCandidate, validateUnsignedCandidate, unwrapCandidate, createDraftCandidate, downloadCandidate, publishCandidate, validateReleaseIntent, type ReleaseAdapter, type ReleaseState } from './candidate.ts';
 
 const commit = 'a'.repeat(40), object = 'b'.repeat(40);
 const tag = 'v0.0.12', repository = 'LimeTip/tapid';
@@ -198,4 +198,34 @@ test('CLI unsigned output roundtrips as verified envelope and refuses forged fin
     envelope.candidate_sha256='0'.repeat(64);await writeFile(manifest,JSON.stringify(envelope));
     await assert.rejects(()=>execFileAsync(process.execPath,['--experimental-strip-types',cli,'validate-unsigned',f.directory,f.notes,f.plan,manifest],{env:{...process.env,GITHUB_REPOSITORY:repository}}));
   }finally{await f.cleanup();await rm(manifest,{force:true});}
+});
+
+test('candidate asset collections reject missing, extra, unknown, duplicate and reordered entries', async () => {
+  const f=await fixture();
+  try {
+    const mock=adapter(f.release);
+    const signed=await attestCandidate(mock.api,f.directory,f.notes,f.plan,tag,commit,f.release.id);
+    assert.equal(validateCandidate(signed),signed);
+    for (const assets of [
+      signed.assets.slice(1), [...signed.assets,{...signed.assets[0],id:999,name:'extra'}],
+      signed.assets.map((a,i)=>i===0?{...a,name:'tapid-0.0.12-unknown-target.tar.gz'}:a),
+      signed.assets.map((a,i)=>i===1?{...a,name:signed.assets[0].name}:a),
+      signed.assets.map((a,i)=>i===1?{...a,id:signed.assets[0].id}:a),
+      [...signed.assets].reverse(),
+    ]) assert.throws(()=>validateCandidate({...signed,assets}), /asset/);
+    const unsigned=await attestUnsignedCandidate(f.directory,f.notes,f.plan,repository,tag,commit,object);
+    assert.equal(validateUnsignedCandidate(unsigned),unsigned, 'synthetic IDs must remain unique');
+    const signature={name:'tapid-release-v1.tsv.sig',size:1,sha256:'0'.repeat(64)};
+    for (const assets of [unsigned.assets.slice(1), [...unsigned.assets,signature],
+      unsigned.assets.map((a,i)=>i===0?signature:a),
+      unsigned.assets.map((a,i)=>i===1?{...a,name:unsigned.assets[0].name}:a),
+    ]) assert.throws(()=>validateUnsignedCandidate({...unsigned,assets}), /asset/);
+    assert.deepEqual(expectedAssets(tag),f.release.assets.map(a=>a.name));
+  } finally {await f.cleanup();}
+});
+
+test('intent rejects unsupported baseline syntax and out-of-range components', () => {
+  for (const baseline of ['0.0.11','v00.0.11','v0.0.11-alpha','v0.0.11+build','v18446744073709551616.0.0']) {
+    assert.throws(()=>validateReleaseIntent({...intent,baseline}), /release/);
+  }
 });

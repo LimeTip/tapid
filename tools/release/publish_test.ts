@@ -467,3 +467,16 @@ test('publication planning reports a development dependency bump when both versi
   assertEquals(plan.blockers, []);
   assertEquals(plan.dependentBumps, [{ dependent: 'tapid', dependency: 'tapid-test-support', requiredVersion: '1.0.0' }]);
 });
+
+test('publication blocks unsupported comparison syntax but compares unbounded stable integers', async () => {
+  for (const publicVersion of ['v1.0.0','01.0.0','1.0','1.0.0-rc.1','1.0.0+build','1.0.0\n']) {
+    const result=await planPublication({packages:[{name:'tapid',version:'1.0.0',dependencies:[]}]},
+      async()=>({published:false,latestVersion:publicVersion}));
+    assertEquals(result.packages,[]);
+    assertEquals(result.blockers,[`tapid@1.0.0: cannot safely compare crates.io version ${publicVersion}`]);
+  }
+  const result=await planPublication({packages:[{name:'tapid',version:'18446744073709551617.0.0',dependencies:[]}]},
+    async()=>({published:false,latestVersion:'18446744073709551616.0.0'}));
+  assertEquals(result.blockers,[]);
+  assertEquals(result.packages,[{name:'tapid',version:'18446744073709551617.0.0'}]);
+});

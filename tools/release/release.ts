@@ -1,3 +1,4 @@
+import { TARGETS } from "./platforms.ts";
 import { stableVersionParts } from "./versions.ts";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -9,14 +10,12 @@ import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
 
-export const TARGETS = [
-  "aarch64-apple-darwin",
-  "aarch64-pc-windows-msvc",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-apple-darwin",
-  "x86_64-pc-windows-msvc",
-  "x86_64-unknown-linux-gnu",
-] as const;
+export { TARGETS } from "./platforms.ts";
+
+export function archiveNames(version: string): string[] {
+  releaseVersion(`v${version}`, version);
+  return TARGETS.map(target => `tapid-${version}-${target}.tar.gz`);
+}
 
 export function releaseVersion(tag: string, cargoVersion: string): string {
   const match = /^v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/.exec(tag);
@@ -38,8 +37,7 @@ async function sha256(path: string): Promise<string> {
 }
 
 async function releaseArchives(directory: string, version: string): Promise<string[]> {
-  releaseVersion(`v${version}`, version);
-  const expected = TARGETS.map((target) => `tapid-${version}-${target}.tar.gz`).sort();
+  const expected = archiveNames(version).sort();
   const actual = (await readdir(directory, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && entry.name.endsWith(".tar.gz"))
     .map((entry) => entry.name)
@@ -71,8 +69,9 @@ export async function releaseRecord(directory: string, version: string, baseUrl:
   await releaseArchives(directory, version);
   const lines = [`tapid-release-v1\t${version}`];
   const maxArchiveBytes = 512 * 1024 * 1024;
-  for (const target of TARGETS) {
-    const name = `tapid-${version}-${target}.tar.gz`;
+  const names = archiveNames(version);
+  for (const [index, target] of TARGETS.entries()) {
+    const name = names[index];
     const path = join(directory, name);
     const info = await stat(path);
     if (info.size === 0 || info.size > maxArchiveBytes) throw new Error(`invalid release archive size: ${name}`);
@@ -116,6 +115,8 @@ if (isMain) {
   const [command, ...args] = process.argv.slice(2);
   if (command === "check-tag" && args.length === 1) {
     await checkTag(args[0]);
+  } else if (command === "archives" && args.length === 1) {
+    console.log(archiveNames(args[0]).sort().join("\n"));
   } else if (command === "current-version" && args.length === 0) {
     console.log(await tapidVersion());
   } else if (command === "checksums" && args.length === 2) {
@@ -125,7 +126,7 @@ if (isMain) {
     const content = await releaseRecord(args[0], args[1], args[2]);
     await writeFile(join(args[0], "tapid-release-v1.tsv"), content);
   } else {
-    console.error("usage: release.ts check-tag TAG | current-version | checksums DIRECTORY VERSION | metadata DIRECTORY VERSION BASE_URL");
+    console.error("usage: release.ts check-tag TAG | archives VERSION | current-version | checksums DIRECTORY VERSION | metadata DIRECTORY VERSION BASE_URL");
     process.exitCode = 2;
   }
 }

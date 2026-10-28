@@ -138,10 +138,6 @@ test("checksum generation streams archives sequentially", async () => {
 test("binary release builds the exact source and gates one complete candidate", async () => {
   const workflow = await text(".github/workflows/release-publication.yml");
   const coordinator = await text(".github/workflows/crates-publication.yml");
-  for (const target of [
-    "aarch64-apple-darwin", "aarch64-pc-windows-msvc", "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu",
-  ]) assert(workflow.includes(`target: ${target}`));
   assert(workflow.includes("workflow_call:"));
   assert(!workflow.includes("\n  push:"));
   assert(!workflow.includes("softprops/action-gh-release"));
@@ -722,4 +718,13 @@ test("native Windows archive fixture refreshes release records before each insta
   assert(fixture.includes('fixture did not use release record discovery and artifact URLs'));
   assert(!fixture.includes('SHA256SUMS'));
   assert(fixture.includes('exactly one member named tapid.exe'));
+});
+
+test('release-specific numeric bounds accept u64 maximum and reject overflow in each component', () => {
+  for (const version of ['18446744073709551615.0.0','0.18446744073709551615.0','0.0.18446744073709551615']) {
+    assertEquals(releaseVersion(`v${version}`,version),version);
+  }
+  for (const version of ['18446744073709551616.0.0','0.18446744073709551616.0','0.0.18446744073709551616']) {
+    assertThrows(()=>releaseVersion(`v${version}`,version),/unsigned 64-bit/);
+  }
 });
