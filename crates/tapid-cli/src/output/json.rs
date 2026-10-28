@@ -10,7 +10,7 @@ mod preview;
 mod tools;
 mod why;
 
-pub(crate) use cache::cache_result;
+pub(crate) use cache::{cache_fetch, cache_result};
 pub(crate) use dependency::installed;
 pub(crate) use explain::explain;
 pub(crate) use outdated::outdated;

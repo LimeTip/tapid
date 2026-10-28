@@ -42,3 +42,19 @@ permission is independent of whether installation is frozen.
 
 Retrieval and verification of missing content for an existing locked selection.
 Hydration leaves package selection unchanged.
+
+## Source cache preparation
+
+`tapid cache fetch` hydrates the exact external selections of a validated ordinary
+lock into the verified source store without installation. It prepares the complete
+locked graph for the current target and never resolves versions, writes receipts
+or other lock changes, runs hooks, activates layouts, or recovers the project.
+Imported schema-8 locks and missing receipts/pins are explicitly unsupported.
+Pending project recovery blocks preparation. File archives and HTTPS Git commits
+retain their existing exact-pin verification contracts.
+
+Source availability is observed under a final store read guard. Project inputs
+are rechecked without locking out arbitrary concurrent edits, and later eviction
+can invalidate availability. Standalone publication may retain an independently
+verified subset after process interruption. Source preparation does not establish
+authenticated lifecycle-output, key, approval, policy, runtime or toolchain readiness.

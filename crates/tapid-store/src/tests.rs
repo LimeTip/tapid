@@ -1357,3 +1357,99 @@ fn snapshot_drop_preserves_a_replaced_reservation() {
     drop(snapshot);
     assert_eq!(fs::read(reservation.join("replacement")).unwrap(), b"keep");
 }
+
+#[test]
+fn publication_counts_only_destinations_introduced_by_its_own_transaction() {
+    let project = tapid_test_support::TempProject::new("publication-count").unwrap();
+    let source = project.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("package.json"), b"verified source").unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&source)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let store = Store::new(project.path().join("store"));
+    let mut first = store.transaction();
+    let mut competing = store.transaction();
+    first.stage_verified_tree(&digest, &source).unwrap();
+    competing.stage_verified_tree(&digest, &source).unwrap();
+    let publication = first.publish().unwrap();
+    assert_eq!(publication.newly_published_trees(), 1);
+    publication.commit().unwrap();
+    let publication = competing.publish().unwrap();
+    assert_eq!(publication.newly_published_trees(), 0);
+    publication.commit().unwrap();
+    assert!(store.verified_tree_path(&digest).is_ok());
+}
+
+thread_local! {
+    static INTERRUPT_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+pub(super) fn publication_checkpoint(introduced: usize) {
+    if introduced == 1 && INTERRUPT_PUBLICATION.get() {
+        std::process::exit(73);
+    }
+}
+
+#[test]
+fn interrupted_standalone_publication_preserves_only_verified_trees_and_retries() {
+    const ROOT: &str = "TAPID_TEST_STANDALONE_PUBLICATION_ROOT";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = PathBuf::from(root);
+        let store = Store::new(root.join("store"));
+        let mut transaction = store.transaction();
+        for name in ["first", "second"] {
+            let source = root.join(name);
+            let digest = tapid_archive::canonical_tree_digest(&source)
+                .unwrap()
+                .parse()
+                .unwrap();
+            transaction.stage_verified_tree(&digest, &source).unwrap();
+        }
+        INTERRUPT_PUBLICATION.set(true);
+        transaction.publish().unwrap();
+        panic!("publication interruption did not execute");
+    }
+    let project = tapid_test_support::TempProject::new("standalone-interruption").unwrap();
+    for name in ["first", "second"] {
+        project
+            .write(format!("{name}/package.json"), name.as_bytes())
+            .unwrap();
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::interrupted_standalone_publication_preserves_only_verified_trees_and_retries",
+        ])
+        .env(ROOT, project.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(73), "{output:?}");
+    let store = Store::new(project.path().join("store"));
+    let mut available = 0;
+    let mut retry = store.transaction();
+    for name in ["first", "second"] {
+        let source = project.path().join(name);
+        let digest = tapid_archive::canonical_tree_digest(&source)
+            .unwrap()
+            .parse()
+            .unwrap();
+        match store.verified_tree_path(&digest) {
+            Ok(_) => available += 1,
+            Err(IngestError::TreeMissing(_)) => {}
+            Err(error) => panic!("unverified published content: {error}"),
+        }
+        retry.stage_verified_tree(&digest, &source).unwrap();
+    }
+    assert_eq!(available, 1);
+    let publication = retry.publish().unwrap();
+    assert_eq!(publication.newly_published_trees(), 1);
+    publication.commit().unwrap();
+    for name in ["first", "second"] {
+        let digest = tapid_archive::canonical_tree_digest(&project.path().join(name))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(store.verified_tree_path(&digest).is_ok());
+    }
+}
