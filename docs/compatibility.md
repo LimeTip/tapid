@@ -76,10 +76,15 @@ Local fixtures are runtime-derived and do not imply live registry or cross-platf
 
 Run commands from the workspace root, or pass `--project-dir <root>`. Tapid does
 not search ancestor directories for a workspace root. With no `--workspace`,
-commands select the root manifest or root script. `--workspace <name>` selects
-one member by its exact package name, including its scope. Paths, multiple
-selectors, and an implicit selection from the current member directory are not
-supported.
+commands select the root manifest or root script. `--workspace <selector>` selects
+one member by its exact case-sensitive package name (including its scope) or
+exact member directory relative to the workspace root. Names take precedence;
+`./` forces path interpretation, and paths accept a trailing `/`. Contained
+directory aliases may identify an already declared canonical member. Explicit
+selection excludes the root, including `.` and its package name. Absolute paths,
+drive/UNC paths, backslashes, traversal, patterns, files, descendants, undeclared
+directories, and canonical escapes fail before work. Multiple CLI selectors and
+implicit selection from the current member directory are not yet supported.
 
 Root `workspaces` accepts a string, an array of strings, or an object whose
 `packages` field is a string or array. Patterns use relative directory paths

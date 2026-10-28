@@ -1308,7 +1308,7 @@ fn write_store_journal(
         coordinator_record
             .get("version")
             .and_then(serde_json::Value::as_u64),
-        Some(1..=3)
+        Some(1..=4)
     ) || coordinator_record
         .get("state")
         .and_then(serde_json::Value::as_str)
@@ -1463,7 +1463,7 @@ fn recover_store_journal(root: &Path) -> io::Result<()> {
             })?;
         if !matches!(
             decision.get("version").and_then(serde_json::Value::as_u64),
-            Some(1..=3)
+            Some(1..=4)
         ) || decision.get("owner").and_then(serde_json::Value::as_str) != Some(owner)
         {
             return Err(io::Error::new(

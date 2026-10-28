@@ -229,18 +229,100 @@ impl Workspace {
         &self.members
     }
 
-    /// Select the root with `None`, or a member by its exact package name.
-    /// Empty selectors and names absent from this discovery result are errors.
+    /// Resolve all selectors before returning unique members in canonical directory order.
+    /// Exact names take precedence; `./` forces root-relative directory selection.
+    /// An empty collection selects no members. Explicit selectors never select the root.
+    pub fn select_members(&self, selectors: &[&str]) -> Result<Vec<&WorkspaceMember>, String> {
+        let mut selected = Vec::new();
+        for selector in selectors {
+            selected.push(self.select_member(selector)?);
+        }
+        // Canonical paths share a root. Compare portable relative directory strings,
+        // independently of discovery's package-name ordering.
+        let root = self
+            .root_path
+            .parent()
+            .expect("discovered root has a parent");
+        selected.sort_by_cached_key(|member| {
+            let normalized = member
+                .path
+                .parent()
+                .expect("member has a parent")
+                .strip_prefix(root)
+                .expect("discovered member is contained")
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            // Distinct Unix byte paths can have the same lossy display string.
+            // Keep their identities adjacent for deduplication and break ties
+            // independently of selector order.
+            (normalized, member.path.clone())
+        });
+        selected.dedup_by_key(|member| &member.path);
+        Ok(selected)
+    }
+
+    fn select_member(&self, selector: &str) -> Result<&WorkspaceMember, String> {
+        let invalid = |reason: &str| {
+            format!(
+                "invalid workspace selector '{selector}': {reason}; use an exact member name or root-relative member directory (./ forces a path)"
+            )
+        };
+        if selector.is_empty() {
+            return Err(invalid("workspace selector cannot be empty"));
+        }
+        if selector.starts_with('/')
+            || selector.contains('\\')
+            || selector.as_bytes().get(1) == Some(&b':')
+            || selector.split('/').any(|part| part == "..")
+            || selector.contains(['*', '?', '[', ']', '{', '}', '!', '(', ')'])
+        {
+            return Err(invalid(
+                "absolute paths, traversal, backslashes and patterns are unsupported",
+            ));
+        }
+        if selector == self.root.name().as_str() {
+            return Err(invalid("the workspace root cannot be explicitly selected"));
+        }
+        if !selector.starts_with("./")
+            && let Some(member) = self.members.iter().find(|member| member.name == selector)
+        {
+            return Ok(member);
+        }
+        let directory = selector
+            .strip_prefix("./")
+            .unwrap_or(selector)
+            .trim_end_matches('/');
+        if directory.is_empty() || directory == "." {
+            return Err(invalid("the workspace root cannot be explicitly selected"));
+        }
+        if directory
+            .split('/')
+            .any(|part| part.is_empty() || part == ".")
+        {
+            return Err(invalid("use a normalized member directory"));
+        }
+        let root = self
+            .root_path
+            .parent()
+            .expect("discovered root has a parent");
+        let path =
+            contained_path(root, &root.join(directory)).map_err(|reason| invalid(&reason))?;
+        if !path.is_dir() {
+            return Err(invalid("select a member directory, not a file"));
+        }
+        self.members
+            .iter()
+            .find(|member| member.path.parent() == Some(path.as_path()))
+            .ok_or_else(|| invalid("directory is not a declared workspace member"))
+    }
+
+    /// Select the root with `None`, or a member by exact name or root-relative directory.
     pub fn select(&self, name: Option<&str>) -> Result<&PackageManifest, String> {
         match name {
             None => Ok(&self.root),
-            Some("") => Err("workspace selector cannot be empty".to_owned()),
-            Some(name) => self
-                .members
-                .iter()
-                .find(|member| member.name == name)
-                .map(|member| &member.manifest)
-                .ok_or_else(|| format!("workspace member '{name}' was not found")),
+            Some(name) => self.select_member(name).map(|member| &member.manifest),
         }
     }
 
@@ -248,13 +330,7 @@ impl Workspace {
     pub fn select_path(&self, name: Option<&str>) -> Result<&Path, String> {
         match name {
             None => Ok(&self.root_path),
-            Some("") => Err("workspace selector cannot be empty".to_owned()),
-            Some(name) => self
-                .members
-                .iter()
-                .find(|member| member.name == name)
-                .map(|member| member.path.as_path())
-                .ok_or_else(|| format!("workspace member '{name}' was not found")),
+            Some(name) => self.select_member(name).map(|member| member.path.as_path()),
         }
     }
 }
@@ -613,6 +689,186 @@ mod tests {
     use proptest::prelude::*;
     use std::{fs, path::Path};
     use tapid_test_support::TempProject;
+
+    #[test]
+    fn complete_workspace_selection_orders_and_deduplicates_names_and_paths() {
+        let project = TempProject::new("complete-selection").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["apps/*","packages/*"]}"#,
+            )
+            .unwrap();
+        for (path, name) in [("apps/news", "z-news"), ("packages/ui", "@example/ui")] {
+            project
+                .write(
+                    format!("{path}/package.json"),
+                    format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                )
+                .unwrap();
+        }
+        let workspace = Workspace::discover(project.path()).unwrap();
+        let selected = workspace
+            .select_members(&["@example/ui", "apps/news", "z-news", "./packages/ui/"])
+            .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|member| member.name())
+                .collect::<Vec<_>>(),
+            ["z-news", "@example/ui"]
+        );
+        assert_eq!(
+            workspace.select_path(Some("apps/news")).unwrap(),
+            workspace.select_path(Some("z-news")).unwrap()
+        );
+        assert!(workspace.select_members(&["z-news", "missing"]).is_err());
+    }
+
+    #[test]
+    fn complete_workspace_selection_disambiguates_names_and_rejects_unsafe_targets() {
+        let project = TempProject::new("selection-ambiguity").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["@example/*","apps/*"]}"#,
+            )
+            .unwrap();
+        for (path, name) in [("@example/ui", "path-member"), ("apps/news", "@example/ui")] {
+            project
+                .write(
+                    format!("{path}/package.json"),
+                    format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                )
+                .unwrap();
+        }
+        project
+            .write(
+                "undeclared/package.json",
+                br#"{"name":"undeclared","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        fs::create_dir_all(project.path().join("apps/news/child")).unwrap();
+        let workspace = Workspace::discover(project.path()).unwrap();
+        assert_eq!(
+            workspace
+                .select(Some("@example/ui"))
+                .unwrap()
+                .name()
+                .as_str(),
+            "@example/ui"
+        );
+        assert_eq!(
+            workspace
+                .select(Some("./@example/ui/"))
+                .unwrap()
+                .name()
+                .as_str(),
+            "path-member"
+        );
+        assert!(workspace.select_members(&[]).unwrap().is_empty());
+        assert_eq!(workspace.select(None).unwrap().name().as_str(), "root");
+        assert_eq!(workspace.members()[0].name(), "@example/ui");
+        for selector in [
+            "",
+            ".",
+            "./",
+            "root",
+            "/apps/news",
+            "C:/apps/news",
+            "//host/share",
+            r"apps\news",
+            "../apps/news",
+            "apps/../apps/news",
+            "apps/*",
+            "apps/?",
+            "apps/[news]",
+            "{apps,packages}/news",
+            "!apps/news",
+            "apps/@(news)",
+            "apps/news/package.json",
+            "apps/news/child",
+            "undeclared",
+            "missing",
+        ] {
+            let error = workspace
+                .select_members(&["path-member", selector])
+                .unwrap_err();
+            assert!(error.contains(selector), "{selector}: {error}");
+            assert!(error.contains("workspace selector"), "{selector}: {error}");
+        }
+        assert_eq!(
+            workspace
+                .select_members(&["./@example/ui", "apps/news"])
+                .unwrap(),
+            workspace
+                .select_members(&["apps/news", "./@example/ui"])
+                .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn complete_workspace_selection_deduplicates_contained_aliases_and_rejects_escapes() {
+        use std::os::unix::fs::symlink;
+        let project = TempProject::new("selection-alias").unwrap();
+        let external = TempProject::new("selection-external").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["apps/news"]}"#,
+            )
+            .unwrap();
+        project
+            .write(
+                "apps/news/package.json",
+                br#"{"name":"news","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        symlink("apps/news", project.path().join("alias")).unwrap();
+        symlink(external.path(), project.path().join("escape")).unwrap();
+        let workspace = Workspace::discover(project.path()).unwrap();
+        assert_eq!(
+            workspace
+                .select_members(&["alias", "news", "apps/news"])
+                .unwrap()
+                .len(),
+            1
+        );
+        let error = workspace.select_members(&["news", "escape"]).unwrap_err();
+        assert!(error.contains("outside project"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_workspace_selection_keeps_non_utf8_directory_identities_distinct() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        let project = TempProject::new("selection-directory-bytes").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        for (byte, name) in [(0xfe, "a"), (0xff, "b")] {
+            let directory = OsString::from_vec(vec![b'p', byte]);
+            project
+                .write(
+                    Path::new("packages").join(directory).join("package.json"),
+                    format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                )
+                .unwrap();
+        }
+        let workspace = Workspace::discover(project.path()).unwrap();
+        let selected = workspace.select_members(&["b", "a", "b"]).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|member| member.name())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+    }
 
     #[test]
     fn bounded_discovery_counts_entries_without_manifests_and_across_patterns() {

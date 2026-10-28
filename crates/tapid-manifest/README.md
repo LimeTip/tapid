@@ -23,7 +23,21 @@ preserving the existing error text.
 
 `with_dependency_kind` adds a dependency to one section and removes declarations of that name from other sections. `update_dependency_kind` changes an existing declaration only in the selected section, preserving overlapping declarations and unrelated fields. It returns an error when that section does not declare the name.
 
-`Workspace::discover` reads root and member manifests, checks canonical path containment, and selects members by exact package name. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. Discovery rejects root and member manifests larger than `MAX_MANIFEST_BYTES`, 32 MiB, before parsing and bounds the read itself if a file grows. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.
+`Workspace::discover` reads root and member manifests and checks canonical path containment. It accepts string, array, and `workspaces.packages` declarations with literal directory paths and `*` as a whole component for one directory level. Unsupported glob syntax fails with a diagnostic. Overlapping patterns are deduplicated, duplicate names are rejected, and manifests must be regular files. Discovery rejects root and member manifests larger than `MAX_MANIFEST_BYTES`, 32 MiB, before parsing and bounds the read itself if a file grows. See the [workspace contract](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#npm-workspaces) for the exact supported subset.
+
+`Workspace::select_members` resolves a complete collection of exact names or
+root-relative member directories, deduplicates canonical member identities, and
+returns members in normalized canonical directory order. Exact case-sensitive
+names (including scoped names) take precedence; `./` forces path interpretation.
+Paths accept a trailing `/`. Contained directory aliases can select an already
+declared canonical member. Absolute paths, drive/UNC paths, backslashes,
+traversal, patterns, files, descendant directories, undeclared directories, and
+canonical escapes fail with a selector-specific error. Explicit selectors exclude
+the root, including `.` and its package name. An empty collection returns no
+members. `select` and `select_path` share these rules for one selector and retain
+root selection for `None`. Discovery's `members()` order remains package-name
+order. Selection uses filesystem pathname checks; it does not prevent subsequent
+changes by concurrent filesystem writers.
 
 `dependency_lifecycle_commands` preserves exact script bytes in lifecycle order. It includes the implicit `node-gyp rebuild` install hook when `binding.gyp` exists and neither `preinstall` nor `install` is declared. The CLI supplies that filesystem fact; parsing grants no execution permission.
 

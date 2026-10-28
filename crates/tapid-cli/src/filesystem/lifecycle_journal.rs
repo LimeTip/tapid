@@ -25,6 +25,15 @@ struct Record {
     store_root: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberActivation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    manifests: Vec<ManifestSnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestSnapshot {
+    path: String,
+    bytes: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,7 +132,7 @@ fn relative_manifest_path(project: &Path, manifest_path: &Path) -> Result<String
     }
     relative
         .to_str()
-        .map(str::to_owned)
+        .map(|path| path.replace(std::path::MAIN_SEPARATOR, "/"))
         .ok_or_else(|| "lifecycle manifest target path is not valid UTF-8".to_owned())
 }
 
@@ -135,10 +144,22 @@ impl LifecycleJournal {
         manifest: &[u8],
         lock: Option<&[u8]>,
     ) -> Result<Self, String> {
+        Self::begin_many(project, &[(manifest_path, manifest)], owner, lock)
+    }
+
+    pub(crate) fn begin_many(
+        project: &Path,
+        manifests: &[(&Path, &[u8])],
+        owner: &str,
+        lock: Option<&[u8]>,
+    ) -> Result<Self, String> {
         if !valid_owner(owner) {
             return Err("refusing to create lifecycle journal with invalid owner".into());
         }
-        if manifest.len() as u64 > MAX_SNAPSHOT_BYTES
+        if manifests.is_empty()
+            || manifests
+                .iter()
+                .any(|(_, bytes)| bytes.len() as u64 > MAX_SNAPSHOT_BYTES)
             || lock.is_some_and(|bytes| bytes.len() as u64 > MAX_SNAPSHOT_BYTES)
         {
             return Err("lifecycle recovery state exceeds size limit".into());
@@ -151,20 +172,45 @@ impl LifecycleJournal {
         }
         let marker_existed = exists(project.join(".tapid-managed"))?;
         let node_modules_existed = exists(project.join("node_modules"))?;
+        let mut snapshots = manifests
+            .iter()
+            .map(|(path, bytes)| {
+                Ok(ManifestSnapshot {
+                    path: relative_manifest_path(project, path)?,
+                    bytes: STANDARD.encode(bytes),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        snapshots.sort_by(|a, b| a.path.cmp(&b.path));
+        if snapshots
+            .windows(2)
+            .any(|pair| pair[0].path == pair[1].path)
+        {
+            return Err("duplicate lifecycle manifest target".into());
+        }
+        let single = snapshots.len() == 1;
+        let (manifest_path, manifest) = if single {
+            let snapshot = snapshots.pop().expect("one snapshot");
+            (snapshot.path, snapshot.bytes)
+        } else {
+            (default_manifest_path(), String::new())
+        };
         let record = Record {
-            version: 2,
-            manifest_path: relative_manifest_path(project, manifest_path)?,
+            version: if single { 2 } else { 4 },
+            manifest_path,
             owner: owner.to_owned(),
             state: State::Prepared,
             manifest_existed: true,
-            manifest: STANDARD.encode(manifest),
+            manifest,
             lock_existed: lock.is_some(),
             lock: lock.map(|bytes| STANDARD.encode(bytes)).unwrap_or_default(),
             marker_existed,
             node_modules_existed,
             store_root: None,
             members: Vec::new(),
+            manifests: snapshots,
         };
+        validated_manifest_snapshots(project, &record)?;
         write_record(project, &record)?;
         Ok(Self {
             project: project.to_owned(),
@@ -199,7 +245,7 @@ impl LifecycleJournal {
         members.sort_by(|a, b| a.path.cmp(&b.path));
         member_paths(&self.project, &members)?;
         if !members.is_empty() {
-            self.record.version = 3;
+            self.record.version = self.record.version.max(3);
             self.record.members = members;
             write_record(&self.project, &self.record)?;
         }
@@ -353,7 +399,7 @@ pub(crate) fn recover(
         fs::read(&path).map_err(|error| format!("cannot read lifecycle journal: {error}"))?;
     let record: Record = serde_json::from_slice(&bytes)
         .map_err(|error| format!("refusing to recover a malformed lifecycle journal: {error}"))?;
-    if !matches!(record.version, 1..=3)
+    if !matches!(record.version, 1..=4)
         || (record.version == 1 && record.manifest_path != "package.json")
         || !valid_owner(&record.owner)
         || stale_owner.is_some_and(|owner| record.owner != owner)
@@ -364,12 +410,9 @@ pub(crate) fn recover(
         return Err("member activation requires lifecycle version 3".into());
     }
     let member_paths = member_paths(project, &record.members)?;
-    recovery_manifest_path(project, &record.manifest_path)?;
-    if record.manifest.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
-        || record.lock.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES
-    {
-        return Err("refusing to recover oversized lifecycle state".into());
-    }
+    // Validate and decode the complete recovery set before store recovery or writes.
+    let manifests = validated_manifest_snapshots(project, &record)?;
+    let lock = decode_snapshot(&record.lock)?;
     if let Some(store_root) = &record.store_root {
         let path = Path::new(store_root);
         if !path.is_absolute() || path.canonicalize().as_deref().ok() != Some(path) {
@@ -382,7 +425,7 @@ pub(crate) fn recover(
             .map_err(|error| format!("cannot recover shared store transaction: {error}"))?;
     }
     if record.state == State::Prepared {
-        recover_record(project, &record)?;
+        recover_record(project, &record, &manifests, &lock)?;
     }
     for (member, path) in record.members.iter().zip(member_paths) {
         crate::filesystem::activation::recover_owned_activation(
@@ -428,18 +471,88 @@ fn clear_journal_backup(path: &Path) -> Result<(), String> {
     }
 }
 
-fn recover_record(project: &Path, record: &Record) -> Result<(), String> {
-    let manifest = STANDARD
-        .decode(&record.manifest)
-        .map_err(|error| format!("invalid manifest bytes in lifecycle journal: {error}"))?;
-    let manifest_path = recovery_manifest_path(project, &record.manifest_path)?;
-    atomic_replace(&manifest_path, &manifest)?;
+fn decode_snapshot(encoded: &str) -> Result<Vec<u8>, String> {
+    if encoded.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES {
+        return Err("refusing to recover oversized lifecycle state".into());
+    }
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("invalid snapshot bytes in lifecycle journal: {error}"))?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err("refusing to recover oversized lifecycle state".into());
+    }
+    Ok(bytes)
+}
+
+type DecodedManifest = (std::path::PathBuf, Vec<u8>);
+
+fn validated_manifest_snapshots(
+    project: &Path,
+    record: &Record,
+) -> Result<Vec<DecodedManifest>, String> {
+    if record.version < 4 {
+        if !record.manifests.is_empty() {
+            return Err("manifest collection requires lifecycle version 4".into());
+        }
+        return Ok(vec![(
+            recovery_manifest_path(project, &record.manifest_path)?,
+            decode_snapshot(&record.manifest)?,
+        )]);
+    }
+    if record.manifests.is_empty()
+        || !record.manifest.is_empty()
+        || record.manifest_path != "package.json"
+    {
+        return Err("invalid version 4 lifecycle manifest collection".into());
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    record
+        .manifests
+        .iter()
+        .map(|snapshot| {
+            if snapshot.path.contains('\\')
+                || snapshot.path.as_bytes().get(1) == Some(&b':')
+                || snapshot.path.split('/').any(|part| {
+                    part.is_empty() || part == "." || part == ".." || part == "node_modules"
+                })
+                || Path::new(&snapshot.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    != Some("package.json")
+            {
+                return Err("refusing unsafe lifecycle manifest snapshot path".into());
+            }
+            let path = recovery_manifest_path(project, &snapshot.path)?;
+            // Canonical parent identity also detects aliases of an earlier target.
+            let identity = path
+                .parent()
+                .ok_or("manifest has no parent")?
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+                .join(path.file_name().ok_or("manifest has no filename")?);
+            if identity != path {
+                return Err("refusing noncanonical lifecycle manifest snapshot path".into());
+            }
+            if !paths.insert(identity) {
+                return Err("duplicate lifecycle manifest target".into());
+            }
+            Ok((path, decode_snapshot(&snapshot.bytes)?))
+        })
+        .collect()
+}
+
+fn recover_record(
+    project: &Path,
+    record: &Record,
+    manifests: &[DecodedManifest],
+    lock: &[u8],
+) -> Result<(), String> {
+    for (path, bytes) in manifests {
+        atomic_replace(path, bytes)?;
+    }
     let lock_path = project.join("tapid.lock");
     if record.lock_existed {
-        let lock = STANDARD
-            .decode(&record.lock)
-            .map_err(|error| format!("invalid lockfile bytes in lifecycle journal: {error}"))?;
-        atomic_replace(&lock_path, &lock)?;
+        atomic_replace(&lock_path, lock)?;
     } else {
         match fs::remove_file(&lock_path) {
             Ok(()) => sync_parent(&lock_path)?,
@@ -637,6 +750,185 @@ mod tests {
     use super::*;
 
     #[test]
+    fn batch_journal_recovers_every_manifest_after_interruption() {
+        let project = tapid_test_support::TempProject::new("batch-journal").unwrap();
+        project.write("package.json", b"root unchanged").unwrap();
+        let a = project.write("apps/a/package.json", b"old a").unwrap();
+        let b = project.write("apps/b/package.json", b"old b").unwrap();
+        let owner = "123-deadbeef\n";
+        let journal = LifecycleJournal::begin_many(
+            project.path(),
+            &[
+                (a.as_path(), b"old a".as_slice()),
+                (b.as_path(), b"old b".as_slice()),
+            ],
+            owner,
+            Some(b"old lock"),
+        )
+        .unwrap();
+        project.write("apps/a/package.json", b"new a").unwrap();
+        project.write("apps/b/package.json", b"new b").unwrap();
+        project.write("tapid.lock", b"new lock").unwrap();
+        std::mem::forget(journal);
+        assert!(
+            !recover(project.path(), Some(owner))
+                .unwrap()
+                .unwrap()
+                .committed
+        );
+        assert_eq!(fs::read(a).unwrap(), b"old a");
+        assert_eq!(fs::read(b).unwrap(), b"old b");
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            b"root unchanged"
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"old lock"
+        );
+    }
+
+    #[test]
+    fn batch_journal_validates_all_snapshots_before_any_restoration() {
+        let project = tapid_test_support::TempProject::new("batch-journal-invalid").unwrap();
+        let a = project.write("a/package.json", b"current a").unwrap();
+        let b = project.write("b/package.json", b"current b").unwrap();
+        project.write("tapid.lock", b"current lock").unwrap();
+        let owner = "123-deadbeef\n";
+        let journal = LifecycleJournal::begin_many(
+            project.path(),
+            &[
+                (a.as_path(), b"old a".as_slice()),
+                (b.as_path(), b"old b".as_slice()),
+            ],
+            owner,
+            Some(b"old lock"),
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        let path = project.path().join(JOURNAL);
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for replacement in [
+            serde_json::json!({"path":"../outside/package.json", "bytes":"e30="}),
+            serde_json::json!({"path":"a/package.json", "bytes":"e30="}),
+            serde_json::json!({"path":"b/package.json", "bytes":"invalid base64!"}),
+            serde_json::json!({"path":"b/./package.json", "bytes":"e30="}),
+        ] {
+            let mut record = original.clone();
+            record["manifests"][1] = replacement;
+            fs::write(&path, record.to_string()).unwrap();
+            assert!(recover(project.path(), Some(owner)).is_err(), "{record}");
+            assert_eq!(fs::read(&a).unwrap(), b"current a");
+            assert_eq!(fs::read(&b).unwrap(), b"current b");
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                b"current lock"
+            );
+            assert!(path.exists());
+        }
+    }
+
+    #[test]
+    fn batch_journal_preserves_aggregate_budget_before_publication() {
+        let project = tapid_test_support::TempProject::new("batch-journal-budget").unwrap();
+        let a = project.write("a/package.json", b"a").unwrap();
+        let b = project.write("b/package.json", b"b").unwrap();
+        let c = project.write("c/package.json", b"c").unwrap();
+        let bytes = vec![b'x'; 25 * 1024 * 1024];
+        let result = LifecycleJournal::begin_many(
+            project.path(),
+            &[
+                (a.as_path(), &bytes),
+                (b.as_path(), &bytes),
+                (c.as_path(), &bytes),
+            ],
+            "123-deadbeef\n",
+            None,
+        );
+        assert!(result.err().unwrap().contains("encoded size limit"));
+        assert!(!project.path().join(JOURNAL).exists());
+        assert_eq!(fs::read(a).unwrap(), b"a");
+        assert_eq!(fs::read(b).unwrap(), b"b");
+        assert_eq!(fs::read(c).unwrap(), b"c");
+    }
+
+    #[test]
+    fn batch_journal_commit_retains_edits_and_rejects_duplicate_targets() {
+        let project = tapid_test_support::TempProject::new("batch-journal-commit").unwrap();
+        let a = project.write("a/package.json", b"old a").unwrap();
+        let b = project.write("b/package.json", b"old b").unwrap();
+        let owner = "123-deadbeef\n";
+        assert!(
+            LifecycleJournal::begin_many(
+                project.path(),
+                &[
+                    (a.as_path(), b"old a".as_slice()),
+                    (a.as_path(), b"old a".as_slice())
+                ],
+                owner,
+                None
+            )
+            .is_err()
+        );
+        assert!(!project.path().join(JOURNAL).exists());
+        let mut journal = LifecycleJournal::begin_many(
+            project.path(),
+            &[
+                (a.as_path(), b"old a".as_slice()),
+                (b.as_path(), b"old b".as_slice()),
+            ],
+            owner,
+            None,
+        )
+        .unwrap();
+        project.write("a/package.json", b"new a").unwrap();
+        project.write("b/package.json", b"new b").unwrap();
+        journal.mark_committed().unwrap();
+        assert!(journal.settle().unwrap());
+        assert_eq!(fs::read(a).unwrap(), b"new a");
+        assert_eq!(fs::read(b).unwrap(), b"new b");
+        assert!(!project.path().join(JOURNAL).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_journal_keeps_evidence_until_interrupted_restoration_can_finish() {
+        let project = tapid_test_support::TempProject::new("batch-journal-retry").unwrap();
+        let a = project.write("a/package.json", b"new a").unwrap();
+        let b = project.write("b/package.json", b"new b").unwrap();
+        let owner = "123-deadbeef\n";
+        let journal = LifecycleJournal::begin_many(
+            project.path(),
+            &[
+                (a.as_path(), b"old a".as_slice()),
+                (b.as_path(), b"old b".as_slice()),
+            ],
+            owner,
+            Some(b"old lock"),
+        )
+        .unwrap();
+        std::mem::forget(journal);
+        // Fail after manifest restoration, before lock restoration completes.
+        let lock_path = project.path().join("tapid.lock");
+        fs::create_dir(&lock_path).unwrap();
+        assert!(recover(project.path(), Some(owner)).is_err());
+        assert!(project.path().join(JOURNAL).exists());
+        fs::remove_dir(&lock_path).unwrap();
+        assert!(
+            !recover(project.path(), Some(owner))
+                .unwrap()
+                .unwrap()
+                .committed
+        );
+        assert_eq!(fs::read(a).unwrap(), b"old a");
+        assert_eq!(fs::read(b).unwrap(), b"old b");
+        assert_eq!(fs::read(lock_path).unwrap(), b"old lock");
+        finish_recovery(project.path()).unwrap();
+        assert!(!project.path().join(JOURNAL).exists());
+    }
+
+    #[test]
     fn invalid_member_recovery_paths_fail_before_mutation() {
         let project = tapid_test_support::TempProject::new("journal-member-paths").unwrap();
         project.write("package.json", b"current manifest").unwrap();
@@ -806,6 +1098,7 @@ mod tests {
             node_modules_existed: false,
             store_root: None,
             members: Vec::new(),
+            manifests: Vec::new(),
         };
         fs::write(&backup, serde_json::to_vec(&record).unwrap()).unwrap();
 
@@ -846,6 +1139,7 @@ mod tests {
             node_modules_existed: false,
             store_root: None,
             members: Vec::new(),
+            manifests: Vec::new(),
         };
         let committed = Record {
             version: prepared.version,
@@ -860,6 +1154,7 @@ mod tests {
             node_modules_existed: prepared.node_modules_existed,
             store_root: None,
             members: Vec::new(),
+            manifests: Vec::new(),
         };
         let path = project.join(JOURNAL);
         let backup = journal_backup_path(&path);
@@ -903,6 +1198,7 @@ mod tests {
             node_modules_existed: false,
             store_root: None,
             members: Vec::new(),
+            manifests: Vec::new(),
         };
         let mut committed = Record {
             version: prepared.version,
@@ -917,6 +1213,7 @@ mod tests {
             node_modules_existed: prepared.node_modules_existed,
             store_root: None,
             members: Vec::new(),
+            manifests: Vec::new(),
         };
         committed.manifest = STANDARD.encode(committed_manifest);
         fs::write(
