@@ -35,3 +35,17 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+`resolve_owned_graph_with_preferences` accepts `(BindingOwner, Dependency)`
+declarations for a project root and named workspace members in one combined
+request. Direct requirements intersect within each owner, registry, local import
+name, and actual package name. Different owners can select incompatible versions;
+compatible selections share exact graph identities. `OwnedResolution::bindings`
+retains each owner's exact local binding, while `graph` contains the combined
+transitive graph. Owner-qualified direct preferences and refresh requests preserve
+unrelated owners' exact selections. Metadata and declaration limits apply to the
+whole request, including owner names. Only `BindingOwner::Root` bindings provide
+registry peers; member bindings never form a global provider pool. The original
+root-only entry points retain their existing contract through the same graph
+implementation. This resolver interface does not itself provide CLI workspace
+placement or lockfile replay support.
