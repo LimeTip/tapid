@@ -6,6 +6,8 @@ use tapid_linker::{InstanceKey, NamedLayoutInput, VerifiedTreeReference};
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 
+mod selection;
+
 /// Reconstruct locked instances from existing authenticated store evidence.
 /// The caller must retain `guard` while consuming these paths and separately
 /// validate project observations, workspace topology and the materialized layout.
