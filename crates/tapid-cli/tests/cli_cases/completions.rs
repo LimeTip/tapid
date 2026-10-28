@@ -249,8 +249,14 @@ fn completions_leave_project_home_store_and_pending_recovery_untouched() {
     home.write(".npmrc", b"inert credential sentinel").unwrap();
     home.write(".config/tapid/config.toml", b"invalid home config")
         .unwrap();
-    home.write(".cache/tapid/store/sentinel", b"cached bytes")
-        .unwrap();
+    // command_in_home sets XDG_CACHE_HOME and LOCALAPPDATA to this home;
+    // macOS instead derives its cache directory from HOME.
+    let store_sentinel = if cfg!(target_os = "macos") {
+        "Library/Caches/tapid/store/sentinel"
+    } else {
+        "tapid/store/sentinel"
+    };
+    home.write(store_sentinel, b"cached bytes").unwrap();
     let before = (tree(project.path()), tree(home.path()));
     for shell in ["bash", "zsh", "fish", "powershell"] {
         let output = invoke(project.path(), home.path(), &["completions", shell]);
