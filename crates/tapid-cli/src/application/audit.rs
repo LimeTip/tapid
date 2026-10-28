@@ -83,18 +83,44 @@ pub(crate) fn inspect_with_provider(
         lock.validate_replay(manifest, &digest)
             .map_err(|_| "AUDIT_LOCK_MISMATCH")?;
         let graph = lock.graph().map_err(|_| "AUDIT_LOCK_INVALID")?;
+        let reachable = graph.reachable();
+        let inventory = requests::imported(&graph);
+        let (mut evidence, outcome, failures, not_checked) =
+            collection::collect(&inventory, true, provider);
+        let roots =
+            graph
+                .roots
+                .iter()
+                .map(|(name, key)| tapid_lockfile::LockedGraphRoot {
+                    name: name.clone(),
+                    key: key.clone(),
+                    kind: "recorded".into(),
+                })
+                .chain(graph.workspaces.iter().map(|(key, manifest)| {
+                    tapid_lockfile::LockedGraphRoot {
+                        name: manifest["name"].as_str().unwrap_or_default().into(),
+                        key: key.clone(),
+                        kind: "workspace".into(),
+                    }
+                }))
+                .collect::<Vec<_>>();
+        for entry in &mut evidence {
+            let paths = graph.paths_to_key(&roots, &entry.key);
+            entry.paths = paths.paths;
+            entry.paths_truncated = paths.truncated;
+        }
         Ok(AuditReport {
-            failures: Vec::new(),
-            not_checked: graph.packages.len() + graph.workspaces.len(),
-            evidence: Vec::new(),
-            outcome: tapid_policy::AuditOutcome::Incomplete,
+            failures,
+            not_checked,
+            evidence,
+            outcome,
             format: "imported_npm",
             recorded_subjects: graph.packages.len() + graph.workspaces.len(),
-            reachable_subjects: None,
-            roots_recorded: None,
-            unresolved_peers: None,
-            requestable_occurrences: None,
-            excluded_occurrences: None,
+            reachable_subjects: Some(reachable.occurrences.len()),
+            roots_recorded: Some(true),
+            unresolved_peers: Some(0),
+            requestable_occurrences: Some(inventory.requests.len()),
+            excluded_occurrences: Some(inventory.excluded),
         })
     }
 }

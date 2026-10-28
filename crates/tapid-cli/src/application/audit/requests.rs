@@ -91,10 +91,138 @@ fn package(identity: &LockfilePackageKey) -> Option<PackageInstanceWire> {
     })
 }
 
+/// Imported peers bind exact placements and therefore retain their own origins.
+/// Platform lists and negations cannot be represented by a concrete wire host.
+pub(super) fn imported(graph: &tapid_lockfile::ImportedNpmGraph) -> Inventory {
+    let mut inventory = Inventory {
+        requests: Vec::new(),
+        excluded: 0,
+    };
+    let wire = |package: &tapid_lockfile::ImportedNpmPackage| PackageInstanceWire {
+        registry: package.registry.to_string(),
+        name: package.name.to_string(),
+        version: package.version.to_string(),
+    };
+    for (key, names) in graph.reachable().occurrences {
+        for name in names {
+            let request = (|| {
+                let package = graph.packages.get(&key)?;
+                let mut dimensions = Vec::new();
+                for values in [&package.os, &package.cpu, &package.libc] {
+                    dimensions.push(match values.as_slice() {
+                        [] => None,
+                        [value]
+                            if value
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)) =>
+                        {
+                            Some(value.clone())
+                        }
+                        _ => return None,
+                    });
+                }
+                Some(SecurityRequest {
+                    version: SECURITY_CONTRACT_V2.into(),
+                    subject: SecuritySubject {
+                        package: wire(package),
+                        requested_name: name,
+                        placement: format!(
+                            "graph/{}",
+                            crate::filesystem::atomic::digest_bytes(key.as_bytes())
+                                .trim_start_matches("sha256-")
+                        ),
+                        peers: package
+                            .peers
+                            .iter()
+                            .map(|(name, path)| (name.clone(), wire(&graph.packages[path])))
+                            .collect(),
+                        platform: SecurityPlatform {
+                            os: dimensions[0].clone(),
+                            cpu: dimensions[1].clone(),
+                            libc: dimensions[2].clone(),
+                        },
+                    },
+                    check: SecurityCheck::Advisory,
+                    coverage: vec!["advisory".into(), "reported_malware".into()],
+                    audience: EvidenceAudience::Public,
+                })
+            })();
+            match request {
+                Some(request) if request.validate_v2().is_ok() => {
+                    inventory.requests.push((key.clone(), request))
+                }
+                _ => inventory.excluded += 1,
+            }
+        }
+    }
+    inventory
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tapid_lockfile::{LockedPackage, Lockfile, RegistryIntegrityProvenance};
+
+    #[test]
+    fn imported_requests_preserve_exact_peer_origins_and_exclude_platform_alternatives() {
+        let mut input: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tapid-lockfile/tests/fixtures/npm-import-package-lock.json"
+        ))
+        .unwrap();
+        input["packages"]["node_modules/shared"]["resolved"] =
+            serde_json::json!("https://private.example/shared/-/shared-1.0.0.tgz");
+        input["packages"]["node_modules/consumer"]["resolved"] =
+            serde_json::json!("https://private.example/consumer/-/consumer-1.0.0.tgz");
+        input["packages"]["node_modules/native"]["os"] = serde_json::json!(["linux", "darwin"]);
+        input["packages"]["node_modules/parent"]["dependencies"] =
+            serde_json::json!({"renamed":"npm:shared@2.0.0"});
+        let mut nested = input["packages"]
+            .as_object_mut()
+            .unwrap()
+            .remove("node_modules/parent/node_modules/shared")
+            .unwrap();
+        nested["name"] = serde_json::json!("shared");
+        input["packages"]["node_modules/parent/node_modules/renamed"] = nested;
+        let lock = tapid_lockfile::ImportedNpmLockfile::import(
+            &input.to_string(),
+            &input["packages"][""].to_string(),
+            &format!("sha256-{}", "a".repeat(64)),
+        )
+        .unwrap();
+        let graph = lock.graph().unwrap();
+        let inventory = imported(&graph);
+        assert_eq!(inventory.excluded, 1);
+        assert_eq!(inventory.requests.len(), 4);
+        let (_, consumer) = inventory
+            .requests
+            .iter()
+            .find(|(key, _)| key == "node_modules/consumer")
+            .unwrap();
+        assert_eq!(
+            consumer.subject.peers["shared"].registry,
+            "https://private.example"
+        );
+        assert_eq!(consumer.subject.peers["shared"].version, "1.0.0");
+        let (_, nested) = inventory
+            .requests
+            .iter()
+            .find(|(key, _)| key == "node_modules/parent/node_modules/renamed")
+            .unwrap();
+        assert_eq!(nested.subject.requested_name, "renamed");
+        assert_eq!(nested.subject.package.name, "shared");
+        assert_eq!(
+            nested.subject.package.registry,
+            "https://registry.npmjs.org"
+        );
+        assert_eq!(nested.subject.package.version, "2.0.0");
+        assert!(
+            inventory
+                .requests
+                .iter()
+                .all(|(_, r)| r.validate_v2().is_ok())
+        );
+        assert_eq!(inventory.requests, imported(&graph).requests);
+    }
 
     fn package(registry: &str, name: &str) -> LockedPackage {
         LockedPackage::new_with_provenance(

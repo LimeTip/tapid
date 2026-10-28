@@ -24,8 +24,9 @@ pub struct LockedGraph {
     roots: Vec<(String, String)>,
 }
 
-/// Reachable native identities and every recorded incoming spelling. Candidate
-/// peer providers remain reachable, but non-unique applicability is explicit.
+/// Reachable native keys or imported placements and every incoming spelling.
+/// Native candidate peer providers remain reachable, but non-unique applicability
+/// is explicit. Imported peers already target validated exact placements.
 #[derive(Debug)]
 pub struct ReachableLockedGraph {
     pub occurrences: BTreeMap<String, BTreeSet<String>>,

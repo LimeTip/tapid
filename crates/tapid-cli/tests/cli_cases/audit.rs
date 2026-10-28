@@ -97,6 +97,11 @@ fn audit_validates_imported_graph_without_migrating_it_or_claiming_clean_coverag
     assert_eq!(output.status.code(), Some(3));
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["data"]["lock_format"], "imported_npm");
+    assert_eq!(value["data"]["reachable_subjects"], 0);
+    assert_eq!(
+        value["data"]["graph_coverage"]["requestable_occurrences"],
+        0
+    );
     assert_eq!(value["data"]["coverage"]["complete"], false);
     assert_eq!(
         fs::read(project.path().join("tapid.lock")).unwrap(),

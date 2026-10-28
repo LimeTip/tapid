@@ -22,6 +22,21 @@ fn imported_paths_preserve_alias_placements_and_contextual_duplicates() {
     .unwrap();
     let before = lock.to_json().unwrap();
     let graph = lock.graph().unwrap();
+    let reachable = graph.reachable();
+    assert!(reachable.roots_recorded);
+    assert!(reachable.unresolved_peers.is_empty());
+    assert_eq!(reachable.occurrences.len(), 7);
+    assert_eq!(
+        reachable.occurrences["node_modules/renamed"]
+            .iter()
+            .collect::<Vec<_>>(),
+        ["renamed"]
+    );
+    assert!(
+        reachable
+            .occurrences
+            .contains_key("node_modules/parent/node_modules/consumer")
+    );
     let roots = graph
         .roots
         .iter()
@@ -129,6 +144,15 @@ fn imported_workspace_selection_traverses_local_workspace_dependencies() {
     )
     .unwrap();
     let graph = lock.graph().unwrap();
+    assert_eq!(
+        graph
+            .reachable()
+            .occurrences
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["node_modules/shared", "packages/a", "packages/b"]
+    );
     let paths = graph.paths_to_key(
         &[tapid_lockfile::LockedGraphRoot {
             key: "packages/a".into(),

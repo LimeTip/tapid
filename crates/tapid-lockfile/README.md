@@ -97,3 +97,9 @@ records, stops cycles, and includes all candidate peer branches without host
 filtering. Missing roots and peer names with zero or multiple candidates are
 explicit. A unique candidate is still a recorded explanation candidate, not proof
 of provider applicability. This inventory does not establish security coverage.
+
+`ImportedNpmGraph::reachable()` reuses the imported explanation edge projection
+without its display limits. It includes recorded root and workspace entry points,
+local workspace links, aliases and exact peer placements without host filtering.
+The owning reader already rejects unreachable selected entries. Its keys remain imported placements or
+workspace source paths; they are not native package keys.

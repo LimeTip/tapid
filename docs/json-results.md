@@ -497,18 +497,19 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
 
-Audit's native graph inventory distinguishes `recorded_subjects` from
+Audit's native and imported graph inventories distinguish `recorded_subjects` from
 `reachable_subjects`. `graph_coverage.roots_recorded` identifies whether persisted
 entry points exist; `graph_coverage.unresolved_peers` counts reachable peer names
 with zero or multiple recorded candidates. These fields do not establish checked
-security coverage. Imported graph projection is not yet implemented for these
-fields and returns `null`; audit remains `not_checked` with exit 3.
-`graph_coverage.requestable_occurrences` counts native incoming-name occurrences
+security coverage. Imported peers target exact validated placements and report
+zero unresolved candidates; audit remains `not_checked` with exit 3 without a provider.
+`graph_coverage.requestable_occurrences` counts incoming-name occurrences
 that can be represented as exact v2 advisory/reported-malware requests, while
 `excluded_occurrences` counts those lacking exact source, peer or platform
 applicability. Multiple aliases for one reachable identity count separately.
-These counts do not imply provider coverage, consent or completed checks. Both
-fields are `null` for imported locks.
+These counts do not imply provider coverage, consent or completed checks.
+Imported workspace sources and platform alternatives that cannot be represented
+exactly are excluded rather than flattened to registry packages or host-filtered.
 
 The internal signed-provider application seam retains exact graph keys with v2
 `evidence` results and per-occurrence `failures` (stable code and precise local
@@ -522,7 +523,7 @@ text uses the existing sanitization and 4096-byte bound. Display truncation sets
 `truncated_fields`, incomplete coverage and exit 3. Provider evidence does not
 establish whether transport was live (`live_requests: null` in that case).
 
-Native evidence also includes bounded exact-instance dependency `paths` from the
+Native and imported evidence also includes bounded exact-instance dependency `paths` from the
 shared lock graph traversal and `paths_truncated`. Path display limitations never
 remove an occurrence from security collection; truncated path output makes the
 delivered JSON result partial.

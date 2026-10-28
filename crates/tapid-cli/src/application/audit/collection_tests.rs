@@ -168,6 +168,51 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         "advisory"
     );
     assert_eq!(value["data"]["coverage"]["complete"], true);
+    // The same signed provider and policy path handles imported placements.
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":serde_json::from_slice::<serde_json::Value>(manifest).unwrap(),
+        "node_modules/actual":{
+            "version":"1.2.3", "resolved":"https://registry.example/actual/-/actual-1.2.3.tgz",
+            "integrity":format!("sha512-{}==", "A".repeat(86)),
+            "dependencies":{"renamed":"npm:actual@1.2.3"}
+        },
+        "node_modules/renamed":{
+            "name":"actual", "version":"1.2.3", "resolved":"https://private.example/actual/-/actual-1.2.3.tgz",
+            "integrity":format!("sha512-{}==", "A".repeat(86))
+        }
+    }});
+    let imported = ImportedNpmLockfile::import(
+        &npm.to_string(),
+        std::str::from_utf8(manifest).unwrap(),
+        &digest_bytes(manifest),
+    )
+    .unwrap()
+    .to_json()
+    .unwrap();
+    project.write("tapid.lock", imported.as_bytes()).unwrap();
+    let imported_report = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+    assert_eq!(
+        imported_report.outcome,
+        tapid_policy::AuditOutcome::Findings
+    );
+    assert_eq!(imported_report.requestable_occurrences, Some(2));
+    let renamed = imported_report
+        .evidence
+        .iter()
+        .find(|entry| entry.key == "node_modules/renamed")
+        .unwrap();
+    assert_eq!(
+        renamed.result.request.subject.package.registry,
+        "https://private.example"
+    );
+    assert_eq!(renamed.result.request.subject.requested_name, "renamed");
+    assert_eq!(renamed.paths[0].steps.len(), 2);
+    assert_eq!(renamed.paths[0].steps[1].via.as_deref(), Some("renamed"));
+    assert_eq!(
+        std::fs::read(project.path().join("tapid.lock")).unwrap(),
+        imported.as_bytes()
+    );
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
     for (status, expected) in [
         (
             "no_known_findings",
@@ -222,7 +267,7 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     let failed = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
     assert_eq!(failed.failures[0].code, "not_authorized");
     assert_eq!(failed.outcome, tapid_policy::AuditOutcome::Incomplete);
-    assert_eq!(recorded, 11);
+    assert_eq!(recorded, 13);
     for (path, expected) in [
         ("package.json", manifest.as_slice()),
         ("tapid.lock", bytes.as_bytes()),

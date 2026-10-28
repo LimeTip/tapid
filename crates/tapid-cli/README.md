@@ -463,12 +463,15 @@ exact applicability. Copied and workspace sources, peer-bearing consumers and pl
 represented exactly are excluded from request counts. Opaque deterministic
 placement identifiers retain local mappings to exact graph keys; projection
 does not authorize disclosure, including for public registries.
-An internal application adapter now connects exact native requests to signed
+An internal application adapter now connects exact native and imported requests to signed
 provider collection, replay recording and threshold policy. Human and JSON
 renderers retain verified reports, check times, expiry and per-occurrence failures.
 The adapter is tested with raw signed fixtures; no command-line activation,
 production keys, credentials or durable security-state implementation are supplied.
-Imported reachable-occurrence selection, live activation and result-file delivery are pending;
+Imported selection traverses recorded root and workspace entry points without
+host filtering, preserves exact peer placements and excludes workspace sources
+and unrepresentable platform predicates. Local placement paths are hashed before
+projection; disclosure still requires separate authorization. Live activation and result-file delivery are pending;
 recorded subject counts are not a completed coverage assessment.
 
 `tapid status [--project-dir PATH] [--workspace NAME] [--json]` inspects local

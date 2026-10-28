@@ -296,6 +296,43 @@ impl ImportedNpmLockfile {
 }
 
 impl ImportedNpmGraph {
+    /// All recorded entry points and their transitive placements, without host
+    /// selection or explanation limits. Workspace sources remain distinct.
+    pub fn reachable(&self) -> crate::ReachableLockedGraph {
+        use crate::graph::PathGraph;
+        let graph = ImportedPathGraph::new(self);
+        let mut result = crate::ReachableLockedGraph {
+            occurrences: BTreeMap::new(),
+            roots_recorded: true,
+            unresolved_peers: BTreeSet::new(),
+        };
+        let mut pending = self
+            .roots
+            .iter()
+            .map(|(name, key)| (name.clone(), key.clone()))
+            .collect::<Vec<_>>();
+        pending.extend(self.workspaces.iter().map(|(key, manifest)| {
+            (
+                manifest["name"].as_str().unwrap_or_default().to_owned(),
+                key.clone(),
+            )
+        }));
+        while let Some((name, key)) = pending.pop() {
+            let names = result.occurrences.entry(key.clone()).or_default();
+            let first = names.is_empty();
+            names.insert(name);
+            if first {
+                pending.extend(
+                    graph
+                        .outgoing(&key)
+                        .iter()
+                        .map(|edge| (edge.name.clone(), edge.target.clone())),
+                );
+            }
+        }
+        result
+    }
+
     /// Selects applicable pinned placements. Incompatible required edges fail closed.
     pub fn selected_paths(
         &self,
