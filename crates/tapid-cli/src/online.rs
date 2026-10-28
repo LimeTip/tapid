@@ -17,6 +17,7 @@ mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
 mod selection;
+pub(crate) use selection::PreparedNativeProfile;
 mod update;
 #[cfg(test)]
 use resolution::{

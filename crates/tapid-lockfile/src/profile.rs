@@ -171,6 +171,42 @@ impl NativeSelection {
         serde_json::to_string_pretty(self).map_err(LockfileError::Serialization)
     }
 
+    /// Enabled declaration bindings, preserving workspace scope and alias names.
+    pub fn materialized_declarations(
+        &self,
+        profile: InstallProfile,
+    ) -> impl Iterator<Item = &Declaration> {
+        self.declarations
+            .iter()
+            .filter(move |edge| profile.enables(edge.kind))
+    }
+
+    /// Enabled package bindings, including exact peer providers. An omitted
+    /// optional edge stays absent even when its target is retained by another path.
+    pub fn materialized_dependencies<'a>(
+        &'a self,
+        key: &str,
+        profile: InstallProfile,
+    ) -> Result<impl Iterator<Item = (&'a str, &'a str)>, LockfileError> {
+        let package = self
+            .packages
+            .get(key)
+            .ok_or_else(|| LockfileError::DanglingRoot(key.to_owned()))?;
+        Ok(package
+            .dependencies
+            .iter()
+            .filter(move |(_, edge)| {
+                matches!(edge.kind, DependencyKind::Required) || profile.include_optional
+            })
+            .map(|(name, edge)| (name.as_str(), edge.target.as_str()))
+            .chain(
+                package
+                    .peer_providers
+                    .iter()
+                    .map(|(name, target)| (name.as_str(), target.as_str())),
+            ))
+    }
+
     /// Exact retained keys, including required providers and their dependencies.
     /// This does not fetch artifacts or produce a destructively filtered lock.
     pub fn materialized_keys(
@@ -178,9 +214,7 @@ impl NativeSelection {
         profile: InstallProfile,
     ) -> Result<BTreeSet<String>, LockfileError> {
         let mut pending: Vec<_> = self
-            .declarations
-            .iter()
-            .filter(|edge| profile.enables(edge.kind))
+            .materialized_declarations(profile)
             .map(|edge| edge.target.clone())
             .collect();
         let mut visited = BTreeSet::new();
@@ -188,20 +222,10 @@ impl NativeSelection {
             if !visited.insert(key.clone()) {
                 continue;
             }
-            let package = self
-                .packages
-                .get(&key)
-                .ok_or_else(|| LockfileError::DanglingRoot(key.clone()))?;
             pending.extend(
-                package
-                    .dependencies
-                    .values()
-                    .filter(|edge| {
-                        matches!(edge.kind, DependencyKind::Required) || profile.include_optional
-                    })
-                    .map(|edge| edge.target.clone()),
+                self.materialized_dependencies(&key, profile)?
+                    .map(|(_, target)| target.to_owned()),
             );
-            pending.extend(package.peer_providers.values().cloned());
         }
         Ok(visited)
     }

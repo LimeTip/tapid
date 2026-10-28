@@ -54,6 +54,22 @@ fn production_closure_retains_shared_dependencies_and_exact_peer_provider() {
     let before = selection.to_json().unwrap();
     assert_eq!(
         selection
+            .materialized_declarations(InstallProfile::production())
+            .map(|edge| edge.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["app-alias"]
+    );
+    assert_eq!(
+        selection
+            .materialized_dependencies(&app, InstallProfile::production())
+            .unwrap()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        [("shared", shared.as_str()), ("provider", provider.as_str())]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        selection
             .materialized_keys(InstallProfile::production())
             .unwrap(),
         [app, shared, provider, key("provider-dep")]
@@ -227,6 +243,33 @@ fn optional_omission_retains_required_alternate_paths_and_terminates_on_cycles()
     wire["packages"][key("optional")]["dependencies"]["missing"] =
         json!({"kind": "required", "target": key("missing")});
     assert!(NativeSelection::from_json(&wire.to_string()).is_err());
+}
+
+#[test]
+fn materialized_bindings_do_not_restore_omitted_aliases_to_retained_targets() {
+    let mut wire = single_selection();
+    wire["packages"][key("app")]["dependencies"] = json!({
+        "optional-alias": {"kind": "optional", "target": key("shared")},
+        "required-alias": {"kind": "required", "target": key("shared")}
+    });
+    wire["packages"][key("shared")] = package(json!({}), json!({}));
+    let selection = NativeSelection::from_json(&wire.to_string()).unwrap();
+    let profile = InstallProfile {
+        include_dev: false,
+        include_optional: false,
+    };
+    assert_eq!(
+        selection.materialized_keys(profile).unwrap(),
+        [key("app"), key("shared")].into_iter().collect()
+    );
+    let target = key("shared");
+    assert_eq!(
+        selection
+            .materialized_dependencies(&key("app"), profile)
+            .unwrap()
+            .collect::<Vec<_>>(),
+        vec![("required-alias", target.as_str())]
+    );
 }
 
 #[test]

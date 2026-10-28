@@ -8,11 +8,112 @@ use tapid_lockfile::{
 /// Complete selection and separately verified materialized sources. This is not a
 /// legacy lock and cannot be activated without layout/lifecycle preparation.
 #[allow(dead_code)]
-pub(super) struct PreparedNativeProfile {
-    pub(super) selection: NativeSelection,
+pub(crate) struct PreparedNativeProfile {
+    pub(crate) selection: NativeSelection,
     pub(super) materialized_keys: BTreeSet<String>,
     pub(super) sources: BTreeMap<String, PreparedNativeSource>,
     pub(super) transaction: StoreTransaction,
+}
+
+impl PreparedNativeProfile {
+    /// Build linker inputs from verified sources without converting the complete
+    /// selection into a legacy lock. Lifecycle preparation still precedes activation.
+    #[allow(dead_code)]
+    pub(crate) fn layout(
+        &self,
+        profile: tapid_lockfile::InstallProfile,
+    ) -> Result<PreparedLayout, OperationalError> {
+        let retained = self.selection.materialized_keys(profile)?;
+        if retained != self.materialized_keys {
+            return Err(OperationalError::new(
+                ErrorKind::Materialization,
+                "prepared sources do not match requested profile",
+            ));
+        }
+        // Workspace paths must be planned with member generations and local links;
+        // never pass them through the registry-only source layout.
+        if self.selection.packages().values().any(|package| {
+            matches!(
+                package.source_evidence,
+                NativeSourceEvidence::Workspace { .. }
+            )
+        }) || self
+            .selection
+            .materialized_declarations(profile)
+            .any(|edge| edge.workspace.is_some())
+        {
+            return Err(OperationalError::new(
+                ErrorKind::Materialization,
+                "native profile workspace layout integration is required",
+            ));
+        }
+        if self.sources.keys().cloned().collect::<BTreeSet<_>>() != retained {
+            return Err(OperationalError::new(
+                ErrorKind::Materialization,
+                "native profile requires every retained verified source",
+            ));
+        }
+        let mut instances = Vec::new();
+        let mut keys = BTreeMap::new();
+        let mut trees = BTreeMap::new();
+        for encoded in &retained {
+            let identity: LockfilePackageKey = encoded.parse()?;
+            let source = &self.sources[encoded];
+            let instance = PackageInstance {
+                id: tapid_core::PackageInstanceId::from_source(
+                    identity
+                        .source
+                        .package_source()
+                        .ok_or("expected native artifact source")?,
+                    identity.name.clone(),
+                    identity.version.clone(),
+                ),
+                peer_context: identity.peer_context()?,
+                platform_context: identity.platform_context()?,
+                tree: VerifiedTreeReference::new(&source.digest.to_string(), &source.tree)
+                    .map_err(|error| {
+                        OperationalError::from_source(ErrorKind::Materialization, error)
+                    })?,
+            };
+            keys.insert(encoded.clone(), InstanceKey::from(&instance));
+            trees.insert(encoded.clone(), source.tree.clone());
+            instances.push(instance);
+        }
+        let binding = |name: &str, target: &str| -> Result<NamedDependency, OperationalError> {
+            Ok(NamedDependency {
+                name: name
+                    .parse()
+                    .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                child: keys
+                    .get(target)
+                    .cloned()
+                    .ok_or_else(|| format!("missing prepared target {target}"))?,
+            })
+        };
+        let root_dependencies = self
+            .selection
+            .materialized_declarations(profile)
+            .map(|edge| binding(&edge.name, &edge.target))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut dependency_edges = Vec::new();
+        for parent in &retained {
+            for (name, target) in self.selection.materialized_dependencies(parent, profile)? {
+                dependency_edges.push(NamedDependencyEdge {
+                    parent: keys[parent].clone(),
+                    dependency: binding(name, target)?,
+                });
+            }
+        }
+        Ok(PreparedLayout {
+            input: NamedLayoutInput {
+                instances,
+                root_dependencies,
+                dependency_edges,
+            },
+            trees,
+            workspace: WorkspaceInstallPlan::default(),
+        })
+    }
 }
 
 #[allow(dead_code)]
@@ -497,6 +598,59 @@ mod tests {
             store.verified_tree_snapshot(&receipt.digest),
             Err(tapid_store::IngestError::TreeMissing(_))
         ));
+        let layout = prepared
+            .layout(tapid_lockfile::InstallProfile::production())
+            .unwrap();
+        assert_eq!(layout.input.instances.len(), 1);
+        assert_eq!(layout.input.root_dependencies.len(), 1);
+        assert_eq!(layout.input.root_dependencies[0].name.as_str(), "shared");
+        assert_eq!(prepared.selection.packages().len(), 2);
+        let activation =
+            crate::filesystem::activation::ActivationLock::acquire(project.path()).unwrap();
+        let stage = crate::application::install::stage_native_profile(
+            project.path(),
+            &prepared,
+            tapid_lockfile::InstallProfile::production(),
+            &activation,
+            |_| {},
+        )
+        .unwrap();
+        assert!(stage.join("node_modules/shared/package.json").is_file());
+        assert!(!stage.join("node_modules/tool").exists());
+        crate::filesystem::installed_profile::validate_profile(
+            &stage,
+            &prepared.selection,
+            &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            activation.owner_line(),
+        )
+        .unwrap();
+        fs::remove_dir_all(stage).unwrap();
+        assert!(
+            crate::application::install::stage_native_profile(
+                project.path(),
+                &prepared,
+                tapid_lockfile::InstallProfile::default(),
+                &activation,
+                |_| {},
+            )
+            .is_err()
+        );
+        fs::write(
+            receipt.tree.join("package/package.json"),
+            b"tampered after preparation",
+        )
+        .unwrap();
+        let error = crate::application::install::stage_native_profile(
+            project.path(),
+            &prepared,
+            tapid_lockfile::InstallProfile::production(),
+            &activation,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("tree changed"), "{error}");
+        assert!(!project.path().join("node_modules").exists());
+        drop(activation);
         let selection = prepared.selection.clone();
         let lock_bytes = selection.to_json().unwrap();
         project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
@@ -662,5 +816,158 @@ mod tests {
             error.to_string().contains("cannot read artifact"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn native_profile_layout_transitions_preserve_selection_and_rollback() {
+        use crate::filesystem::activation::{ActivationLock, activate_node_modules_with_preflight};
+        let project = tapid_test_support::TempProject::new("native-profile-transitions").unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/npm-import/registry.json"
+        ))
+        .unwrap();
+        let mut packages = BTreeMap::new();
+        let mut archives = BTreeMap::new();
+        let mut selected = Vec::new();
+        for version in ["1.0.0", "2.0.0"] {
+            let archive = fixture["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|package| package["name"] == "shared" && package["version"] == version)
+                .unwrap();
+            let key = LockfilePackageKey::new(
+                NPM.parse().unwrap(),
+                "shared".parse().unwrap(),
+                version.parse().unwrap(),
+                &Default::default(),
+                &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+            )
+            .to_string();
+            archives.insert(
+                key.clone(),
+                STANDARD
+                    .decode(
+                        archive["artifact"]
+                            .as_str()
+                            .unwrap()
+                            .strip_prefix("base64:")
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            );
+            packages.insert(
+                key.clone(),
+                NativeSelectedPackage {
+                    source_evidence: NativeSourceEvidence::Pending {
+                        artifact_url: format!("{NPM}/shared-{version}.tgz"),
+                        artifact_integrity: archive["integrity"].as_str().unwrap().into(),
+                    },
+                    dependencies: BTreeMap::new(),
+                    peer_providers: BTreeMap::new(),
+                },
+            );
+            selected.push(key);
+        }
+        let selection = NativeSelection::new(
+            "0".into(),
+            "0".into(),
+            format!("sha256-{}", "a".repeat(64)),
+            BTreeMap::new(),
+            vec![
+                NativeDeclaration {
+                    workspace: None,
+                    name: "runtime-alias".into(),
+                    kind: NativeDeclarationKind::Required,
+                    target: selected[0].clone(),
+                },
+                NativeDeclaration {
+                    workspace: None,
+                    name: "tool".into(),
+                    kind: NativeDeclarationKind::Dev,
+                    target: selected[1].clone(),
+                },
+            ],
+            packages,
+        )
+        .unwrap();
+        let bytes = selection.to_json().unwrap();
+        project.write("tapid.lock", bytes.as_bytes()).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let store = Store::new(project.path().join("store"));
+        for profile in [
+            tapid_lockfile::InstallProfile::default(),
+            tapid_lockfile::InstallProfile::production(),
+            tapid_lockfile::InstallProfile::default(),
+        ] {
+            let mut fetched = Vec::new();
+            let prepared = prepare_native_replay(&selection, &config, &store, profile, |key, _| {
+                fetched.push(key.to_string());
+                Ok(archives[&key.to_string()].clone())
+            })
+            .unwrap();
+            assert_eq!(fetched.len(), if profile.include_dev { 2 } else { 1 });
+            let activation = ActivationLock::acquire(project.path()).unwrap();
+            let stage = crate::application::install::stage_native_profile(
+                project.path(),
+                &prepared,
+                profile,
+                &activation,
+                |_| {},
+            )
+            .unwrap();
+            if !profile.include_dev {
+                assert!(
+                    activate_node_modules_with_preflight(
+                        project.path(),
+                        &stage,
+                        &activation,
+                        false,
+                        || Err("injected failure".into())
+                    )
+                    .is_err()
+                );
+                assert!(
+                    project
+                        .path()
+                        .join("node_modules/tool/package.json")
+                        .is_file()
+                );
+            }
+            activate_node_modules_with_preflight(
+                project.path(),
+                &stage,
+                &activation,
+                false,
+                || Ok(()),
+            )
+            .unwrap();
+            let installed = crate::filesystem::installed_profile::validate_profile(
+                project.path(),
+                &selection,
+                &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                activation.owner_line(),
+            )
+            .unwrap();
+            assert_eq!(installed, profile);
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(
+                    project
+                        .path()
+                        .join("node_modules/runtime-alias/package.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest["version"], "1.0.0");
+            assert_eq!(
+                project.path().join("node_modules/tool").exists(),
+                profile.include_dev
+            );
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                bytes.as_bytes()
+            );
+        }
     }
 }

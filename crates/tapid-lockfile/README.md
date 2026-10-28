@@ -66,7 +66,11 @@ separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.
 `new` accepts typed declaration, package, edge and source-evidence inputs;
 both it and `from_json` validate the complete selection, including omitted packages;
-`materialized_keys(InstallProfile)` returns exact retained keys without altering
+`materialized_declarations(InstallProfile)` and `materialized_dependencies(key,
+profile)` expose enabled local bindings, including exact peer providers, for
+layout planning. An omitted optional binding remains absent even if another
+enabled path retains its target. `materialized_keys(InstallProfile)` uses the
+same binding rules and returns exact retained keys without altering
 that selection. Optional declarations must already override regular declarations;
 dev declarations remain independent. Workspace declarations share the same
 profile, and local workspace records bind to declared member paths. Pending

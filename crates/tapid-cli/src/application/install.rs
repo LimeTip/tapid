@@ -1038,6 +1038,40 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     })
 }
 
+/// Stage source layouts and their descriptive profile together. This does not
+/// publish store content, authorize lifecycle outputs or activate project state.
+#[allow(dead_code)]
+pub(crate) fn stage_native_profile(
+    project: &Path,
+    prepared: &online::PreparedNativeProfile,
+    profile: tapid_lockfile::InstallProfile,
+    activation: &ActivationLock,
+    progress: impl FnMut(Progress),
+) -> Result<PathBuf, OperationalError> {
+    let layout = prepared.layout(profile)?;
+    let stage = stage_layout(
+        project,
+        project,
+        &layout.input,
+        &layout.trees,
+        &layout.workspace.links,
+        false,
+        activation,
+        progress,
+    )?;
+    if let Err(error) = crate::filesystem::installed_profile::stage_profile(
+        &stage,
+        &prepared.selection,
+        profile,
+        &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        activation.owner_line(),
+    ) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(OperationalError::new(ErrorKind::Materialization, error));
+    }
+    Ok(stage)
+}
+
 fn materialize_install(
     project_dir: &Path,
     input: NamedLayoutInput,
