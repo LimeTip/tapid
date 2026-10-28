@@ -169,3 +169,18 @@ An additional negative control at commit `15c82f428ab742b00a177c2101861897abef01
 The post-8cf2c84 Windows implementation embeds a Cargo-built stock-Node compatibility DLL and delegates finite exact read-attributes-only ancestor handles without shared ACL mutation. Integrated Node 22/24 IPC, native realpath, default test isolation and grandchild controls pass on Home build 26200; the real news-site CLI build/test pass. Receipts now disclose component identity and delegated metadata grants. Broader Windows and exact-head CI acceptance remain separate; see the updated Windows scope and standard-Node design.
 
 Hosted Windows Server testing exposed a denied `NUL` open while libuv prepares ignored stdin. The adapter now reuses a pinned copy of Tapid's existing closed stdin pipe for that exact read-only stdio request. It verifies EOF before initialization and propagates the non-inherited handle to suspended descendants. Live pipes, ordinary opens, and null-device writes are excluded; no system device ACL or filesystem grant changes. A forced-denial regression checks the fallback locally; hosted acceptance remains required.
+
+### Windows project-script dossier validation
+
+The [issue #157 candidate evidence checker and control inventory](windows-tapid-run-scope.md#candidate-evidence-checker-issue-157)
+provide a versioned, fail-closed structural check for collected evidence:
+
+```text
+node --experimental-strip-types scripts/windows-project-script-acceptance.ts evidence/report.json
+```
+
+A successful check validates supplied records and attachment hashes, not their
+native provenance. The Windows workload collector and missing controls listed in
+the inventory still need implementation. Native Windows 11 execution, official
+Node identity, actual CLI console Ctrl+C and separate ManagedTree observations
+remain required; a checker result cannot replace them.
