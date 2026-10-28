@@ -14,24 +14,25 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
-The runtime temporary directory must permit executing generated files. Unix
-installer, verified-tool, and package-bin tests directly execute fixture scripts
-after setting their executable bits. A `noexec` temporary mount causes
-`Permission denied` even when those bits are correct. In an isolated validation
-worker, provision a writable, execution-enabled scratch directory and export
-`TMPDIR` to it before starting Cargo. For example, when the build filesystem
-permits execution, run from the repository root:
+On Unix, the runtime temporary directory must permit executing fixture files.
+Installer, verified-tool, and package-bin tests deliberately launch freshly written scripts
+directly, so a `noexec` temporary mount produces `PermissionDenied` even with the
+correct executable mode. For an isolated worker with a non-executable default
+temporary mount, configure `TMPDIR` before starting Node/Cargo to an absolute,
+private directory on the worker's executable workspace filesystem. For example,
+from the repository root:
 
 ```sh
 mkdir -p target/test-tmp
-TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --all-features --locked
+chmod 700 target/test-tmp
+TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --lib --locked
 ```
 
-This changes fixture placement, not test behavior or containment policy. Do not
-invoke scripts through an interpreter to bypass direct-execution assertions or
-skip failed execution tests. A worker must permit executing its scratch files;
-changing `TMPDIR` cannot override a sandbox execution denial. Native containment
-tests still require the supported platform environment described below.
+This selects fixture storage through the existing runtime API; do not replace
+direct executable launches with shell invocations or skip execution assertions.
+If execution is still denied, inspect the worker mount/security policy before
+attributing the failure to executable permissions. This configuration does not
+supply native containment prerequisites or establish native platform support.
 
 Keep validation inside the isolated worker, without host credentials or an
 unsandboxed host fallback. Check both mount options and worker execution policy
@@ -41,7 +42,8 @@ containment behavior.
 
 ## Development prerequisites and build reuse
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
+Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,
+24, or 22), following the [repository support policy](../README.md#development).
 Rust owns package-manager behavior and security verification. TypeScript owns
 developer scripts, release orchestration, documentation checks, and website/consumer
 fixtures. Python and uv are not required to develop or test Tapid.
