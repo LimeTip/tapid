@@ -1,6 +1,10 @@
 use crate::application::outcome::{ErrorKind, OperationalError};
 use serde::Deserialize;
-use std::{collections::BTreeMap, env};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    path::Path,
+};
 use tapid_core::{PackageName, RegistryOrigin};
 
 const NPM: &str = "https://registry.npmjs.org";
@@ -34,18 +38,57 @@ pub(crate) struct RegistryRoute {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RegistryConfig {
     routes: BTreeMap<String, RegistryEntry>,
+    route_layers: BTreeMap<String, &'static str>,
+    credential_names: BTreeSet<String>,
 }
 
 impl RegistryConfig {
+    /// Resolve selected filenames in increasing precedence, validating even shadowed
+    /// documents. Location discovery belongs to the caller; this never reads tokens.
+    pub(crate) fn load_layers(
+        user: Option<&Path>,
+        project: Option<&Path>,
+        explicit: Option<&Path>,
+    ) -> Result<Self, String> {
+        let mut effective = Self::default();
+        for (layer, path, optional) in [
+            ("user", user, true),
+            ("project", project, true),
+            ("explicit", explicit, false),
+        ] {
+            let Some(path) = path else { continue };
+            let Some(input) = Self::read_layer(path, optional)? else {
+                continue;
+            };
+            let input = std::str::from_utf8(&input)
+                .map_err(|_| "registry configuration is not valid UTF-8".to_owned())?;
+            let document: RegistryDocument =
+                toml::from_str(input).map_err(|_| "invalid registry configuration".to_owned())?;
+            if layer != "project" && document._run.is_some() {
+                return Err("global registry configuration cannot contain run policy".into());
+            }
+            let config = Self::from_document(document)?;
+            effective.credential_names.extend(config.credential_names);
+            for (scope, entry) in config.routes {
+                effective.route_layers.insert(scope.clone(), layer);
+                effective.routes.insert(scope, entry);
+            }
+        }
+        Ok(effective)
+    }
+
     pub(crate) fn load(project: &std::path::Path) -> Result<Self, String> {
-        let path = project.join("tapid.toml");
+        Self::load_layers(None, Some(&project.join("tapid.toml")), None)
+    }
+
+    fn read_layer(path: &Path, optional: bool) -> Result<Option<Vec<u8>>, String> {
         let input =
-            match crate::filesystem::read::read_bounded_file(&path, MAX_CONFIG_BYTES as usize) {
+            match crate::filesystem::read::read_bounded_file(path, MAX_CONFIG_BYTES as usize) {
                 Ok(bytes) => bytes,
                 Err(crate::filesystem::read::ReadError::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound =>
+                    if optional && error.kind() == std::io::ErrorKind::NotFound =>
                 {
-                    return Ok(Self::default());
+                    return Ok(None);
                 }
                 Err(crate::filesystem::read::ReadError::CapacityExceeded) => {
                     return Err(
@@ -53,11 +96,11 @@ impl RegistryConfig {
                             .into(),
                     );
                 }
-                Err(crate::filesystem::read::ReadError::Io(error)) => {
-                    return Err(format!("cannot read registry configuration: {error}"));
+                Err(crate::filesystem::read::ReadError::Io(_)) => {
+                    return Err("cannot read registry configuration".into());
                 }
             };
-        Self::parse_toml_bytes(&input)
+        Ok(Some(input))
     }
 
     pub(crate) fn parse_toml_bytes(input: &[u8]) -> Result<Self, String> {
@@ -69,29 +112,40 @@ impl RegistryConfig {
     fn parse(input: &str) -> Result<Self, String> {
         let document: RegistryDocument =
             toml::from_str(input).map_err(|_| "invalid registry configuration".to_owned())?;
+        Self::from_document(document)
+    }
+
+    fn from_document(document: RegistryDocument) -> Result<Self, String> {
         let mut routes = BTreeMap::new();
         for (scope, entry) in document.registries {
             if scope != "default" && !valid_scope(&scope) {
-                return Err(format!("invalid registry scope {scope:?}"));
+                return Err("invalid registry scope".into());
             }
-            let origin: RegistryOrigin = entry.url.parse().map_err(|_| {
-                format!("registry URL for {scope:?} must be a canonical HTTPS origin")
-            })?;
+            let origin: RegistryOrigin = entry
+                .url
+                .parse()
+                .map_err(|_| "registry URL must be a canonical HTTPS origin".to_owned())?;
             if origin.to_string() != entry.url {
-                return Err(format!("registry URL for {scope:?} must be canonical"));
+                return Err("registry URL must be canonical".into());
             }
             if entry
                 .token_env
                 .as_deref()
                 .is_some_and(|name| !valid_env_name(name))
             {
-                return Err(format!(
-                    "invalid credential environment variable name for {scope:?}"
-                ));
+                return Err("invalid credential environment variable name".into());
             }
             routes.insert(scope, entry);
         }
-        Ok(Self { routes })
+        let credential_names = routes
+            .values()
+            .filter_map(|entry| entry.token_env.clone())
+            .collect();
+        Ok(Self {
+            routes,
+            credential_names,
+            route_layers: BTreeMap::new(),
+        })
     }
 
     fn selected_entry<'a>(&'a self, name: &PackageName) -> (Option<&'a RegistryEntry>, &'a str) {
@@ -197,7 +251,8 @@ impl RegistryConfig {
     /// values, network reachability, or authentication success are established.
     pub(crate) fn inspection(&self) -> serde_json::Value {
         let routes = self.routes.iter().map(|(scope, entry)| serde_json::json!({
-            "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env
+            "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env,
+            "layer": self.route_layers.get(scope).copied().unwrap_or("project")
         })).collect::<Vec<_>>();
         serde_json::json!({
             "origins": self.configured_origins(),
@@ -237,10 +292,7 @@ impl RegistryConfig {
 
     /// Return configured token variable names without reading their values.
     pub(crate) fn credential_environment_names(&self) -> Vec<String> {
-        self.routes
-            .values()
-            .filter_map(|entry| entry.token_env.clone())
-            .collect()
+        self.credential_names.iter().cloned().collect()
     }
 
     pub(crate) fn allowlist_contains_registry_credentials(
@@ -248,15 +300,13 @@ impl RegistryConfig {
         names: &[String],
         case_insensitive: bool,
     ) -> bool {
-        self.routes.values().any(|entry| {
-            entry.token_env.as_ref().is_some_and(|credential_name| {
-                names.iter().any(|name| {
-                    if case_insensitive {
-                        name.eq_ignore_ascii_case(credential_name)
-                    } else {
-                        name == credential_name
-                    }
-                })
+        self.credential_names.iter().any(|credential_name| {
+            names.iter().any(|name| {
+                if case_insensitive {
+                    name.eq_ignore_ascii_case(credential_name)
+                } else {
+                    name == credential_name
+                }
             })
         })
     }
@@ -310,6 +360,107 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    #[test]
+    fn layered_configuration_validates_shadowed_input_without_disclosing_it() {
+        let project = tapid_test_support::TempProject::new("registry-hostile-layer").unwrap();
+        let user = project
+            .write(
+                "user.toml",
+                b"[registries.'secret-sentinel']\nurl='https://user.example'\n",
+            )
+            .unwrap();
+        let explicit = project
+            .write(
+                "explicit.toml",
+                b"[registries.default]\nurl='https://explicit.example'\n",
+            )
+            .unwrap();
+        let error = RegistryConfig::load_layers(Some(&user), None, Some(&explicit)).unwrap_err();
+        assert!(!error.contains("secret-sentinel"));
+    }
+
+    #[test]
+    fn layered_configuration_preserves_scope_isolation_and_optional_absence() {
+        let project = tapid_test_support::TempProject::new("registry-scopes").unwrap();
+        let user = project.write("user.toml", b"[registries.default]\nurl='https://user.example'\ntoken-env='USER_TOKEN'\n[registries.'@acme']\nurl='https://scope.example'\n").unwrap();
+        let selected = project
+            .write(
+                "tapid.toml",
+                b"[registries.default]\nurl='https://project.example'\n",
+            )
+            .unwrap();
+        let config = RegistryConfig::load_layers(Some(&user), Some(&selected), None).unwrap();
+        assert_eq!(
+            config
+                .route_with_env("@acme/widget", |_| panic!("no inherited credential"))
+                .unwrap()
+                .origin
+                .to_string(),
+            "https://scope.example"
+        );
+        assert_eq!(
+            config.origin_for("widget").unwrap().to_string(),
+            "https://project.example"
+        );
+        assert_eq!(config.inspection()["routes"][0]["layer"], "user");
+        let missing = project.path().join("absent.toml");
+        let defaults = RegistryConfig::load_layers(Some(&missing), Some(&missing), None).unwrap();
+        assert_eq!(defaults.origin_for("widget").unwrap().to_string(), NPM);
+        assert!(RegistryConfig::load_layers(None, None, Some(&missing)).is_err());
+    }
+
+    #[test]
+    fn global_configuration_rejects_execution_authority_and_unknown_fields() {
+        let project = tapid_test_support::TempProject::new("registry-authority").unwrap();
+        for input in [
+            b"[run.defaults]\nnetwork=true\n".as_slice(),
+            b"[unknown]\nenabled=true\n",
+        ] {
+            let path = project.write("global.toml", input).unwrap();
+            assert!(RegistryConfig::load_layers(Some(&path), None, None).is_err());
+            assert!(RegistryConfig::load_layers(None, None, Some(&path)).is_err());
+        }
+        let path = project
+            .write("tapid.toml", b"[run.defaults]\nnetwork=false\n")
+            .unwrap();
+        assert!(RegistryConfig::load_layers(None, Some(&path), None).is_ok());
+    }
+
+    #[test]
+    fn layered_registry_replacement_drops_lower_token() {
+        let project = tapid_test_support::TempProject::new("registry-layers").unwrap();
+        let user = project
+            .write(
+                "user.toml",
+                b"[registries.default]\nurl='https://user.example'\ntoken-env='USER_TOKEN'\n",
+            )
+            .unwrap();
+        let selected = project
+            .write(
+                "tapid.toml",
+                b"[registries.default]\nurl='https://project.example'\ntoken-env='PROJECT_TOKEN'\n",
+            )
+            .unwrap();
+        let explicit = project
+            .write(
+                "explicit.toml",
+                b"[registries.default]\nurl='https://explicit.example'\n",
+            )
+            .unwrap();
+        let config =
+            RegistryConfig::load_layers(Some(&user), Some(&selected), Some(&explicit)).unwrap();
+        let route = config
+            .route_with_env("widget", |_| panic!("replacement must remove credentials"))
+            .unwrap();
+        assert_eq!(route.origin.to_string(), "https://explicit.example");
+        assert!(route.token.is_none());
+        assert_eq!(
+            config.credential_environment_names(),
+            vec!["PROJECT_TOKEN", "USER_TOKEN"]
+        );
+        assert!(config.allowlist_contains_registry_credentials(&["user_token".into()], true));
+        assert_eq!(config.inspection()["routes"][0]["layer"], "explicit");
+    }
     static NEXT_TEST_PROJECT: AtomicU64 = AtomicU64::new(0);
 
     struct TestProject(PathBuf);
