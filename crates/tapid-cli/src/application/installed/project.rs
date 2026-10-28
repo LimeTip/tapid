@@ -154,7 +154,7 @@ impl ProjectEvidence {
             crate::application::replay::current_platform(),
         )
         .map_err(SelectionError::InvalidMapping)?;
-        let bindings = if let Some(member) = member {
+        let mut bindings = if let Some(member) = member {
             self.lock
                 .workspace_packages_typed()
                 .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?
@@ -208,7 +208,20 @@ impl ProjectEvidence {
                 })
                 .collect::<Result<BTreeMap<_, _>, SelectionError>>()?
         };
+        // Workspace roots are represented by roots, independently of immutable
+        // root alias bindings. Observation already validated their declarations.
+        if member.is_none() {
+            for target in self.lock.roots() {
+                let key = target
+                    .parse::<tapid_lockfile::LockfilePackageKey>()
+                    .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?;
+                if let Some(source) = key.source.workspace() {
+                    bindings.insert(source.name().into(), target.clone());
+                }
+            }
+        }
         let mut allowed = std::collections::BTreeSet::new();
+        let mut eligible_links = tapid_linker::WorkspaceLinkPlan::default();
         for (name, target) in bindings {
             let key = target
                 .parse::<tapid_lockfile::LockfilePackageKey>()
@@ -228,6 +241,24 @@ impl ProjectEvidence {
                         .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?,
                 };
                 allowed.insert((name, owner));
+            } else if let Some(source) = key.source.workspace() {
+                let expected = self.root.join(source.path());
+                let link = workspace_plan
+                    .links
+                    .links
+                    .iter()
+                    .find(|link| {
+                        link.name.as_str() == name
+                            && link.name.as_str() == source.name()
+                            && link.version.to_string() == source.version()
+                            && link.source == expected
+                    })
+                    .ok_or_else(|| {
+                        SelectionError::InconsistentInstallation(
+                            "workspace binding has no exact managed link".into(),
+                        )
+                    })?;
+                eligible_links.links.push(link.clone());
             }
         }
         let mut eligible_input = input.clone();
@@ -236,6 +267,7 @@ impl ProjectEvidence {
             .retain(|binding| allowed.contains(&(binding.name.to_string(), binding.child.clone())));
         let selection = super::selection::select_manifest_command(
             &eligible_input,
+            &eligible_links,
             manifest,
             package,
             command,
@@ -422,12 +454,30 @@ mod tests {
     fn root_coordinated_workspace_observation_never_creates_member_lock_and_rechecks_state() {
         let project = TempProject::new("exec-member-observation").unwrap();
         let home = TempHome::new("exec-member-store").unwrap();
-        let manifest = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
+        let manifest = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"member":"workspace:*"}}"#;
         project.write("package.json", manifest).unwrap();
         project
             .write(
                 "packages/member/package.json",
-                br#"{"name":"member","version":"1.0.0"}"#,
+                br#"{"name":"member","version":"1.0.0","bin":{"local-tool":"cli.js"}}"#,
+            )
+            .unwrap();
+        project
+            .write("packages/member/cli.js", b"console.log(1);\n")
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                project.path().join("packages/member/cli.js"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        project
+            .write(
+                "packages/consumer/package.json",
+                br#"{"name":"consumer","version":"1.0.0","dependencies":{"member":"workspace:*"}}"#,
             )
             .unwrap();
         let workspace =
@@ -445,9 +495,7 @@ mod tests {
             .iter()
             .map(|member| member.key())
             .collect::<Vec<_>>();
-        for member in local.locked {
-            lock.insert_workspace_package(member).unwrap();
-        }
+        lock.insert_graph([], local.locked).unwrap();
         lock.set_roots(roots).unwrap();
         project
             .write("tapid.lock", lock.to_json().unwrap().as_bytes())
@@ -517,6 +565,32 @@ mod tests {
         )
         .unwrap();
         evidence.verify_native_layout().unwrap();
+        let member_selected = evidence
+            .select_native_command(Some("consumer"), Some("member"), "local-tool")
+            .unwrap();
+        assert_eq!(
+            member_selected.entry,
+            evidence.root.join("packages/member/cli.js")
+        );
+        let selected = evidence
+            .select_native_command(None, Some("member"), "local-tool")
+            .unwrap();
+        assert_eq!(selected.entry, evidence.root.join("packages/member/cli.js"));
+        assert!(matches!(
+            selected.selection.owner,
+            super::super::selection::CommandOwner::Workspace(_)
+        ));
+        assert!(matches!(
+            evidence.select_native_command(Some("member"), Some("member"), "local-tool"),
+            Err(super::super::selection::SelectionError::InvalidPackageSelection(_))
+        ));
+        // The provenance deliberately does not authenticate mutable source bytes.
+        project
+            .write("packages/member/cli.js", b"console.log(2);\n")
+            .unwrap();
+        evidence
+            .select_native_command(None, Some("member"), "local-tool")
+            .unwrap();
         project
             .write("packages/member/node_modules/unplanned.js", b"unexpected")
             .unwrap();
@@ -673,6 +747,7 @@ mod tests {
                 &local.links,
                 super::super::selection::select_manifest_command(
                     &input,
+                    &Default::default(),
                     evidence.workspace.root(),
                     Some("alias"),
                     "tool",
@@ -692,7 +767,9 @@ mod tests {
             selected.entry,
             evidence.root.join("node_modules/alias/cli.js")
         );
-        assert_eq!(selected.selection.owner.id.name.as_str(), "actual");
+        assert!(
+            matches!(&selected.selection.owner, super::super::selection::CommandOwner::Authenticated(owner) if owner.id.name.as_str() == "actual")
+        );
         let member_command = evidence
             .select_native_command(Some("member"), None, "member-tool")
             .unwrap();

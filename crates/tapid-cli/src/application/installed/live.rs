@@ -1,4 +1,4 @@
-use super::selection::{SelectedCommand, SelectionError};
+use super::selection::{CommandOwner, SelectedCommand, SelectionError};
 use std::path::{Path, PathBuf};
 use tapid_linker::{MaterializationPlan, NamedLayoutInput, WorkspaceLinkPlan};
 
@@ -31,6 +31,33 @@ pub(super) fn bind_live_command(
         links,
     )
     .map_err(SelectionError::InconsistentInstallation)?;
+    if let CommandOwner::Workspace(link) = &selection.owner {
+        if links
+            .links
+            .iter()
+            .filter(|candidate| *candidate == link)
+            .count()
+            != 1
+        {
+            return Err(SelectionError::InconsistentInstallation(
+                "selected workspace placement differs".into(),
+            ));
+        }
+        let source = std::fs::canonicalize(&link.source)
+            .map_err(|e| SelectionError::InconsistentInstallation(e.to_string()))?;
+        if source != link.source || !source.starts_with(workspace_root) || source == workspace_root
+        {
+            return Err(SelectionError::InconsistentInstallation(
+                "workspace owner escapes project".into(),
+            ));
+        }
+        let entry = source.join(&selection.relative_entry);
+        super::selection::validate_selected_entry(&selection.owner, &entry)?;
+        return Ok(LiveCommand { selection, entry });
+    }
+    let CommandOwner::Authenticated(owner) = &selection.owner else {
+        unreachable!()
+    };
     let target = project.join("node_modules").join(
         selection
             .install_name
@@ -54,7 +81,7 @@ pub(super) fn bind_live_command(
     let instance = input
         .instances
         .iter()
-        .find(|instance| tapid_linker::InstanceKey::from(*instance) == selection.owner)
+        .find(|instance| tapid_linker::InstanceKey::from(*instance) == *owner)
         .ok_or_else(|| {
             SelectionError::InconsistentInstallation("selected owner is missing".into())
         })?;
@@ -66,9 +93,9 @@ pub(super) fn bind_live_command(
         SelectionError::InconsistentInstallation("selected placement source is missing".into())
     })?;
     if entries.next().is_some()
-        || entry.instance != selection.owner.id
-        || entry.peer_context != selection.owner.peer_context.to_string()
-        || entry.platform_context != selection.owner.platform_context.to_string()
+        || entry.instance != owner.id
+        || entry.peer_context != owner.peer_context.to_string()
+        || entry.platform_context != owner.platform_context.to_string()
         || entry.source != instance.tree.root
     {
         return Err(SelectionError::InconsistentInstallation(

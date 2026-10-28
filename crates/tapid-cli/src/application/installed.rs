@@ -149,6 +149,7 @@ mod tests {
                 &tapid_linker::WorkspaceLinkPlan::default(),
                 selection::select_manifest_command(
                     &input,
+                    &Default::default(),
                     &manifest,
                     Some("local"),
                     "tool",
@@ -169,7 +170,9 @@ mod tests {
             selected.entry,
             project.path().join("node_modules/local/cli.js")
         );
-        assert_eq!(selected.selection.owner.id.name.as_str(), "tool");
+        assert!(
+            matches!(&selected.selection.owner, selection::CommandOwner::Authenticated(owner) if owner.id.name.as_str() == "tool")
+        );
         let mut foreign_plan = plan.clone();
         foreign_plan.entries[0].instance.name = "foreign".parse().unwrap();
         assert!(
@@ -181,6 +184,7 @@ mod tests {
                 &tapid_linker::WorkspaceLinkPlan::default(),
                 selection::select_manifest_command(
                     &input,
+                    &Default::default(),
                     &manifest,
                     Some("local"),
                     "tool",
