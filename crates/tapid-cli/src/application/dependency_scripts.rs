@@ -1,3 +1,5 @@
+#[path = "dependency_inputs.rs"]
+mod inputs;
 #[path = "dependency_node_gyp.rs"]
 mod node_gyp;
 
@@ -111,29 +113,19 @@ pub(super) fn apply(
         }
     }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
-    let order = if policy.approvals().is_empty() && !overrides.allow_unapproved {
-        lock.packages().keys().cloned().collect()
+    let dependency_inputs = if policy.approvals().is_empty() && !overrides.allow_unapproved {
+        None
     } else {
-        dependency_order(lock)?
+        Some(inputs::DependencyInputs::new(lock)?)
     };
+    let order = dependency_inputs.as_ref().map_or_else(
+        || lock.packages().keys().cloned().collect(),
+        |graph| graph.order.clone(),
+    );
     let mut system_identity = None;
     for key in order {
         let package = lock.packages()[&key].clone();
-        let typed: tapid_lockfile::LockfilePackageKey = key.parse().map_err(error)?;
-        let peer_context = typed.peer_context().map_err(error)?;
-        let platform_context = typed.platform_context().map_err(error)?;
-        let identity = tapid_linker::InstanceKey {
-            id: tapid_core::PackageInstanceId::from_source(
-                typed
-                    .source
-                    .package_source()
-                    .ok_or_else(|| error("lifecycle package has no artifact source"))?,
-                typed.name,
-                typed.version,
-            ),
-            peer_context,
-            platform_context,
-        };
+        let identity = inputs::identity(&key)?;
         let index = *instance_indices
             .get(&identity)
             .filter(|&&index| trees.get(&key) == Some(&input.instances[index].tree.root))
@@ -269,6 +261,15 @@ pub(super) fn apply(
                     "approved dependency scripts require registry-declared archive integrity",
                 ));
             }
+            let projected = if approval.dependencies() {
+                dependency_inputs.as_ref().unwrap().layout(&key, input)?
+            } else {
+                NamedLayoutInput {
+                    instances: vec![],
+                    root_dependencies: vec![],
+                    dependency_edges: vec![],
+                }
+            };
             if overrides.enabled() {
                 if !online {
                     return Err(error(
@@ -292,9 +293,8 @@ pub(super) fn apply(
                     stage,
                     approval,
                     &script,
-                    input,
+                    &projected,
                     trees,
-                    lock,
                     overrides.without_containment,
                     selected.is_none() && requires_install && hook == "install",
                     &mut failure_reason,
@@ -343,8 +343,13 @@ pub(super) fn apply(
                         Some("tool_verification_failed"),
                     );
                 })?;
-            let graph =
-                serde_json::to_string(&(&source_graph, &completed, &outputs)).map_err(error)?;
+            let graph = dependency_inputs.as_ref().unwrap().evidence(
+                &key,
+                approval.dependencies(),
+                &source_graph,
+                &completed,
+                &outputs,
+            )?;
             let recipe = policy.derived_key(approval, &toolchain, &graph);
             let previous = cached
                 .as_ref()
@@ -408,9 +413,8 @@ pub(super) fn apply(
                 stage,
                 approval,
                 &script,
-                input,
+                &projected,
                 trees,
-                lock,
                 false,
                 false,
                 &mut failure_reason,
@@ -470,40 +474,6 @@ pub(super) fn apply(
     Ok(())
 }
 
-fn dependency_order(lock: &Lockfile) -> Result<Vec<String>, OperationalError> {
-    fn visit(
-        key: &str,
-        lock: &Lockfile,
-        active: &mut BTreeSet<String>,
-        done: &mut BTreeSet<String>,
-        order: &mut Vec<String>,
-    ) -> Result<(), OperationalError> {
-        if done.contains(key) {
-            return Ok(());
-        }
-        if active.len() >= 1024 || !active.insert(key.into()) {
-            return Err(error(
-                "approved dependency lifecycle graphs must be acyclic and no deeper than 1024 packages",
-            ));
-        }
-        for child in lock.packages()[key].dependencies().values() {
-            if lock.packages().contains_key(child) {
-                visit(child, lock, active, done, order)?;
-            }
-        }
-        active.remove(key);
-        done.insert(key.into());
-        order.push(key.into());
-        Ok(())
-    }
-    let mut order = Vec::new();
-    let mut done = BTreeSet::new();
-    let mut active = BTreeSet::new();
-    for key in lock.packages().keys() {
-        visit(key, lock, &mut active, &mut done, &mut order)?;
-    }
-    Ok(order)
-}
 pub(super) struct BuildStage(PathBuf);
 impl BuildStage {
     fn new(
@@ -630,7 +600,6 @@ fn run_hook(
     script: &str,
     input: &NamedLayoutInput,
     trees: &BTreeMap<String, PathBuf>,
-    lock: &Lockfile,
     without_containment: bool,
     implicit_node_gyp: bool,
     failure_reason: &mut &'static str,
@@ -688,11 +657,6 @@ fn run_hook(
         }
     }
     if approval.dependencies() {
-        if !lock.workspace_packages().is_empty() {
-            return Err(error(
-                "dependency lifecycle scripts cannot read live workspace packages; use published verified dependencies",
-            ));
-        }
         let plan = tapid_linker::plan_named_layout(
             tapid_linker::ManagedRoot::new(&stage.0).map_err(error)?,
             input.clone(),

@@ -3,8 +3,14 @@ use super::*;
 #[test]
 fn lifecycle_rebuild_baseline_install_and_update_have_no_exact_force_interface() {
     let fixture = command_support::CliFixture::new("rebuild-baseline-interface");
-    fixture.project.write("package.json", b"invalid manifest").unwrap();
-    fixture.project.write("tapid.lock", b"unchanged lock").unwrap();
+    fixture
+        .project
+        .write("package.json", b"invalid manifest")
+        .unwrap();
+    fixture
+        .project
+        .write("tapid.lock", b"unchanged lock")
+        .unwrap();
     for args in [
         vec!["install", "--force"],
         vec!["update", "native-demo", "--force"],
@@ -14,8 +20,14 @@ fn lifecycle_rebuild_baseline_install_and_update_have_no_exact_force_interface()
         let result = fixture.command(&args).output().unwrap();
         assert_eq!(result.status.code(), Some(2), "{result:?}");
         assert!(String::from_utf8_lossy(&result.stderr).contains("unexpected argument"));
-        assert_eq!(fs::read(fixture.project.path().join("package.json")).unwrap(), b"invalid manifest");
-        assert_eq!(fs::read(fixture.project.path().join("tapid.lock")).unwrap(), b"unchanged lock");
+        assert_eq!(
+            fs::read(fixture.project.path().join("package.json")).unwrap(),
+            b"invalid manifest"
+        );
+        assert_eq!(
+            fs::read(fixture.project.path().join("tapid.lock")).unwrap(),
+            b"unchanged lock"
+        );
         assert!(!fixture.project.path().join("node_modules").exists());
     }
 }
@@ -25,23 +37,48 @@ fn lifecycle_rebuild_baseline_named_update_resolves_new_versions_within_requirem
     let fixture = command_support::CliFixture::new("rebuild-baseline-update");
     let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"b":"^1.0.0"}}"#;
     fixture.project.write("package.json", manifest).unwrap();
-    let mut registry: serde_json::Value = serde_json::from_slice(include_bytes!("../fixtures/aliased-root-cycle.json")).unwrap();
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/aliased-root-cycle.json")).unwrap();
     let mut package = registry["packages"][1].clone();
     package["dependencies"] = serde_json::json!({});
     registry["packages"] = serde_json::json!([package.clone()]);
-    fixture.project.write("registry.json", &serde_json::to_vec(&registry).unwrap()).unwrap();
-    let installed = fixture.command(&["install", "--registry-fixture", "registry.json"]).output().unwrap();
+    fixture
+        .project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let installed = fixture
+        .command(&["install", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
     assert!(installed.status.success(), "{installed:?}");
-    let before = Lockfile::from_json(&fs::read_to_string(fixture.project.path().join("tapid.lock")).unwrap()).unwrap();
-    assert_eq!(before.packages().values().next().unwrap().version(), "1.0.0");
+    let before = Lockfile::from_json(
+        &fs::read_to_string(fixture.project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        before.packages().values().next().unwrap().version(),
+        "1.0.0"
+    );
     package["version"] = "1.1.0".into();
     registry["packages"].as_array_mut().unwrap().push(package);
-    fixture.project.write("registry.json", &serde_json::to_vec(&registry).unwrap()).unwrap();
-    let updated = fixture.command(&["update", "b", "--registry-fixture", "registry.json"]).output().unwrap();
+    fixture
+        .project
+        .write("registry.json", &serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let updated = fixture
+        .command(&["update", "b", "--registry-fixture", "registry.json"])
+        .output()
+        .unwrap();
     assert!(updated.status.success(), "{updated:?}");
-    let after = Lockfile::from_json(&fs::read_to_string(fixture.project.path().join("tapid.lock")).unwrap()).unwrap();
+    let after = Lockfile::from_json(
+        &fs::read_to_string(fixture.project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(after.packages().values().next().unwrap().version(), "1.1.0");
-    assert_eq!(fs::read(fixture.project.path().join("package.json")).unwrap(), manifest);
+    assert_eq!(
+        fs::read(fixture.project.path().join("package.json")).unwrap(),
+        manifest
+    );
 }
 
 #[test]
