@@ -1,5 +1,25 @@
 # Implementation validation — 2026-10-28
 
+## Named-update preparation check
+
+Added an offline check through `uptimeKumaRun` and `evaluate` that executes only
+the local update-declaration phase. It verifies parseable JSON, the exact Day.js
+target, preservation of another dependency, and a trailing newline. The suspected
+escaping defect did not reproduce: the existing implementation passed unchanged.
+No npm, Tapid or application code runs in this check.
+
+Fresh focused capture/comparator validation with the supplied absolute Node 22.23.3
+and explicit PATH: 23 tests, 22 passed, one existing native-probe skip, zero failures.
+The full TypeScript lane (`tests/*_test.ts tools/release/*_test.ts`) then passed:
+430 tests, 410 passed, 20 skipped, zero failures, 103,659 ms. The entire pending
+diff and `git diff --check` were reviewed successfully. No Rust source changed.
+The default Docker API still fails because `/var/run/docker.sock` is absent; the
+configured Colima socket is also absent. A public registry metadata request returned
+HTTP 200. Tool discovery supplied no disposable application execution service.
+No configured engine validation command or source-matched receipt was supplied.
+These local checks do not establish an external journey or replace native platform
+and qualified lifecycle evidence. Zero completed external journeys remain claimed.
+
 ## Disposable execution recheck
 
 At source HEAD `5657bec`, the worktree was clean before this evidence-only update.

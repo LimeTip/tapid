@@ -7,6 +7,30 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { evaluate } from '../scripts/evaluate-adoption.ts';
 
+test('pilot named update leaves a valid manifest with only the selected dependency changed', async () => {
+  const { uptimeKumaRun } = await import('../scripts/evaluate-uptime-kuma.ts');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'adoption-update-'));
+  const source = join(dir, 'source'), root = join(dir, 'run');
+  mkdirSync(source);
+  mkdirSync(join(root, 'update'), { recursive: true });
+  const manifest = { name: 'local-fixture', dependencies: { dayjs: '~1.11.5', other: '2.0.0' } };
+  const file = join(root, 'update', 'package.json');
+  writeFileSync(file, JSON.stringify(manifest));
+  try {
+    const spec = uptimeKumaRun({ source, root, node: process.execPath,
+      npmCli: join(dir, 'unused-npm.js'), tapid: process.execPath,
+      tapidRevision: 'a'.repeat(40), env: {} });
+    const phase = spec.phases.find(p => p.id === 'update-declaration')!;
+    const result = await evaluate({ ...spec, phases: [{ ...phase, prerequisites: [] }] });
+    assert.equal(result.phases[0].outcome, 'passed');
+    const bytes = readFileSync(file, 'utf8');
+    assert.deepEqual(JSON.parse(bytes), { ...manifest,
+      dependencies: { dayjs: '1.11.14', other: '2.0.0' } });
+    assert.ok(bytes.endsWith('\n'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('pilot rollback preserves the checkpoint when retained inputs changed', async () => {
   const { uptimeKumaRun } = await import('../scripts/evaluate-uptime-kuma.ts');
   const { mkdirSync, writeFileSync } = await import('node:fs');
