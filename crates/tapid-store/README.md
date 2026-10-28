@@ -35,3 +35,9 @@ The returned guard's `verified_tree_path` authenticates the canonical digest
 under that held lock, without nested acquisition or recovery. Keep the guard
 alive while consuming the path; it coordinates cooperating store operations,
 not arbitrary concurrent host writes.
+
+`StoreReadGuard::verified_lifecycle_tree_path` authenticates the recipe/output
+attestation with the existing owner-only key, then verifies the output tree
+under the same retained lock. Unlike replay snapshot creation, it creates no
+key, reservation, lease, or copy. Missing authentication material or evicted
+output trees fail explicitly; verification never regenerates lifecycle output.
