@@ -26,3 +26,12 @@ Lifecycle outputs carry store-local HMAC-SHA256 attestations over their recipe a
 `Store::cache_info` reports counts and logical byte sizes for published digest-named artifacts and marked trees without creating files or recovering transactions. `Store::clean_cache` explicitly evicts that recognized data under an exclusive store lock. Staging, lifecycle keys, journals, and unrecognized entries remain with their owners. Maintenance refuses busy locks, symlinked roots/namespaces/locks, pending recovery, and populated stores without a lock. Artifact ingestion also holds the store lock, so eviction cannot race publication. A `CacheCleanup` error means eviction started and may have removed some data; retry is safe. Installed project materializations and authoritative lockfiles are not cache data.
 
 Cache maintenance pins the store root and cache namespaces before traversal. Unix traversal and recursive removal use descriptor-relative no-follow operations. Windows holds directory and ancestor handles without delete sharing, rejects reparse points during traversal, and deletes entries through their own handles. Candidate identities are checked before deletion, so a swapped parent cannot redirect cleanup outside the inspected directories.
+
+`Store::existing_read_guard` acquires a shared lock only when the store root and
+regular lock file already exist. It reuses cache maintenance's pinned no-follow
+access, rejects busy writers and pending transaction journals, and never creates
+or recovers store state. It does not itself authenticate package contents.
+The returned guard's `verified_tree_path` authenticates the canonical digest
+under that held lock, without nested acquisition or recovery. Keep the guard
+alive while consuming the path; it coordinates cooperating store operations,
+not arbitrary concurrent host writes.

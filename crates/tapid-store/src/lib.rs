@@ -71,6 +71,16 @@ pub enum IngestResult {
 /// Holds a shared store lock while callers consume paths returned by `Store`.
 pub struct StoreReadGuard {
     _file: File,
+    store: Store,
+}
+
+impl StoreReadGuard {
+    /// Authenticate a tree under this guard's existing lock, without acquiring
+    /// another lock, creating state, or attempting transaction recovery.
+    /// Keep this guard alive while consuming the returned path.
+    pub fn verified_tree_path(&self, digest: &ArtifactDigest) -> Result<PathBuf, IngestError> {
+        self.store.verified_tree_path_unlocked(digest)
+    }
 }
 
 /// Stages verified trees privately until they are published as one transaction.
@@ -160,6 +170,7 @@ impl Store {
     pub fn read_guard(&self) -> Result<StoreReadGuard, IngestError> {
         Ok(StoreReadGuard {
             _file: lock_file(&self.root, false)?,
+            store: self.clone(),
         })
     }
 

@@ -1357,3 +1357,75 @@ fn snapshot_drop_preserves_a_replaced_reservation() {
     drop(snapshot);
     assert_eq!(fs::read(reservation.join("replacement")).unwrap(), b"keep");
 }
+
+#[test]
+fn existing_read_guard_never_initializes_or_recovers_store() {
+    let project = tapid_test_support::TempProject::new("existing-store-guard").unwrap();
+    let root = project.path().join("store");
+    let store = Store::new(&root);
+    assert!(store.existing_read_guard().is_err());
+    assert!(!root.exists());
+    fs::create_dir(&root).unwrap();
+    assert!(store.existing_read_guard().is_err());
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::write(root.join(".store.lock"), b"").unwrap();
+    let guard = store.existing_read_guard().unwrap();
+    assert!(FileExt::try_lock(&File::open(root.join(".store.lock")).unwrap()).is_err());
+    drop(guard);
+    fs::write(root.join(STORE_JOURNAL), b"pending").unwrap();
+    assert!(store.existing_read_guard().is_err());
+    assert_eq!(fs::read(root.join(STORE_JOURNAL)).unwrap(), b"pending");
+    assert_eq!(fs::read(root.join(".store.lock")).unwrap(), b"");
+}
+
+#[test]
+fn existing_read_guard_rejects_busy_and_unsafe_coordination() {
+    let project = tapid_test_support::TempProject::new("existing-store-lock").unwrap();
+    let store = Store::new(project.path());
+    let lock = project.path().join(".store.lock");
+    fs::write(&lock, b"").unwrap();
+    let writer = File::options().read(true).write(true).open(&lock).unwrap();
+    FileExt::try_lock(&writer).unwrap();
+    assert!(store.existing_read_guard().is_err());
+    drop(writer);
+    assert!(store.existing_read_guard().is_ok());
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    assert!(store.existing_read_guard().is_err());
+    #[cfg(unix)]
+    {
+        fs::remove_dir(&lock).unwrap();
+        let outside = tapid_test_support::TempProject::new("outside-store-lock").unwrap();
+        outside.write("lock", b"sentinel").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("lock"), &lock).unwrap();
+        assert!(store.existing_read_guard().is_err());
+        assert_eq!(fs::read(outside.path().join("lock")).unwrap(), b"sentinel");
+        let linked_root = project.path().join("linked");
+        std::os::unix::fs::symlink(outside.path(), &linked_root).unwrap();
+        assert!(Store::new(linked_root).existing_read_guard().is_err());
+        fs::remove_file(&lock).unwrap();
+        fs::write(&lock, b"").unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("trees")).unwrap();
+        assert!(store.existing_read_guard().is_err());
+    }
+}
+
+#[test]
+fn existing_read_guard_verifies_content_without_nested_lock_or_recovery() {
+    let project = tapid_test_support::TempProject::new("existing-tree-read").unwrap();
+    let store = Store::new(project.path());
+    fs::write(project.path().join(".store.lock"), b"").unwrap();
+    let digest = make_marked_tree(project.path(), r#"{"name":"tool","version":"1.0.0"}"#);
+    let guard = store.existing_read_guard().unwrap();
+    let path = guard.verified_tree_path(&digest).unwrap();
+    assert_eq!(path, project.path().join("trees").join(digest.as_str()));
+    fs::write(path.join("package.json"), b"tampered").unwrap();
+    assert!(matches!(
+        guard.verified_tree_path(&digest),
+        Err(IngestError::TreeDigestMismatch { .. })
+    ));
+    assert!(matches!(
+        guard.verified_tree_path(&super::tests::digest(b"missing")),
+        Err(IngestError::TreeMissing(_))
+    ));
+}

@@ -319,10 +319,27 @@ impl ActivationLock {
         Self::acquire_mode(project, false)
     }
 
+    /// Coordinate inspection of an installed layout without creating a lock or
+    /// recovering interrupted activation. Retain the guard while using it.
+    #[allow(dead_code)] // Awaiting the installed-command selection caller.
+    pub(crate) fn acquire_existing(project: &Path) -> Result<Self, OperationalError> {
+        let file = open_lock_file_options(&project.join(".tapid-activation.lock"), false)
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        Self::acquire_file(project, file, false)
+    }
+
     fn acquire_mode(project: &Path, recover: bool) -> Result<Self, OperationalError> {
+        let file = open_lock_file(&project.join(".tapid-activation.lock"))
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        Self::acquire_file(project, file, recover)
+    }
+
+    fn acquire_file(
+        project: &Path,
+        mut file: fs::File,
+        recover: bool,
+    ) -> Result<Self, OperationalError> {
         let path = project.join(".tapid-activation.lock");
-        let mut file =
-            open_lock_file(&path).map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
         FileExt::try_lock(&file).map_err(|error| match error {
             TryLockError::WouldBlock => OperationalError::new(
                 ErrorKind::ProjectBusy,
@@ -376,7 +393,7 @@ impl ActivationLock {
             if pending {
                 return Err(OperationalError::new(
                     ErrorKind::Recovery,
-                    "import refuses interrupted install state; finish recovery with tapid install before importing",
+                    "operation refuses interrupted install state; finish recovery with tapid install before retrying",
                 ));
             }
             return Ok(Self {
@@ -490,8 +507,12 @@ impl Drop for ActivationLock {
 }
 
 pub(crate) fn open_lock_file(path: &Path) -> Result<fs::File, String> {
+    open_lock_file_options(path, true)
+}
+
+fn open_lock_file_options(path: &Path, create: bool) -> Result<fs::File, String> {
     let mut options = fs::OpenOptions::new();
-    options.read(true).write(true).create(true);
+    options.read(true).write(true).create(create);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -794,6 +815,61 @@ fn activation_owner_is_valid(owner: &str) -> bool {
         && pid.bytes().all(|byte| byte.is_ascii_digit())
         && !nonce.is_empty()
         && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod existing_activation_tests {
+    use super::ActivationLock;
+    use crate::application::outcome::ErrorKind;
+    use std::fs;
+
+    #[test]
+    fn existing_activation_guard_never_initializes_or_recovers_state() {
+        let project = tapid_test_support::TempProject::new("existing-activation").unwrap();
+        let path = project.path();
+        let lock = path.join(".tapid-activation.lock");
+        assert!(
+            matches!(ActivationLock::acquire_existing(path), Err(error) if error.kind == ErrorKind::Transaction)
+        );
+        assert!(!lock.exists());
+        fs::write(&lock, b"123-deadbeef\n").unwrap();
+        let guard = ActivationLock::acquire_existing(path).unwrap();
+        assert!(!guard.recovered);
+        assert!(
+            matches!(ActivationLock::acquire_existing(path), Err(error) if error.kind == ErrorKind::ProjectBusy)
+        );
+        assert_eq!(fs::read(&lock).unwrap(), b"123-deadbeef\n");
+        drop(guard);
+        let pending = path.join(".tapid-install-stage-123-deadbeef-0");
+        fs::create_dir(&pending).unwrap();
+        assert!(ActivationLock::acquire_existing(path).is_err());
+        assert!(pending.is_dir());
+        assert_eq!(fs::read(&lock).unwrap(), b"123-deadbeef\n");
+    }
+
+    #[test]
+    fn existing_activation_guard_rejects_invalid_owner_without_rewriting_it() {
+        let project = tapid_test_support::TempProject::new("invalid-existing-activation").unwrap();
+        let lock = project.path().join(".tapid-activation.lock");
+        for contents in [b"invalid".to_vec(), vec![b'x'; 4096]] {
+            fs::write(&lock, &contents).unwrap();
+            assert!(
+                matches!(ActivationLock::acquire_existing(project.path()), Err(error) if error.kind == ErrorKind::Recovery)
+            );
+            assert_eq!(fs::read(&lock).unwrap(), contents);
+        }
+        #[cfg(unix)]
+        {
+            fs::remove_file(&lock).unwrap();
+            project.write("sentinel", b"123-deadbeef\n").unwrap();
+            std::os::unix::fs::symlink("sentinel", &lock).unwrap();
+            assert!(ActivationLock::acquire_existing(project.path()).is_err());
+            assert_eq!(
+                fs::read(project.path().join("sentinel")).unwrap(),
+                b"123-deadbeef\n"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

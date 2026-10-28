@@ -24,3 +24,12 @@ Windows collisions are checked against the actual output paths produced by repla
 The CLI's native Windows materialization regression runs in the existing Windows CI job. It executes both wrapper formats for a Node shebang control, checks argument and exit propagation, and verifies rejection before any shim write for case, extension, and sigma collisions, preserving sentinel output files. It does not claim exhaustive filesystem casing coverage.
 
 This crate does not execute scripts, enforce a process sandbox, authenticate registries, or itself mutate the filesystem. Runtime platform checks remain required. Other platforms have no supported link strategy in this release.
+
+`validate_node_entry` provides host-independent classification for direct Node
+execution: regular `.js`, `.cjs`, and `.mjs` files may omit a shebang;
+extensionless files require a recognized Node shebang. Conflicting interpreters,
+interpreter arguments, overlong shebangs, wrappers, missing files and non-regular
+targets fail explicitly. It shares the bounded interpreter parser used by Windows
+shim planning without changing Unix shim behavior. Classification does not
+establish package identity, authenticate bytes, validate parent directories, or
+authorize execution; its caller must establish those separately.
