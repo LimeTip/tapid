@@ -40,6 +40,46 @@ fn copied_sources_require_schema_10_and_cannot_claim_registry_authentication() {
     value["lockfileVersion"] = 10.into();
     value["packages"][&key]["registryIntegrityDeclared"] = true.into();
     assert!(Lockfile::from_json(&value.to_string()).is_err());
+
+    lock.set_selection(super::LockedSelection {
+        target: super::SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: None,
+        },
+        profile: super::SelectionProfile::Development,
+        omissions: vec![],
+        declarations: vec![super::RetainedDeclaration {
+            origin: super::OmissionOrigin::Root,
+            section: super::DeclarationSection::Dependencies,
+            name: "local".into(),
+            requirement: "npm:tool@1.0.0".into(),
+            original_requirement: Some("file:./vendor/tool.tgz".into()),
+            target: key.clone(),
+        }],
+    })
+    .unwrap();
+    let wire: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    assert_eq!(wire["lockfileVersion"], 11);
+    for original in [
+        serde_json::Value::Null,
+        serde_json::json!("^1"),
+        serde_json::json!("file:tool.tgz\n"),
+    ] {
+        let mut hostile = wire.clone();
+        hostile["selection"]["declarations"][0]["originalRequirement"] = original;
+        assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    }
+    let mut hostile = wire.clone();
+    hostile["selection"]["declarations"][0]["requirement"] = "npm:other@1.0.0".into();
+    assert!(Lockfile::from_json(&hostile.to_string()).is_err());
+    assert_eq!(
+        Lockfile::from_json(&wire.to_string())
+            .unwrap()
+            .to_json()
+            .unwrap(),
+        lock.to_json().unwrap()
+    );
 }
 
 #[test]

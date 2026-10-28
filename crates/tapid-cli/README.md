@@ -374,7 +374,10 @@ omissions and overridden workspace declarations retains the effective requiremen
 and an `originalRequirement` when they differ. Replay checks the original member
 section and requirement as well as the current root override. Alias overrides
 preserve the actual package name; overrides cannot redirect local workspace links.
-Copied-source selection generation, imported schema 12 generation, artifact/hook
+Copied file and Git roots can coexist with these omissions. Their original root
+specifications and resolved package requirements are retained alongside immutable
+source identities; replay still verifies file bytes and copied source bindings.
+Imported schema 12 generation, artifact/hook
 omission selection and complete optional-failure semantics remain unfinished.
 Preview and status integration is not established by this replay API.
 

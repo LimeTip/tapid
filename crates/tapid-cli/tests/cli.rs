@@ -7998,6 +7998,120 @@ fn dist_tags_pin_prereleases_and_replay_after_tags_move_or_disappear() {
 }
 
 #[test]
+fn copied_root_with_optional_omission_retains_specification_and_replays() {
+    use sha2::{Digest, Sha256};
+    for git in [false, true] {
+        let project = tapid_test_support::TempProject::new("copied-selection").unwrap();
+        let mut fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+        let package = fixture["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "h3" && package["version"] == "1.0.0")
+            .unwrap()
+            .clone();
+        let bytes = STANDARD
+            .decode(
+                package["artifact"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("base64:")
+                    .unwrap(),
+            )
+            .unwrap();
+        project.write("vendor/pkg.tgz", &bytes).unwrap();
+        let specification = if git {
+            let mut package = package.clone();
+            package["registry"] = format!(
+                "git+https://example.test/repo.git#{}!sha256-{:x}",
+                "a".repeat(40),
+                Sha256::digest(&bytes)
+            )
+            .into();
+            package["git_ref"] = "main".into();
+            fixture["packages"].as_array_mut().unwrap().push(package);
+            "git+https://example.test/repo.git#main"
+        } else {
+            "file:./vendor/pkg.tgz"
+        };
+        project.write("package.json", serde_json::json!({"name":"demo","version":"1.0.0","dependencies":{"local":specification},"optionalDependencies":{"missing":"^1"}}).to_string().as_bytes()).unwrap();
+        project
+            .write(
+                "registry.json",
+                serde_json::to_vec(&fixture).unwrap().as_slice(),
+            )
+            .unwrap();
+        let output = run(
+            project.path(),
+            &["install", "--registry-fixture", "registry.json"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let locked = fs::read(project.path().join("tapid.lock")).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&locked).unwrap();
+        assert_eq!(wire["lockfileVersion"], 11);
+        let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
+        let selection = lock.selection().unwrap();
+        let copied = selection
+            .declarations
+            .iter()
+            .find(|fact| fact.name == "local")
+            .unwrap();
+        assert_eq!(copied.original_requirement.as_deref(), Some(specification));
+        assert_eq!(copied.target, lock.root_bindings()["local"]);
+        assert_eq!(selection.omissions[0].name, "missing");
+        for args in [
+            vec!["ci", "--offline"],
+            vec!["install", "--frozen"],
+            vec!["install", "--offline"],
+        ] {
+            let output = run(project.path(), &args);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
+        }
+        let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+        let mut forged = wire.clone();
+        let fact = forged["selection"]["declarations"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|fact| fact["name"] == "local")
+            .unwrap();
+        fact["originalRequirement"] = "file:other.tgz".into();
+        let forged = serde_json::to_vec(&forged).unwrap();
+        project.write("tapid.lock", &forged).unwrap();
+        let output = run(project.path(), &["install", "--offline"]);
+        assert!(!output.status.success());
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), forged);
+        assert_eq!(
+            fs::read(project.path().join(".tapid-managed")).unwrap(),
+            marker
+        );
+        project.write("tapid.lock", &locked).unwrap();
+        if !git {
+            project
+                .write("vendor/pkg.tgz", b"changed artifact")
+                .unwrap();
+            let output = run(project.path(), &["install", "--offline"]);
+            assert!(!output.status.success());
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
+            assert_eq!(
+                fs::read(project.path().join(".tapid-managed")).unwrap(),
+                marker
+            );
+        }
+    }
+}
+
+#[test]
 fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay() {
     use base64::Engine;
     let project = tapid_test_support::TempProject::new("file-tarballs").unwrap();

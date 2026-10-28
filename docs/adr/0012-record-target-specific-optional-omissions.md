@@ -39,8 +39,14 @@ transactions. Neither an optional flag nor a warm cache relaxes verification.
 
 Imported schema 12 uses a separate placement-keyed ledger because ordinary keys
 cannot preserve npm placement identity. Normal import generation still emits
-schema 8. Copied-source ledger generation, complete imported generation, and
-broader reporting remain separate implementation work. Workspace registry
+schema 8. Complete imported generation and broader reporting remain separate
+implementation work. Copied root declarations retain their original file or Git
+specification in `originalRequirement`, the resolved npm package requirement,
+and the exact immutable source-qualified target key. The lockfile validates the
+bounded input and effective package identity; the CLI reuses copied specification
+parsing, source binding checks and file-digest verification during replay. This
+allows registry omissions in graphs containing copied sources without interpreting
+a failed copied artifact as an omission. Workspace registry
 overrides retain the effective `requirement` and, when different, the member's
 `originalRequirement`. Replay validates both the original member declaration and
 the effective root override. The two requirements must preserve package identity;

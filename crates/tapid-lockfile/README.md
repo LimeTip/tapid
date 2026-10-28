@@ -78,8 +78,7 @@ authorize registry fallback. Records are sorted and unique by
 origin/section/name; duplicate, missing, dangling and mismatched facts fail
 validation. Package development declarations are rejected because they are not
 installed transitive dependencies. Peer-provider contexts retain their existing
-separate key contract; this array does not replace peer validation. Copied-source
-and unsupported-spec declaration integration remains pending.
+separate key contract; this array does not replace peer validation.
 The initial reason allowlist contains confirmed metadata absence, no usable
 candidate, and incompatible platform. Archive, integrity, authentication and
 containment failures cannot be represented as accepted reasons.
@@ -95,11 +94,16 @@ ledger, and retains manifest-digest and integrity-provenance checks;
 the CLI emits this schema for ordinary registry graphs, including workspace
 members and local links, when optional metadata/candidate omissions are recorded.
 Overridden workspace registry declarations retain an optional `originalRequirement`
-alongside the effective `requirement`. This field is limited to workspace origins,
-must differ from the effective requirement, and must preserve package identity.
+alongside the effective `requirement`. For workspace origins it must differ from
+the effective requirement and preserve package identity.
 Local workspace targets cannot carry it. CLI replay compares both the original
-member declaration and the current effective root override. Copied-source selection
-generation remains pending. This persistence API alone
+member declaration and the current effective root override. Copied root declarations
+also retain `originalRequirement`: the original file or Git specification, alongside
+the resolved npm package requirement and exact immutable source-qualified target.
+The lockfile validates the bounded specification and effective package identity;
+CLI replay parses the original specification and checks the target with the existing
+copied-source binding and file-digest validators. Copied sources remain selected;
+this does not authorize omitting failed copied artifacts. This persistence API alone
 does not establish complete optional-dependency failure support.
 
 Imported schema 12 provides a separate `ImportedSelection` persistence building

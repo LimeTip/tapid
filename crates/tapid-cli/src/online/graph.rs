@@ -340,7 +340,7 @@ pub(super) fn resolve_package_graph(
         }
     }
     let mut omissions = Vec::new();
-    if roots.iter().all(|root| root.registry.registry().is_some()) {
+    {
         let required = entry_points
             .iter()
             .filter(|(_, entry)| {
@@ -362,6 +362,7 @@ pub(super) fn resolve_package_graph(
             let identity = (dependency.registry.clone(), actual.clone());
             if entry.section != tapid_resolver::EntryPointSection::OptionalDependencies
                 || required.contains(&identity)
+                || dependency.registry.registry().is_none()
             {
                 continue;
             }

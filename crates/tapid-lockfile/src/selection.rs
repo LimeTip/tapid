@@ -21,7 +21,7 @@ pub struct RetainedDeclaration {
     pub section: DeclarationSection,
     pub name: String,
     pub requirement: String,
-    /// Original workspace manifest range when a root override changes selection.
+    /// Original workspace override range or copied root specification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_requirement: Option<String>,
     pub target: String,
@@ -114,13 +114,32 @@ impl LockedSelection {
                 .name
                 .parse::<PackageName>()
                 .map_err(|_| invalid())?;
-            validate_original_requirement(
-                &declaration.origin,
-                &declaration.name,
-                &declaration.requirement,
-                declaration.original_requirement.as_deref(),
-            )?;
             let target = declaration.target.parse::<LockfilePackageKey>()?;
+            let copied_root =
+                declaration.origin == OmissionOrigin::Root && target.source.copied().is_some();
+            if copied_root {
+                let original = declaration
+                    .original_requirement
+                    .as_deref()
+                    .ok_or_else(invalid)?;
+                // The CLI owns copied specification parsing and checks it against
+                // the immutable source. Here retain the bounded original input;
+                // the effective requirement below still validates package identity.
+                if original.len() > 4096
+                    || original.trim() != original
+                    || original.chars().any(char::is_control)
+                    || !(original.starts_with("file:") || original.starts_with("git+https://"))
+                {
+                    return Err(invalid());
+                }
+            } else {
+                validate_original_requirement(
+                    &declaration.origin,
+                    &declaration.name,
+                    &declaration.requirement,
+                    declaration.original_requirement.as_deref(),
+                )?;
+            }
             if (declaration.original_requirement.is_some() && target.source.workspace().is_some())
                 || declaration.requirement.len() > 4096
                 || declaration.requirement.trim() != declaration.requirement

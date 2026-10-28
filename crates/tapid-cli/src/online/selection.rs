@@ -15,14 +15,6 @@ pub(super) fn record_registry_selection(
     config: &crate::registry::RegistryConfig,
     mut omissions: Vec<AcceptedOmission>,
 ) -> Result<(), OperationalError> {
-    // Copied sources retain their separate declaration contract.
-    if resolution
-        .selected
-        .iter()
-        .any(|id| id.registry.registry().is_none())
-    {
-        return Ok(());
-    }
     let keys = resolution
         .selected
         .iter()
@@ -153,8 +145,14 @@ pub(super) fn record_registry_selection(
                 },
             )
         };
-        let original_requirement = if let OmissionOrigin::Workspace { key } = &origin {
-            let manifest = &workspace_manifests[key];
+        let original_manifest = match &origin {
+            OmissionOrigin::Workspace { key } => Some(&workspace_manifests[key]),
+            OmissionOrigin::Root if declaration.target.registry.registry().is_none() => {
+                Some(manifest)
+            }
+            _ => None,
+        };
+        let original_requirement = if let Some(manifest) = original_manifest {
             let dependencies = match section {
                 DeclarationSection::Dependencies => manifest.dependencies(),
                 DeclarationSection::DevDependencies => manifest.dev_dependencies(),
@@ -162,7 +160,7 @@ pub(super) fn record_registry_selection(
             };
             let original = dependencies
                 .get(declaration.name.as_str())
-                .ok_or("missing original workspace declaration")?;
+                .ok_or("missing original manifest declaration")?;
             (original != &declaration.requirement.raw).then(|| original.clone())
         } else {
             None

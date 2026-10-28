@@ -14,8 +14,8 @@ allowlist. `details_complete` is false when records or scalar text are shortened
 `truncated_fields` identifies shortened scalars. Omission details do not convert
 failed artifact verification or failed replay into success. These fields report
 existing ledger facts; ordinary registry selection generates them for accepted
-metadata/candidate omissions. Copied-source and imported ledger generation remain
-unimplemented.
+metadata/candidate omissions, including graphs with copied file and Git roots.
+Imported ledger generation remains unimplemented.
 
 | Command | Global `--json` |
 | --- | --- |
