@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct ArtifactFetcher<'a> {
+    pub(super) offline: bool,
     pub(super) store: &'a Store,
     pub(super) config: &'a crate::registry::RegistryConfig,
     pub(super) transports: BTreeMap<(String, String), HttpsTransport>,
@@ -40,6 +41,12 @@ impl ArtifactFetcher<'_> {
                     );
                 }
             }
+        }
+        if self.offline && record.copied_archive.is_none() && !record.fixture {
+            return Err(OperationalError::new(
+                ErrorKind::Store,
+                format!("offline: verified artifact is unavailable for {id}"),
+            ));
         }
         if pinned.is_some()
             && record.registry.registry().is_some()

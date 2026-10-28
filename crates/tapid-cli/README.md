@@ -227,6 +227,14 @@ Lockfile impact describes selecting the shown direct version. An unchanged direc
 
 `update` preserves declared ranges unless a save policy or `--latest` is explicit. Without these flags, it leaves the original `package.json` bytes unchanged. `--save-exact`, `--save-caret`, and `--save-tilde` save the resolved selected version as `19.1.0`, `^19.1.0`, or `~19.1.0`. The flags conflict with one another and also work without `--latest`, within the current range. `update --latest react` allows versions beyond the current range and defaults to saving a caret requirement. For example, `update --latest --save-exact react` saves an exact version. Each selected declaration retains its section and npm alias target. Workspace references and copied-source declarations retain their source syntax. A name declared in multiple sections is updated in every section where it appears. Other declarations stay unchanged.
 
+`update --offline` resolves from previously locked metadata and verified local
+content without HTTP or Git requests. Selected local file snapshots may change;
+unselected snapshots must still match their pins. Registry dependencies must be
+satisfiable using recorded versions and available verified trees, or explicit
+local fixture metadata and archives. Missing metadata or artifacts fail without
+committing project changes. Git references retain their existing accepted pin;
+refresh references online. Offline updates cannot be combined with `--dry-run`.
+
 `install`, `add`, `remove`, and `update` accept `--dry-run`. They report declaration edits and a resolved dependency graph, including source-qualified package identities, versions, integrity metadata, dependency edges, and the direct roots or parent edges that select each changed package. A version, peer-context, or platform-context change appears as removal of the old identity and addition of the new one. Named update previews preserve unrelated valid pins and report the resolved save requirements, including the default caret policy for `--latest`. Omitting package names refreshes the whole graph.
 
 A dry run never writes project files, creates an activation lock, recovers transactions, reads or writes the package store, downloads package artifacts, or runs lifecycle scripts. Pending recovery stops the preview. Live resolution may request registry metadata; `--registry-fixture` resolves entirely from local fixture metadata. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without checking whether its artifacts are cached. Output states the network permission, package metadata lookup count, and cache/artifact effects explicitly. A resolved graph does not attest artifact availability, archive validity, generated lifecycle outputs, or the success of a later install. Copied file/Git sources and imported npm locks currently require an ordinary install rather than a resolved preview.

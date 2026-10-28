@@ -171,7 +171,10 @@ pub(crate) fn resolve(
     }
     for ((source, name), id) in &resolved.resolution.root_bindings {
         if resolved.direct_local_names.contains(name)
-            && resolved.root_registry_identities.contains(&(source.clone(), id.name.clone())) {
+            && resolved
+                .root_registry_identities
+                .contains(&(source.clone(), id.name.clone()))
+        {
             snapshot.roots.insert(name.to_string(), keys[id].clone());
         }
     }

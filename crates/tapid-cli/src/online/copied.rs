@@ -16,9 +16,7 @@ pub(crate) fn declaration(raw: &str) -> Result<Option<CopiedDeclaration>, String
             || path.starts_with('/')
             || path.contains(['\\', ':', '|', '#'])
             || path.chars().any(char::is_control)
-            || path
-                .split('/')
-                .any(|part| part.is_empty() || part == ".")
+            || path.split('/').any(|part| part.is_empty() || part == ".")
         {
             return Err("file dependency must name a contained project-relative directory or tarball; traversal is unsupported".into());
         }
@@ -54,32 +52,61 @@ pub(super) fn normalized_manifest(
     declaring_directory: &Path,
     manifest: &PackageManifest,
 ) -> Result<PackageManifest, String> {
-    let relative = declaring_directory.strip_prefix(project)
+    let relative = declaring_directory
+        .strip_prefix(project)
         .map_err(|_| "declaring manifest is outside the project")?;
     let mut normalized = manifest.clone();
     for (kind, map) in [
-        (tapid_manifest::DependencyKind::Dependencies, manifest.dependencies()),
-        (tapid_manifest::DependencyKind::DevDependencies, manifest.dev_dependencies()),
-        (tapid_manifest::DependencyKind::OptionalDependencies, manifest.optional_dependencies()),
+        (
+            tapid_manifest::DependencyKind::Dependencies,
+            manifest.dependencies(),
+        ),
+        (
+            tapid_manifest::DependencyKind::DevDependencies,
+            manifest.dev_dependencies(),
+        ),
+        (
+            tapid_manifest::DependencyKind::OptionalDependencies,
+            manifest.optional_dependencies(),
+        ),
     ] {
         for (name, raw) in map {
-            let Some(CopiedDeclaration::File(path)) = declaration(raw)? else { continue };
-            let mut parts = relative.iter().map(|part| part.to_str().ok_or("non-UTF-8 declaring path").map(str::to_owned)).collect::<Result<Vec<_>, _>>()?;
+            let Some(CopiedDeclaration::File(path)) =
+                declaration(raw).map_err(|reason| format!("dependency '{name}': {reason}"))?
+            else {
+                continue;
+            };
+            let mut parts = relative
+                .iter()
+                .map(|part| {
+                    part.to_str()
+                        .ok_or("non-UTF-8 declaring path")
+                        .map(str::to_owned)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             for part in path.split('/') {
                 if part == ".." {
-                    parts.pop().ok_or("file dependency escapes the project")?;
+                    parts
+                        .pop()
+                        .ok_or_else(|| format!("copied dependency '{name}' escapes the project"))?;
                 } else {
                     parts.push(part.to_owned());
                 }
             }
             if parts.is_empty() {
-                return Err("file dependency cannot contain its declaring manifest".into());
+                return Err(format!(
+                    "copied dependency '{name}' cannot contain its declaring manifest"
+                ));
             }
             let path = parts.join("/");
             if declaring_directory.starts_with(project.join(&path)) {
-                return Err("file dependency cannot contain its declaring manifest".into());
+                return Err(format!(
+                    "copied dependency '{name}' cannot contain its declaring manifest"
+                ));
             }
-            normalized = normalized.update_dependency_kind(kind, name, &format!("file:{path}")).map_err(|error| error.to_string())?;
+            normalized = normalized
+                .update_dependency_kind(kind, name, &format!("file:{path}"))
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(normalized)
@@ -131,9 +158,13 @@ pub(super) fn validate_directory_overlap<'a>(
         for (_, raw) in declarations(manifest) {
             if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
                 let path = project.join(path);
-                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) { continue; }
+                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                    continue;
+                }
                 let path = fs::canonicalize(path).map_err(|_| "cannot resolve directory source")?;
-                if directories.iter().any(|other| other != &path && (other.starts_with(&path) || path.starts_with(other))) {
+                if directories.iter().any(|other| {
+                    other != &path && (other.starts_with(&path) || path.starts_with(other))
+                }) {
                     return Err("directory dependencies overlap".into());
                 }
                 directories.insert(path);
@@ -213,10 +244,24 @@ pub(crate) fn validate_directory_store(
     }
     let workspace = Workspace::discover(project)?;
     let manifests = std::iter::once((workspace.root_path(), workspace.root()))
-        .chain(workspace.members().iter().map(|member| (member.path(), member.manifest())))
+        .chain(
+            workspace
+                .members()
+                .iter()
+                .map(|member| (member.path(), member.manifest())),
+        )
         .map(|(path, current)| {
-            normalized_manifest(project, path.parent().ok_or("manifest has no parent")?, if path == manifest_path { manifest } else { current })
-        }).collect::<Result<Vec<_>, String>>()?;
+            normalized_manifest(
+                project,
+                path.parent().ok_or("manifest has no parent")?,
+                if path == manifest_path {
+                    manifest
+                } else {
+                    current
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     for (_, raw) in manifests.iter().flat_map(declarations) {
         if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
             let source = project.join(path);
@@ -399,15 +444,24 @@ pub(super) fn prepare_roots(
         let pinned = previous
             .filter(|_| {
                 !update.is_some_and(|request| {
-                    request.target == member.map_or_else(|| project.join("package.json"), |(_, path)| path.to_path_buf()) && request
-                        .plan
-                        .mutations
-                        .iter()
-                        .any(|mutation| mutation.name == *local)
+                    !(request.offline && matches!(&spec, CopiedDeclaration::Git(_)))
+                        && request.target
+                            == member.map_or_else(
+                                || project.join("package.json"),
+                                |(_, path)| path.to_path_buf(),
+                            )
+                        && request
+                            .plan
+                            .mutations
+                            .iter()
+                            .any(|mutation| mutation.name == *local)
                 })
             })
             .and_then(|lock| match member {
-                Some((key, _)) => lock.workspace_packages().get(key).and_then(|package| package.dependencies().get(local)),
+                Some((key, _)) => lock
+                    .workspace_packages()
+                    .get(key)
+                    .and_then(|package| package.dependencies().get(local)),
                 None => lock.root_bindings().get(local),
             })
             .and_then(|key| key.parse::<LockfilePackageKey>().ok())
@@ -424,55 +478,71 @@ pub(super) fn prepare_roots(
                 record(source, bytes)?
             }
             CopiedDeclaration::Git(spec) => {
-                let pinned = pinned.filter(|source| matches_source(raw, source).unwrap_or(false));
-                let fixture_record = fixture_records.values().find(|record| {
-                    record
-                        .registry
-                        .git_parts()
-                        .is_some_and(|(repository, commit, _)| {
-                            repository == spec.repository().as_str()
-                                && pinned.as_ref().map_or_else(
-                                    || {
-                                        if is_commit(spec.reference()) {
-                                            spec.reference().eq_ignore_ascii_case(commit)
-                                        } else {
-                                            record.git_reference.as_deref()
-                                                == Some(spec.reference())
-                                        }
-                                    },
-                                    |pin| pin == &record.registry,
-                                )
-                        })
-                });
-                if let Some(fixture) = fixture_record {
-                    let encoded = fixture
-                        .artifact
-                        .strip_prefix("base64:")
-                        .ok_or("Git fixture artifact must use base64 bytes")?;
-                    let bytes = STANDARD
-                        .decode(encoded)
-                        .map_err(|_| "invalid Git fixture archive encoding")?;
-                    record(fixture.registry.clone(), bytes)?
-                } else {
-                    if using_fixture {
-                        return Err("Git fixture has no matching pinned artifact".into());
-                    }
-                    let reference = pinned
+                if update.is_some_and(|request| request.offline) && !using_fixture {
+                    let lock = previous
+                        .ok_or("offline: Git source requires a previous local selection")?;
+                    let source = pinned
                         .as_ref()
-                        .and_then(PackageSource::git_parts)
-                        .map(|(_, commit, _)| commit)
-                        .unwrap_or(spec.reference());
-                    let pinned_spec =
-                        GitDependency::parse(&format!("git+{}#{reference}", spec.repository()))?;
-                    let staging = scratch()?;
-                    let (commit, bytes) = pinned_spec.fetch(&staging.0)?;
-                    let source =
-                        PackageSource::git(spec.repository().as_str(), &commit, digest(&bytes))
-                            .map_err(|error| error.to_string())?;
-                    if pinned.as_ref().is_some_and(|pin| pin != &source) {
-                        return Err("pinned Git artifact digest mismatch".into());
+                        .filter(|source| matches_source(raw, source).unwrap_or(false))
+                        .ok_or("offline: Git source has no matching local selection")?;
+                    locked::locked_records(lock, fixture_records, false)?
+                        .into_iter()
+                        .find(|record| &record.registry == source)
+                        .ok_or("offline: Git source metadata is unavailable")?
+                } else {
+                    let pinned =
+                        pinned.filter(|source| matches_source(raw, source).unwrap_or(false));
+                    let fixture_record = fixture_records.values().find(|record| {
+                        record
+                            .registry
+                            .git_parts()
+                            .is_some_and(|(repository, commit, _)| {
+                                repository == spec.repository().as_str()
+                                    && pinned.as_ref().map_or_else(
+                                        || {
+                                            if is_commit(spec.reference()) {
+                                                spec.reference().eq_ignore_ascii_case(commit)
+                                            } else {
+                                                record.git_reference.as_deref()
+                                                    == Some(spec.reference())
+                                            }
+                                        },
+                                        |pin| pin == &record.registry,
+                                    )
+                            })
+                    });
+                    if let Some(fixture) = fixture_record {
+                        let encoded = fixture
+                            .artifact
+                            .strip_prefix("base64:")
+                            .ok_or("Git fixture artifact must use base64 bytes")?;
+                        let bytes = STANDARD
+                            .decode(encoded)
+                            .map_err(|_| "invalid Git fixture archive encoding")?;
+                        record(fixture.registry.clone(), bytes)?
+                    } else {
+                        if using_fixture {
+                            return Err("Git fixture has no matching pinned artifact".into());
+                        }
+                        let reference = pinned
+                            .as_ref()
+                            .and_then(PackageSource::git_parts)
+                            .map(|(_, commit, _)| commit)
+                            .unwrap_or(spec.reference());
+                        let pinned_spec = GitDependency::parse(&format!(
+                            "git+{}#{reference}",
+                            spec.repository()
+                        ))?;
+                        let staging = scratch()?;
+                        let (commit, bytes) = pinned_spec.fetch(&staging.0)?;
+                        let source =
+                            PackageSource::git(spec.repository().as_str(), &commit, digest(&bytes))
+                                .map_err(|error| error.to_string())?;
+                        if pinned.as_ref().is_some_and(|pin| pin != &source) {
+                            return Err("pinned Git artifact digest mismatch".into());
+                        }
+                        record(source, bytes)?
                     }
-                    record(source, bytes)?
                 }
             }
         };

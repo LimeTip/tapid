@@ -41,22 +41,25 @@ remain unsupported. No implicit hooks or extra script filesystem grants follow
 from snapshotting or linking.
 
 Implementation is incomplete: current changes establish Unix and Windows archive capture,
-source/schema representation, and a root CLI vertical slice through copied-record
+source/schema representation, and root/member CLI flows through copied-record
 preparation, archive verification, verified storage, and ordinary bin planning.
 Member copied bindings reuse the existing workspace package dependency edges;
 schema 11 is required even for member tarball/Git copies. The model preserves
 separate root and member selections for identical local dependency names.
-Root frozen/offline replay recaptures source content; cold online hydration can
+Root/member frozen/offline replay recaptures source content; cold online hydration can
 regenerate an exactly matching snapshot. Targeted root updates accept selected
-changes and reject changed unselected pins. Root regressions exercise Node imports,
+changes and reject changed unselected pins. Member selection is qualified by the
+declaring manifest. Offline updates reuse locked metadata and verified local trees
+and may capture changed selected local sources; unavailable metadata or artifacts
+fail before project activation, with no HTTP or Git fallback. Offline Git references
+retain their accepted pin rather than refreshing remote references. Root/member regressions exercise Node imports,
 bins, skipped hooks, overlapping sources, configured-store boundaries, activation
-rollback, and interrupted publication/activation recovery. This is internal
+rollback, and interrupted publication/activation recovery. Member tarball/Git
+regressions also cover explicit-root invocation and warm/cold replay. This is internal
 implementation progress, not the complete compatibility contract.
 Windows traversal retains ancestor handles without
 write/delete sharing and rejects reparse points using native handle metadata;
 active writers fail closed. Windows roots currently require local drive paths.
-Native Windows runtime validation, CLI preparation and selection of qualified
-member bindings and member-relative declarations, offline update resolution,
-shared captures, and complete
-transaction/reporting coverage
+Native Windows runtime validation, shared captures, and complete
+dependency/platform, transaction/reporting, and consumer coverage
 must complete before the CLI advertises directory dependency support.

@@ -8288,6 +8288,311 @@ fn pinned_git_dependencies_replay_exact_commits_after_refs_move() {
 }
 
 #[test]
+fn copied_member_tarball_and_git_sources_replay_from_an_explicit_root() {
+    use sha2::{Digest, Sha256};
+    let project = tapid_test_support::TempProject::new("member-copied-forms").unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    let package = fixture["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "@actual/scoped")
+        .unwrap();
+    let encoded = package["artifact"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("base64:")
+        .unwrap();
+    let bytes = STANDARD.decode(encoded).unwrap();
+    project.write("vendor/tool.tgz", &bytes).unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#,
+        )
+        .unwrap();
+    project.write("members/first/package.json", br#"{"name":"first","version":"1.0.0","dependencies":{"local":"file:../../vendor/tool.tgz"}}"#).unwrap();
+    let commit = "a".repeat(40);
+    project.write("members/second/package.json", format!(r#"{{"name":"second","version":"1.0.0","dependencies":{{"local":"git+https://example.test/tool.git#{commit}"}}}}"#).as_bytes()).unwrap();
+    let source = format!(
+        "git+https://example.test/tool.git#{commit}!sha256-{:x}",
+        Sha256::digest(&bytes)
+    );
+    let registry = project.write("registry.json", serde_json::to_string(&serde_json::json!({"packages":[{"registry":source,"name":"@actual/scoped","version":"1.2.0","artifact":format!("base64:{encoded}"),"dependencies":{}}]})).unwrap().as_bytes()).unwrap();
+    let dir = project.path();
+    let store = dir.join("store");
+    let installed = run(
+        &dir.join("members/first"),
+        &[
+            "install",
+            "--project-dir",
+            dir.to_str().unwrap(),
+            "--registry-fixture",
+            registry.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let lock = fs::read(dir.join("tapid.lock")).unwrap();
+    for cold in [false, true] {
+        if cold {
+            fs::remove_dir_all(&store).unwrap();
+        }
+        for member in ["first", "second"] {
+            fs::remove_dir_all(dir.join("members").join(member).join("node_modules")).unwrap();
+        }
+        fs::remove_dir_all(dir.join("node_modules")).unwrap();
+        let mut args = vec![
+            "install",
+            "--frozen",
+            "--project-dir",
+            dir.to_str().unwrap(),
+            "--registry-fixture",
+            registry.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        if !cold {
+            args.push("--offline");
+        }
+        let replay = run(&dir.join("members/second"), &args);
+        assert!(
+            replay.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+        for member in ["first", "second"] {
+            let root = dir.join("members").join(member);
+            let node = node_assertion_output(Command::new("node").args(["-e", "require('local'); const cp = require('child_process'); cp.execFileSync(process.platform === 'win32' ? 'cmd.exe' : './node_modules/.bin/scoped-tool', process.platform === 'win32' ? ['/c', 'node_modules\\\\.bin\\\\scoped-tool.cmd'] : []);"]).current_dir(&root), true, "member-copied-forms").unwrap();
+            assert!(
+                node.status.success(),
+                "{}",
+                String::from_utf8_lossy(&node.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn copied_directory_offline_update_requires_local_metadata_and_verified_artifacts() {
+    let project = tapid_test_support::TempProject::new("directory-offline-graph").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"local":"file:vendor/tool","known":"npm:h3@1.0.0"}}"#).unwrap();
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let dir = project.path();
+    let fixture = project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let store = dir.join("store");
+    let installed = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let updated = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let lock = fs::read(dir.join("tapid.lock")).unwrap();
+    let manifest = fs::read(dir.join("package.json")).unwrap();
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0","dependencies":{"not-cached":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let failed = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("offline: local metadata is unavailable"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+    let json = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--offline",
+            "--json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!json.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(result["outcome"], "failure");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let empty_store = dir.join("empty-store");
+    let failed = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--offline",
+            "--store-dir",
+            empty_store.to_str().unwrap(),
+        ],
+    );
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr)
+            .contains("offline: verified artifact is unavailable"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+    assert!(dir.join("node_modules/known/index.js").is_file());
+}
+
+#[test]
+fn copied_directory_offline_update_accepts_only_selected_local_content() {
+    let project = tapid_test_support::TempProject::new("directory-offline-update").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["members/*"],"dependencies":{"local":"file:vendor/root"}}"#).unwrap();
+    project.write("members/first/package.json", br#"{"name":"first","version":"1.0.0","dependencies":{"local":"file:../../vendor/first"}}"#).unwrap();
+    for origin in ["root", "first"] {
+        project
+            .write(
+                format!("vendor/{origin}/package.json"),
+                br#"{"name":"tool","version":"1.0.0","main":"index.js"}"#,
+            )
+            .unwrap();
+        project
+            .write(format!("vendor/{origin}/index.js"), b"module.exports = 1;")
+            .unwrap();
+    }
+    let dir = project.path();
+    let store = dir.join("store");
+    let installed = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let before = Lockfile::from_json(&fs::read_to_string(dir.join("tapid.lock")).unwrap()).unwrap();
+    project
+        .write("vendor/first/index.js", b"module.exports = 2;")
+        .unwrap();
+    let updated = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--workspace",
+            "first",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let lock = fs::read(dir.join("tapid.lock")).unwrap();
+    let after = Lockfile::from_json(std::str::from_utf8(&lock).unwrap()).unwrap();
+    assert_eq!(before.root_bindings(), after.root_bindings());
+    assert_eq!(
+        fs::read(dir.join("members/first/node_modules/local/index.js")).unwrap(),
+        b"module.exports = 2;"
+    );
+    project
+        .write("vendor/root/index.js", b"module.exports = 3;")
+        .unwrap();
+    let rejected = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--workspace",
+            "first",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("digest mismatch"));
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    let updated = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/local/index.js")).unwrap(),
+        b"module.exports = 3;"
+    );
+}
+
+#[test]
 fn copied_dependency_rejections_preserve_project_and_store_and_redact_credentials() {
     for spec in [
         "file:../outside.tgz",
@@ -8344,39 +8649,120 @@ fn copied_dependency_rejections_preserve_project_and_store_and_redact_credential
 #[test]
 fn copied_directory_members_keep_declaration_relative_sources_distinct() {
     let project = tapid_test_support::TempProject::new("directory-member-origins").unwrap();
-    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#).unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#,
+        )
+        .unwrap();
     for (member, value) in [("first", 41), ("second", 42)] {
         project.write(format!("members/{member}/package.json"), format!(r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"local":"file:../../vendor/{member}"}}}}"#).as_bytes()).unwrap();
-        project.write(format!("members/{member}/index.js"), b"module.exports = require('local');").unwrap();
+        project
+            .write(
+                format!("members/{member}/index.js"),
+                b"module.exports = require('local');",
+            )
+            .unwrap();
         project.write(format!("vendor/{member}/package.json"), br#"{"name":"tool","version":"1.0.0","main":"index.js","bin":{"local-bin":"bin.js"},"scripts":{"prepare":"exit 99","install":"exit 99"}}"#).unwrap();
-        project.write(format!("vendor/{member}/index.js"), format!("module.exports = {value};").as_bytes()).unwrap();
-        project.write(format!("vendor/{member}/bin.js"), format!("#!/usr/bin/env node\nconsole.log({value});\n").as_bytes()).unwrap();
+        project
+            .write(
+                format!("vendor/{member}/index.js"),
+                format!("module.exports = {value};").as_bytes(),
+            )
+            .unwrap();
+        project
+            .write(
+                format!("vendor/{member}/bin.js"),
+                format!("#!/usr/bin/env node\nconsole.log({value});\n").as_bytes(),
+            )
+            .unwrap();
     }
     let dir = project.path();
     let store = dir.join("store");
     let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
-    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
     let lock = fs::read(dir.join("tapid.lock")).unwrap();
     for member in ["first", "second"] {
         assert!(String::from_utf8_lossy(&lock).contains(&format!("directory-v1:vendor/{member}#")));
     }
-    let node = node_assertion_output(Command::new("node").args(["-e", "if(require('first') !== 41 || require('second') !== 42) process.exit(1);"]).current_dir(dir), true, "directory-member-origins").unwrap();
-    assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
-    let replay = run(dir, &["install", "--offline", "--frozen", "--store-dir", store.to_str().unwrap()]);
-    assert!(replay.status.success(), "{}", String::from_utf8_lossy(&replay.stderr));
+    let node = node_assertion_output(
+        Command::new("node")
+            .args([
+                "-e",
+                "if(require('first') !== 41 || require('second') !== 42) process.exit(1);",
+            ])
+            .current_dir(dir),
+        true,
+        "directory-member-origins",
+    )
+    .unwrap();
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let replay = run(
+        dir,
+        &[
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
     for member in ["first", "second"] {
         let node = node_assertion_output(Command::new("node").args(["-e", "const cp = require('child_process'); const out = cp.execSync(process.platform === 'win32' ? 'node_modules\\\\.bin\\\\local-bin.cmd' : './node_modules/.bin/local-bin').toString().trim(); if(out !== (process.cwd().endsWith('first') ? '41' : '42')) process.exit(1);"]).current_dir(dir.join("members").join(member)), true, "directory-member-bin").unwrap();
-        assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+        assert!(
+            node.status.success(),
+            "{}",
+            String::from_utf8_lossy(&node.stderr)
+        );
         fs::remove_dir_all(dir.join("members").join(member).join("node_modules")).unwrap();
     }
     fs::remove_dir_all(dir.join("node_modules")).unwrap();
     fs::remove_dir_all(&store).unwrap();
-    let cold = run(dir, &["install", "--frozen", "--store-dir", store.to_str().unwrap()]);
-    assert!(cold.status.success(), "{}", String::from_utf8_lossy(&cold.stderr));
+    let cold = run(
+        dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        cold.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cold.stderr)
+    );
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
-    let node = node_assertion_output(Command::new("node").args(["-e", "if(require('first') !== 41 || require('second') !== 42) process.exit(1);"]).current_dir(dir), true, "directory-member-cold").unwrap();
-    assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+    let node = node_assertion_output(
+        Command::new("node")
+            .args([
+                "-e",
+                "if(require('first') !== 41 || require('second') !== 42) process.exit(1);",
+            ])
+            .current_dir(dir),
+        true,
+        "directory-member-cold",
+    )
+    .unwrap();
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
 }
 
 #[test]
@@ -8387,49 +8773,124 @@ fn copied_directory_member_update_is_scoped_to_declaring_manifest() {
         project.write(format!("members/{member}/package.json"), format!(r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"local":"file:../../vendor/{member}"}}}}"#).as_bytes()).unwrap();
     }
     for origin in ["root", "first", "second"] {
-        project.write(format!("vendor/{origin}/package.json"), br#"{"name":"tool","version":"1.0.0","main":"index.js"}"#).unwrap();
-        project.write(format!("vendor/{origin}/index.js"), b"module.exports = 1;").unwrap();
+        project
+            .write(
+                format!("vendor/{origin}/package.json"),
+                br#"{"name":"tool","version":"1.0.0","main":"index.js"}"#,
+            )
+            .unwrap();
+        project
+            .write(format!("vendor/{origin}/index.js"), b"module.exports = 1;")
+            .unwrap();
     }
     let dir = project.path();
     let store = dir.join("store");
     let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
-    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
     let before = fs::read(dir.join("tapid.lock")).unwrap();
     let before_lock = Lockfile::from_json(std::str::from_utf8(&before).unwrap()).unwrap();
-    project.write("vendor/first/index.js", b"module.exports = 2;").unwrap();
-    let update = run(dir, &["update", "local", "--workspace", "first", "--store-dir", store.to_str().unwrap()]);
-    assert!(update.status.success(), "{}", String::from_utf8_lossy(&update.stderr));
+    project
+        .write("vendor/first/index.js", b"module.exports = 2;")
+        .unwrap();
+    let update = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--workspace",
+            "first",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
     let after = fs::read(dir.join("tapid.lock")).unwrap();
     let after_lock = Lockfile::from_json(std::str::from_utf8(&after).unwrap()).unwrap();
     assert_eq!(before_lock.root_bindings(), after_lock.root_bindings());
     for (key, member) in before_lock.workspace_packages() {
         if key.contains("members/second") {
-            assert_eq!(member.dependencies(), after_lock.workspace_packages()[key].dependencies());
+            assert_eq!(
+                member.dependencies(),
+                after_lock.workspace_packages()[key].dependencies()
+            );
         }
     }
-    assert_eq!(fs::read(dir.join("members/first/node_modules/local/index.js")).unwrap(), b"module.exports = 2;");
-    project.write("vendor/second/index.js", b"module.exports = 3;").unwrap();
-    let rejected = run(dir, &["update", "local", "--workspace", "first", "--store-dir", store.to_str().unwrap()]);
+    assert_eq!(
+        fs::read(dir.join("members/first/node_modules/local/index.js")).unwrap(),
+        b"module.exports = 2;"
+    );
+    project
+        .write("vendor/second/index.js", b"module.exports = 3;")
+        .unwrap();
+    let rejected = run(
+        dir,
+        &[
+            "update",
+            "local",
+            "--workspace",
+            "first",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
     assert!(!rejected.status.success());
     assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), after);
-    assert_eq!(fs::read(dir.join("members/second/node_modules/local/index.js")).unwrap(), b"module.exports = 1;");
+    assert_eq!(
+        fs::read(dir.join("members/second/node_modules/local/index.js")).unwrap(),
+        b"module.exports = 1;"
+    );
 }
 
 #[test]
 fn copied_directory_member_unsafe_origins_fail_before_mutation() {
-    for source in ["../../../outside", "../..", "..", "/absolute", "C:/drive", "../../vendor/tool"] {
+    for source in [
+        "../../../outside",
+        "../..",
+        "..",
+        "/absolute",
+        "C:/drive",
+        "../../vendor/tool",
+    ] {
         let project = tapid_test_support::TempProject::new("member-unsafe-source").unwrap();
         let root = br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#;
         project.write("package.json", root).unwrap();
-        let member = format!(r#"{{"name":"member","version":"1.0.0","dependencies":{{"local":"file:{source}"}}}}"#);
-        project.write("members/member/package.json", member.as_bytes()).unwrap();
-        project.write("vendor/tool/package.json", br#"{"name":"tool","version":"1.0.0"}"#).unwrap();
+        let member = format!(
+            r#"{{"name":"member","version":"1.0.0","dependencies":{{"local":"file:{source}"}}}}"#
+        );
+        project
+            .write("members/member/package.json", member.as_bytes())
+            .unwrap();
+        project
+            .write(
+                "vendor/tool/package.json",
+                br#"{"name":"tool","version":"1.0.0"}"#,
+            )
+            .unwrap();
         let store = project.path().join("vendor/tool/store");
-        let result = run(project.path(), &["install", "--store-dir", store.to_str().unwrap()]);
+        let result = run(
+            project.path(),
+            &["install", "--store-dir", store.to_str().unwrap()],
+        );
         assert!(!result.status.success(), "{source}");
         assert_eq!(fs::read(project.path().join("package.json")).unwrap(), root);
-        assert_eq!(fs::read(project.path().join("members/member/package.json")).unwrap(), member.as_bytes());
-        for path in ["tapid.lock", "node_modules", "members/member/node_modules", "vendor/tool/store"] {
+        assert_eq!(
+            fs::read(project.path().join("members/member/package.json")).unwrap(),
+            member.as_bytes()
+        );
+        for path in [
+            "tapid.lock",
+            "node_modules",
+            "members/member/node_modules",
+            "vendor/tool/store",
+        ] {
             assert!(!project.path().join(path).exists(), "{source}: {path}");
         }
     }
@@ -8446,29 +8907,87 @@ fn copied_directory_member_update_recovers_coordinated_activation() {
         let root = br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#;
         let member = br#"{"name":"member","version":"1.0.0","dependencies":{"local":"file:../../vendor/tool"}}"#;
         project.write("package.json", root).unwrap();
-        project.write("members/member/package.json", member).unwrap();
-        project.write("vendor/tool/package.json", br#"{"name":"tool","version":"1.0.0"}"#).unwrap();
-        project.write("vendor/tool/index.js", b"module.exports = 1;").unwrap();
+        project
+            .write("members/member/package.json", member)
+            .unwrap();
+        project
+            .write(
+                "vendor/tool/package.json",
+                br#"{"name":"tool","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+            .write("vendor/tool/index.js", b"module.exports = 1;")
+            .unwrap();
         let dir = project.path();
         let store = dir.join("store");
         let initial = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
-        assert!(initial.status.success(), "{}", String::from_utf8_lossy(&initial.stderr));
+        assert!(
+            initial.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initial.stderr)
+        );
         let lock = fs::read(dir.join("tapid.lock")).unwrap();
-        let trees = fs::read_dir(store.join("trees")).unwrap().map(|entry| entry.unwrap().file_name()).collect::<std::collections::BTreeSet<_>>();
-        project.write("vendor/tool/index.js", b"module.exports = 2;").unwrap();
-        let result = run_with_env(dir, &["update", "local", "--workspace", "member", "--store-dir", store.to_str().unwrap()], variable, point);
+        let trees = fs::read_dir(store.join("trees"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        project
+            .write("vendor/tool/index.js", b"module.exports = 2;")
+            .unwrap();
+        let result = run_with_env(
+            dir,
+            &[
+                "update",
+                "local",
+                "--workspace",
+                "member",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
+            variable,
+            point,
+        );
         assert!(!result.status.success(), "{point}");
         if variable == "TAPID_TEST_CRASH_POINT" {
             for _ in 0..2 {
-                let recovered = run_with_env(dir, &["install", "--offline", "--store-dir", store.to_str().unwrap()], "TAPID_TEST_RECOVER_ONLY", "1");
-                assert!(recovered.status.success(), "{}", String::from_utf8_lossy(&recovered.stderr));
+                let recovered = run_with_env(
+                    dir,
+                    &[
+                        "install",
+                        "--offline",
+                        "--store-dir",
+                        store.to_str().unwrap(),
+                    ],
+                    "TAPID_TEST_RECOVER_ONLY",
+                    "1",
+                );
+                assert!(
+                    recovered.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&recovered.stderr)
+                );
             }
         }
         assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock, "{point}");
         assert_eq!(fs::read(dir.join("package.json")).unwrap(), root);
-        assert_eq!(fs::read(dir.join("members/member/package.json")).unwrap(), member);
-        assert_eq!(fs::read(dir.join("members/member/node_modules/local/index.js")).unwrap(), b"module.exports = 1;", "{point}");
-        assert_eq!(fs::read_dir(store.join("trees")).unwrap().map(|entry| entry.unwrap().file_name()).collect::<std::collections::BTreeSet<_>>(), trees, "{point}");
+        assert_eq!(
+            fs::read(dir.join("members/member/package.json")).unwrap(),
+            member
+        );
+        assert_eq!(
+            fs::read(dir.join("members/member/node_modules/local/index.js")).unwrap(),
+            b"module.exports = 1;",
+            "{point}"
+        );
+        assert_eq!(
+            fs::read_dir(store.join("trees"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>(),
+            trees,
+            "{point}"
+        );
         assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
         assert!(dir.join("node_modules/member/package.json").exists());
     }
@@ -8918,6 +9437,22 @@ fn copied_git_archives_use_the_same_safe_extraction_and_bin_lane() {
         assert_eq!(String::from_utf8_lossy(&node.stdout).trim(), "prerelease");
     }
     let locked = fs::read(project.path().join("tapid.lock")).unwrap();
+    let offline = run(
+        project.path(),
+        &[
+            "update",
+            "local",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        offline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offline.stderr)
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), locked);
     let mut altered: serde_json::Value =
         serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
     altered["packages"][0]["artifact"] =

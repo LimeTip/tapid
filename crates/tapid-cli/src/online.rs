@@ -117,16 +117,37 @@ pub(crate) struct WorkspaceMemberInstall {
     pub links: WorkspaceLinkPlan,
 }
 impl WorkspaceInstallPlan {
-    pub(crate) fn include_copied_member_roots(&mut self, project: &Path, lock: &Lockfile) -> Result<(), String> {
+    pub(crate) fn include_copied_member_roots(
+        &mut self,
+        project: &Path,
+        lock: &Lockfile,
+    ) -> Result<(), String> {
         self.include_owned_members()?;
         for member in lock.workspace_packages().values() {
-            if member.dependencies().values().any(|target| target.parse::<LockfilePackageKey>().is_ok_and(|key| key.source.copied().is_some())) {
-                let key: LockfilePackageKey = member.key().parse().map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
-                let path = key.source.workspace().ok_or("missing workspace source")?.path();
-                self.members.entry(project.join(path)).or_insert_with(|| WorkspaceMemberInstall {
-                    input: NamedLayoutInput { instances: Vec::new(), root_dependencies: Vec::new(), dependency_edges: Vec::new() },
-                    links: WorkspaceLinkPlan::default(),
-                });
+            if member.dependencies().values().any(|target| {
+                target
+                    .parse::<LockfilePackageKey>()
+                    .is_ok_and(|key| key.source.copied().is_some())
+            }) {
+                let key: LockfilePackageKey = member
+                    .key()
+                    .parse()
+                    .map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
+                let path = key
+                    .source
+                    .workspace()
+                    .ok_or("missing workspace source")?
+                    .path();
+                self.members
+                    .entry(project.join(path))
+                    .or_insert_with(|| WorkspaceMemberInstall {
+                        input: NamedLayoutInput {
+                            instances: Vec::new(),
+                            root_dependencies: Vec::new(),
+                            dependency_edges: Vec::new(),
+                        },
+                        links: WorkspaceLinkPlan::default(),
+                    });
             }
         }
         Ok(())
@@ -141,28 +162,62 @@ impl WorkspaceInstallPlan {
         input: &NamedLayoutInput,
     ) -> Result<(), String> {
         self.include_owned_members()?;
-        let instances = input.instances.iter().map(|instance| {
-            (LockfilePackageKey::from_source(
-                instance.id.registry.clone(), instance.id.name.clone(), instance.id.version.clone(),
-                &instance.peer_context, &instance.platform_context,
-            ).to_string(), InstanceKey::from(instance))
-        }).collect::<BTreeMap<_, _>>();
+        let instances = input
+            .instances
+            .iter()
+            .map(|instance| {
+                (
+                    LockfilePackageKey::from_source(
+                        instance.id.registry.clone(),
+                        instance.id.name.clone(),
+                        instance.id.version.clone(),
+                        &instance.peer_context,
+                        &instance.platform_context,
+                    )
+                    .to_string(),
+                    InstanceKey::from(instance),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         for member in lock.workspace_packages().values() {
             let mut roots = Vec::new();
             for (name, target) in member.dependencies() {
-                let key: LockfilePackageKey = target.parse().map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
+                let key: LockfilePackageKey = target
+                    .parse()
+                    .map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
                 if key.source.copied().is_some() {
                     roots.push(NamedDependency {
-                        name: name.parse().map_err(|error: tapid_core::DomainError| error.to_string())?,
-                        child: instances.get(target).cloned().ok_or("missing copied member instance")?,
+                        name: name
+                            .parse()
+                            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                        child: instances
+                            .get(target)
+                            .cloned()
+                            .ok_or("missing copied member instance")?,
                     });
                 }
             }
             if !roots.is_empty() {
-                self.members.insert(project.join(member.key().parse::<LockfilePackageKey>().map_err(|error| error.to_string())?.source.workspace().ok_or("missing workspace source")?.path()), WorkspaceMemberInstall {
-                    input: npm_import::pinned_layout(roots, &input.instances, &input.dependency_edges),
-                    links: WorkspaceLinkPlan::default(),
-                });
+                self.members.insert(
+                    project.join(
+                        member
+                            .key()
+                            .parse::<LockfilePackageKey>()
+                            .map_err(|error| error.to_string())?
+                            .source
+                            .workspace()
+                            .ok_or("missing workspace source")?
+                            .path(),
+                    ),
+                    WorkspaceMemberInstall {
+                        input: npm_import::pinned_layout(
+                            roots,
+                            &input.instances,
+                            &input.dependency_edges,
+                        ),
+                        links: WorkspaceLinkPlan::default(),
+                    },
+                );
             }
         }
         Ok(())
@@ -462,7 +517,11 @@ pub(crate) fn workspace_materialization_from_discovered(
         let package_index = *locked_by_name
             .get(member.name())
             .ok_or("workspace member has no lockfile identity")?;
-        let normalized = copied::normalized_manifest(root, member.path().parent().ok_or("member has no parent")?, manifest)?;
+        let normalized = copied::normalized_manifest(
+            root,
+            member.path().parent().ok_or("member has no parent")?,
+            manifest,
+        )?;
         copied::validate_declarations(root, &normalized)?;
         if !copied::copied_root_names(&normalized)?.is_empty() {
             copied_members.push(WorkspaceCopiedMember {
@@ -592,8 +651,13 @@ pub(crate) fn workspace_materialization_from_discovered(
             }
         }
     }
-    let root_manifest = replacement.filter(|(path, _)| *path == workspace.root_path()).map_or(workspace.root(), |(_, manifest)| manifest);
-    copied::validate_directory_overlap(root, std::iter::once(root_manifest).chain(copied_members.iter().map(|member| &member.manifest)))?;
+    let root_manifest = replacement
+        .filter(|(path, _)| *path == workspace.root_path())
+        .map_or(workspace.root(), |(_, manifest)| manifest);
+    copied::validate_directory_overlap(
+        root,
+        std::iter::once(root_manifest).chain(copied_members.iter().map(|member| &member.manifest)),
+    )?;
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
         links,
@@ -791,15 +855,31 @@ pub(crate) fn validate_manifest_roots(
 ) -> Result<(), OperationalError> {
     let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
     let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
-    let normalized = copied::normalized_manifest(project, manifest_path.parent().ok_or("manifest has no parent")?, manifest)?;
+    let normalized = copied::normalized_manifest(
+        project,
+        manifest_path.parent().ok_or("manifest has no parent")?,
+        manifest,
+    )
+    .map_err(invalid)?;
     copied::validate_declarations(project, &normalized).map_err(invalid)?;
-    let discovered = Workspace::discover(project)?;
-    let workspace = workspace_materialization_from_discovered(project, &registry_config, Some((manifest_path, manifest)), &discovered).map_err(|mut error| {
+    let discovered = Workspace::discover_typed(project)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
+    let workspace = workspace_materialization_from_discovered(
+        project,
+        &registry_config,
+        Some((manifest_path, manifest)),
+        &discovered,
+    )
+    .map_err(|mut error| {
         // Preserve the request-validation category while retaining typed evidence.
         error.kind = ErrorKind::InvalidRequest;
         error
     })?;
-    let root_manifest = if manifest_path == discovered.root_path() { manifest } else { discovered.root() };
+    let root_manifest = if manifest_path == discovered.root_path() {
+        manifest
+    } else {
+        discovered.root()
+    };
     workspace_root_resolution(root_manifest, &workspace, &registry_config)
         .map(|_| ())
         .map_err(invalid)
@@ -1031,6 +1111,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
     let mut trees = BTreeMap::new();
     let mut instances = Vec::new();
     let mut artifact_fetcher = artifact::ArtifactFetcher {
+        offline: update.is_some_and(|request| request.offline),
         store,
         config: registry_config,
         transports: BTreeMap::new(),
@@ -1364,7 +1445,9 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     for dependency in &workspace_registry_dependencies {
-        if dependency.registry.registry().is_none() { continue; }
+        if dependency.registry.registry().is_none() {
+            continue;
+        }
         let id = graph::workspace_registry_target(dependency, &resolution, &records)?;
         let instance = instance_keys
             .get(&(

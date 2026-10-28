@@ -306,7 +306,8 @@ fn perform_install(
         ManifestMutation::AddPackage(package) => (None, Some(package)),
         ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
     };
-    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
+    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline)
+        || matches!(mode, InstallMode::Update(request) if request.offline);
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
     if overrides.enabled() && (offline || frozen || allow_unverified_registry_artifacts) {
@@ -375,11 +376,25 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    online::validate_manifest_roots(&project_dir, &preflight_manifest, &project_dir.join("package.json"))?;
-    online::validate_directory_store(&project_dir, &preflight_manifest, &project_dir.join("package.json"), store.root())?;
+    online::validate_manifest_roots(
+        &project_dir,
+        &preflight_manifest,
+        &project_dir.join("package.json"),
+    )?;
+    online::validate_directory_store(
+        &project_dir,
+        &preflight_manifest,
+        &project_dir.join("package.json"),
+        store.root(),
+    )?;
     if let Some(updated) = manifest_override {
         online::validate_manifest_roots(&project_dir, updated.updated, &manifest_path)?;
-        online::validate_directory_store(&project_dir, updated.updated, &manifest_path, store.root())?;
+        online::validate_directory_store(
+            &project_dir,
+            updated.updated,
+            &manifest_path,
+            store.root(),
+        )?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
@@ -500,7 +515,12 @@ fn perform_install(
     } else {
         read_manifest(&root_manifest_path)?
     };
-    online::validate_directory_store(&project_dir, &root_manifest, &project_dir.join("package.json"), store.root())?;
+    online::validate_directory_store(
+        &project_dir,
+        &root_manifest,
+        &project_dir.join("package.json"),
+        store.root(),
+    )?;
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {
@@ -525,8 +545,8 @@ fn perform_install(
         }
         _ => None,
     };
-    let preserve =
-        matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
+    let preserve = matches!(mode, InstallMode::Online)
+        || update.is_some_and(|request| request.named || request.offline);
     let replay_existing = if preserve && update.is_none() {
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
@@ -547,7 +567,10 @@ fn perform_install(
     if imported.is_some() {
         session.outcome.lifecycle.as_mut().unwrap().reason = Some("imported_lock");
     }
-    if imported.is_some() || !offline && !frozen && !replay_existing {
+    if imported.is_some()
+        || update.is_some_and(|request| request.offline)
+        || !offline && !frozen && !replay_existing
+    {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {

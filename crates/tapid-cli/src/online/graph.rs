@@ -131,8 +131,13 @@ pub(super) fn resolve_package_graph(
     let root_copied_count = copied_roots.len();
     for member in &copied_members {
         let prepared = copied::prepare_roots(
-            project, &member.manifest, previous_lock, &fixture_records,
-            fixture.is_some(), update, Some((&member.key, &member.manifest_path)),
+            project,
+            &member.manifest,
+            previous_lock,
+            &fixture_records,
+            fixture.is_some(),
+            update,
+            Some((&member.key, &member.manifest_path)),
         )?;
         for (dependency, record) in prepared {
             workspace_registry_dependencies.push(WorkspaceRegistryDependency {
@@ -161,7 +166,12 @@ pub(super) fn resolve_package_graph(
         );
     }
     let mut local_identities = BTreeMap::new();
-    for root in roots.iter().filter(|root| root_registry_identities.iter().any(|(source, _)| source == &root.registry) || root.registry.registry().is_some()) {
+    for root in roots.iter().filter(|root| {
+        root_registry_identities
+            .iter()
+            .any(|(source, _)| source == &root.registry)
+            || root.registry.registry().is_some()
+    }) {
         register_local_root_identity(
             &mut local_identities,
             root.name.clone(),
@@ -249,6 +259,8 @@ pub(super) fn resolve_package_graph(
         ))
     });
     seed.extend(copied_records.values().cloned());
+    let offline = update.is_some_and(|request| request.offline);
+    let local_records = if offline { seed.clone() } else { Vec::new() };
     let mut metadata_lookups = 0;
     // Keep metadata shared by root refresh, tagged peers, and saved declarations.
     // Incremental resolution already deduplicates its own retrievals; retaining
@@ -282,6 +294,19 @@ pub(super) fn resolve_package_graph(
                 .filter(|package| &package.registry == registry && &package.name == name)
                 .cloned()
                 .collect()
+        } else if offline {
+            let records = local_records
+                .iter()
+                .filter(|record| &record.registry == registry && &record.name == name)
+                .cloned()
+                .collect::<Vec<_>>();
+            if records.is_empty() {
+                return Err(OperationalError::new(
+                    ErrorKind::RegistryMetadata,
+                    format!("offline: local metadata is unavailable for {name} from {registry}"),
+                ));
+            }
+            records
         } else {
             let registry = registry
                 .registry()
@@ -307,7 +332,7 @@ pub(super) fn resolve_package_graph(
             Ok(records)
         }
     };
-    if let Some(request) = update.filter(|request| request.named) {
+    if let Some(request) = update.filter(|request| request.named && !request.offline) {
         update::refresh_selected(
             request,
             &roots,
@@ -430,6 +455,7 @@ mod tests {
             &config,
             None,
             Some(UpdateRequest {
+                offline: false,
                 plan: &plan,
                 target: &target,
                 named: true,
@@ -471,6 +497,7 @@ mod tests {
             &config,
             None,
             Some(UpdateRequest {
+                offline: false,
                 plan: &plan,
                 target: &target,
                 named: true,
@@ -533,6 +560,7 @@ mod tests {
             &config,
             None,
             Some(UpdateRequest {
+                offline: false,
                 plan: &plan,
                 target: &target,
                 named: true,

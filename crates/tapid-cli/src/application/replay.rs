@@ -63,13 +63,26 @@ pub(super) fn validate_workspace_dependency_edges(
             .get(&key)
             .ok_or_else(|| format!("lockfile is missing workspace package {key}"))?;
         let mut expected_names = std::collections::BTreeSet::new();
-        for member in workspace.copied_members.iter().filter(|member| member.key == key) {
+        for member in workspace
+            .copied_members
+            .iter()
+            .filter(|member| member.key == key)
+        {
             for name in online::copied_root_names(&member.manifest)? {
                 expected_names.insert(name.clone());
-                let target = locked.dependencies().get(&name).ok_or("missing copied member binding")?;
-                let target_key: tapid_lockfile::LockfilePackageKey = target.parse().map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
-                if !online::validate_copied_root_binding(&member.manifest, &name, target_key.source.copied())?
-                    || !lock.packages().contains_key(target) {
+                let target = locked
+                    .dependencies()
+                    .get(&name)
+                    .ok_or("missing copied member binding")?;
+                let target_key: tapid_lockfile::LockfilePackageKey = target
+                    .parse()
+                    .map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
+                if !online::validate_copied_root_binding(
+                    &member.manifest,
+                    &name,
+                    target_key.source.copied(),
+                )? || !lock.packages().contains_key(target)
+                {
                     return Err("copied member binding does not match its declaration".into());
                 }
             }
