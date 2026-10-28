@@ -2,6 +2,7 @@ mod artifact;
 mod copied;
 mod graph;
 mod preview;
+mod selection;
 pub(crate) use copied::{
     copied_root_names, declaration as copied_declaration, validate_copied_root_binding,
     validate_locked_files,
@@ -910,19 +911,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
-    let graph::ResolvedGraph {
-        candidate_exclusions,
-        metadata_lookups: _,
-        resolution,
-        records,
-        workspace_links,
-        mut workspace_locked,
-        workspace_registry_dependencies,
-        root_registry_identities,
-        workspace_root_keys,
-        direct_local_names,
-        updated_manifest,
-    } = graph::resolve_package_graph(
+    let mut resolved = graph::resolve_package_graph(
         project,
         manifest,
         workspace,
@@ -935,13 +924,24 @@ pub(crate) fn resolve_and_fetch_with_lock(
     )?;
     let configured_origins = registry_config.configured_origins();
     if let Some(request) = update.filter(|request| request.save.is_some()) {
-        let saved = updated_manifest.as_ref().expect("resolved update manifest");
+        let saved = resolved
+            .updated_manifest
+            .as_ref()
+            .expect("resolved update manifest");
         fs::write(request.target, saved.to_json()).map_err(|error| {
             OperationalError::from_source(ErrorKind::Transaction, error)
                 .context("cannot save updated requirements")
         })?;
-        workspace_locked = workspace_materialization(project, registry_config)?.locked;
+        resolved.workspace_locked = workspace_materialization(project, registry_config)?.locked;
     }
+    let graph::ResolvedGraph {
+        resolution,
+        records,
+        workspace_registry_dependencies,
+        root_registry_identities,
+        direct_local_names,
+        ..
+    } = &resolved;
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
     })?;
@@ -953,9 +953,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
         &root_digest(project).map_err(|error| OperationalError::new(ErrorKind::Manifest, error))?,
     )
     .map_err(OperationalError::from)?;
-    let empty_peer = tapid_core::PeerContext::default();
     let mut platform_contexts = BTreeMap::new();
-    let mut packages = BTreeMap::new();
+    let mut packages = Vec::new();
     let mut trees = BTreeMap::new();
     let mut instances = Vec::new();
     let mut artifact_fetcher = artifact::ArtifactFetcher {
@@ -1064,7 +1063,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 .set_artifact_url(url)
                 .map_err(OperationalError::from)?;
         }
-        packages.insert(key.clone(), (locked, record, id.clone()));
+        packages.push((locked, id.clone()));
         trees.insert(key, tree.clone());
         instances.push(PackageInstance {
             id: tapid_core::PackageInstanceId::from_source(
@@ -1086,83 +1085,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
             ));
         }
     }
-    let mut dependencies_by_parent = BTreeMap::new();
-    for edge in &resolution.dependencies {
-        dependencies_by_parent
-            .entry(edge.parent.clone())
-            .or_insert_with(Vec::new)
-            .push(edge);
-    }
-    let locked_packages: Result<Vec<_>, OperationalError> = packages
-        .values()
-        .map(|(locked, _, id)| {
-            let mut locked = locked.clone();
-            for edge in dependencies_by_parent.get(id).into_iter().flatten() {
-                let target = &edge.child;
-                let target_platform = platform_contexts.get(target).ok_or_else(|| {
-                    OperationalError::new(
-                        ErrorKind::Resolution,
-                        format!("missing platform context for {target}"),
-                    )
-                })?;
-                let target_key = LockfilePackageKey::from_source(
-                    target.registry.clone(),
-                    target.name.clone(),
-                    target.version.clone(),
-                    resolution.peer_contexts.get(target).unwrap_or(&empty_peer),
-                    target_platform,
-                )
-                .to_string();
-                locked
-                    .add_alias_dependency(&edge.dependency.to_string(), &target_key)
-                    .map_err(OperationalError::from)?;
-            }
-            Ok(locked)
-        })
-        .collect();
-    for dependency in &workspace_registry_dependencies {
-        let id = graph::workspace_registry_target(dependency, &resolution, &records)?;
-        let target_platform = platform_contexts
-            .get(id)
-            .ok_or_else(|| format!("missing platform context for {id}"))?;
-        let target_key = LockfilePackageKey::from_source(
-            id.registry.clone(),
-            id.name.clone(),
-            id.version.clone(),
-            resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
-            target_platform,
-        )
-        .to_string();
-        let member = workspace_locked
-            .iter_mut()
-            .find(|member| member.key() == dependency.member_key)
-            .ok_or("workspace member dependency has no lockfile identity")?;
-        let dependency_name = dependency.manifest_name.clone();
-        if member
-            .dependencies()
-            .get(&dependency_name)
-            .is_some_and(|existing| existing != &target_key)
-        {
-            return Err(OperationalError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "workspace member '{}' declares ambiguous registry identities for dependency '{}'; refusing to overwrite a lockfile edge",
-                    dependency.member_key, dependency_name
-                ),
-            ));
-        }
-        if dependency.requirement.is_alias() {
-            member
-                .add_alias_dependency(&dependency_name, &target_key)
-                .map_err(OperationalError::from)?;
-        } else {
-            member
-                .add_dependency(&dependency_name, &target_key)
-                .map_err(OperationalError::from)?;
-        }
-    }
-    lock.insert_graph(locked_packages?, workspace_locked)
-        .map_err(OperationalError::from)?;
+    resolved.assemble_lock(&mut lock, &platform_contexts, packages)?;
     let direct_bindings = resolution
         .root_bindings
         .iter()
@@ -1171,49 +1094,6 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 && root_registry_identities.contains(&(registry.clone(), id.name.clone()))
         })
         .collect::<Vec<_>>();
-    let mut root_keys = direct_bindings
-        .iter()
-        .map(|(_, id)| *id)
-        .map(|id| {
-            let platform = platform_contexts
-                .get(id)
-                .expect("selected root platform context");
-            LockfilePackageKey::from_source(
-                id.registry.clone(),
-                id.name.clone(),
-                id.version.clone(),
-                resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
-                platform,
-            )
-            .to_string()
-        })
-        .collect::<Vec<_>>();
-    root_keys.extend(workspace_root_keys);
-    root_keys.sort();
-    root_keys.dedup();
-    lock.set_roots(root_keys).map_err(OperationalError::from)?;
-    lock.set_root_bindings(
-        direct_bindings
-            .iter()
-            .map(|((_, name), id)| {
-                let platform = platform_contexts
-                    .get(id)
-                    .expect("selected root platform context");
-                (
-                    name.to_string(),
-                    LockfilePackageKey::from_source(
-                        id.registry.clone(),
-                        id.name.clone(),
-                        id.version.clone(),
-                        resolution.peer_contexts.get(id).unwrap_or(&empty_peer),
-                        platform,
-                    )
-                    .to_string(),
-                )
-            })
-            .collect(),
-    )
-    .map_err(OperationalError::from)?;
     let instance_keys = instances
         .iter()
         .map(|instance| {
@@ -1291,8 +1171,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
             child: instance.clone(),
         });
     }
-    for dependency in &workspace_registry_dependencies {
-        let id = graph::workspace_registry_target(dependency, &resolution, &records)?;
+    for dependency in workspace_registry_dependencies {
+        let id = graph::workspace_registry_target(dependency, resolution, records)?;
         let instance = instance_keys
             .get(&(
                 id.registry.clone(),
@@ -1314,7 +1194,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     Ok(PreparedInstall {
-        candidate_exclusions,
+        candidate_exclusions: resolved.candidate_exclusions,
         lock,
         layout: PreparedLayout {
             input: NamedLayoutInput {
@@ -1323,7 +1203,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
                 dependency_edges: edge_list,
             },
             trees,
-            workspace: workspace_links.into(),
+            workspace: resolved.workspace_links.into(),
         },
         transaction: store_transaction,
     })

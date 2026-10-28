@@ -349,6 +349,19 @@ pub(super) fn resolve_package_graph(
             )
         })
         .transpose()?;
+    // Save policies can narrow a member's declarations. Persist evidence for the
+    // proposed bytes through the same read-only workspace planner used by previews.
+    let workspace_locked = match (update, updated_manifest.as_ref()) {
+        (Some(request), Some(saved)) if request.save.is_some() => {
+            workspace_materialization_with_manifest(
+                project,
+                registry_config,
+                Some((request.target, saved)),
+            )?
+            .locked
+        }
+        _ => workspace_locked,
+    };
     Ok(ResolvedGraph {
         candidate_exclusions,
         updated_manifest,
@@ -385,7 +398,7 @@ mod tests {
     use crate::application::lifecycle::{SavePolicy, plan_update};
 
     #[test]
-    fn peer_only_save_reuses_metadata_retrieved_for_a_transitive_dependency() {
+    fn selection_candidate_preserves_peer_only_save_and_metadata_counts() {
         let project = tapid_test_support::TempProject::new("graph-peer-save-metadata").unwrap();
         let text = r#"{"name":"app","version":"1.0.0","dependencies":{"parent":"^1"},"peerDependencies":{"child":"^1"}}"#;
         project.write("package.json", text.as_bytes()).unwrap();
@@ -420,7 +433,19 @@ mod tests {
         .unwrap();
         assert_eq!(resolved.resolution.selected.len(), 2);
         assert_eq!(resolved.metadata_lookups, 2);
-        let saved = resolved.updated_manifest.unwrap();
+        let saved_digest = digest(
+            resolved
+                .updated_manifest
+                .as_ref()
+                .unwrap()
+                .to_json()
+                .as_bytes(),
+        )
+        .to_string();
+        let candidate = resolved.into_selection(&saved_digest, None).unwrap();
+        assert_eq!(candidate.lock.root_manifest_digest(), saved_digest);
+        assert_eq!(candidate.metadata_lookups, 2);
+        let saved = candidate.updated_manifest.unwrap();
         assert_eq!(saved.dependencies()["parent"], "^1");
         assert_eq!(saved.peer_dependencies()["child"], "1.1.0");
     }

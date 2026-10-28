@@ -51,6 +51,13 @@ hydration preserves the pending lock and installed application. Schema 11 is
 retained after hydration. Pending receipts are rejected by ci and offline replay;
 retain the completed lock after frozen hydration before using those commands.
 
+The internal selection candidate consumes the resolved graph without artifact
+fetching or store preparation. Fetched installations and candidates share lock
+assembly for dependency edges, aliases, workspace evidence, and roots. Candidates
+retain source-tree receipts only when their source and artifact binding validates;
+lifecycle outputs are not retained. The command writer remains disabled until
+stale-input publication and command routing are complete.
+
 ## Commands
 
 ```text
