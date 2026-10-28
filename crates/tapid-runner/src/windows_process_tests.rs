@@ -40,6 +40,12 @@ fn bounded_host_output(
 
 #[test]
 fn scm_com_server_activates_and_removes_its_exact_registration() {
+    for registry_read in [true, false] {
+        scm_com_server_comparison(registry_read);
+    }
+}
+
+fn scm_com_server_comparison(registry_read: bool) {
     let project = tapid_test_support::TempProject::new("scm-com-server").unwrap();
     let class = super::com_probe::unique_class();
     let executable = std::env::current_exe().unwrap();
@@ -78,7 +84,27 @@ fn scm_com_server_activates_and_removes_its_exact_registration() {
         .env("TAPID_TEST_MARKER", "provider-host")
         .env("TAPID_TEST_COM_DESCENDANT", "1")
         .env("TAPID_TEST_COM_CLASS", &class);
-    // There is no direct server spawn: this request must cause SCM activation.
+    let root = std::fs::canonicalize(project.path()).unwrap();
+    let program = root.join("scm-client.exe");
+    std::fs::copy(&executable, &program).unwrap();
+    let mut registry =
+        super::registry_probe::RegistryInput::new(root.file_name().unwrap().to_str().unwrap());
+    let mut contained_dispatches = 0;
+    compare_lpac_com_clients(
+        &root,
+        &program,
+        &class,
+        &registry.path,
+        &[registry_read],
+        |observed| {
+            contained_dispatches += observed;
+        },
+    );
+    registry.cleanup();
+    // Each token variant receives a fresh class with no running server. The
+    // contained root attempts activation first; host activation afterward is
+    // mandatory even when LPAC reports denial or class unavailability.
+    // No direct server spawn: only COM requests can have started the fixture.
     let activated = bounded_host_output(&mut client, 5_000).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let pid: u32 = loop {
@@ -129,16 +155,6 @@ fn scm_com_server_activates_and_removes_its_exact_registration() {
     assert!(String::from_utf8_lossy(&activated.stdout).contains("com:descendant:activated"));
     assert!(String::from_utf8_lossy(&activated.stdout).contains("com:local-server:activated"));
     assert!(project.path().join("ready").is_file());
-    let root = std::fs::canonicalize(project.path()).unwrap();
-    let program = root.join("scm-client.exe");
-    std::fs::copy(&executable, &program).unwrap();
-    let mut registry =
-        super::registry_probe::RegistryInput::new(root.file_name().unwrap().to_str().unwrap());
-    let mut contained_dispatches = 0;
-    compare_lpac_com_clients(&root, &program, &class, &registry.path, |observed| {
-        contained_dispatches += observed;
-    });
-    registry.cleanup();
     project.write("stop", b"").unwrap();
     assert_eq!(
         unsafe { WaitForSingleObject(server.0, 5_000) },
@@ -422,15 +438,22 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         "host root and descendant requests must reach the Rust server"
     );
     let mut creations_before = server.creations();
-    compare_lpac_com_clients(&root, &program, &server.class, &registry.path, |observed| {
-        let creations = server.creations();
-        assert_eq!(
-            creations - creations_before,
-            observed,
-            "activation observation must match server-side dispatch"
-        );
-        creations_before = creations;
-    });
+    compare_lpac_com_clients(
+        &root,
+        &program,
+        &server.class,
+        &registry.path,
+        &[true, false],
+        |observed| {
+            let creations = server.creations();
+            assert_eq!(
+                creations - creations_before,
+                observed,
+                "activation observation must match server-side dispatch"
+            );
+            creations_before = creations;
+        },
+    );
     registry.cleanup();
     server.cleanup();
     let creations_before = server.creations();
@@ -524,6 +547,7 @@ fn compare_lpac_com_clients(
     program: &std::path::Path,
     class: &str,
     registry_path: &str,
+    registry_variants: &[bool],
     mut observe_dispatches: impl FnMut(u32),
 ) {
     let helper = format!(
@@ -545,7 +569,7 @@ fn compare_lpac_com_clients(
     .unwrap();
     let application: Vec<_> = program_units.into_iter().chain(Some(0)).collect();
     let cwd: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
-    for registry_read in [true, false] {
+    for &registry_read in registry_variants {
         let environment = super::super::super::windows_environment_block_units(
             &std::collections::BTreeMap::from([
                 (std::ffi::OsString::from("SystemRoot"), system_root.clone()),

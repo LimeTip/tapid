@@ -179,7 +179,7 @@ sampled controls; it does not resolve the inventory below or enable authenticati
 | All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
 | Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | The native cross-run control derives each profile folder from the actual child token, writes and rereads a private sentinel, requires its removal after completion, and checks that a second execution gets a different folder and cannot read the previous sentinel. Native execution is pending. Full initial contents and deletion-failure controls remain unresolved. Unique names alone do not identify initial profile bytes or registry state. |
 | Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
-| COM / brokers | Paired host/LPAC in-process ShellLink and disposable running Rust local-server activation probes; no complete activation or response inventory | Native observations are pending. The local-server control checks dispatch counts and exact registration revocation, but covers host SCM launch separately, but does not cover LPAC-triggered SCM launch or arbitrary brokers. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
+| COM / brokers | Paired host/LPAC in-process ShellLink and disposable running Rust local-server activation probes; no complete activation or response inventory | Native observations are pending. The local-server control checks dispatch counts and exact registration revocation, covers fresh-class LPAC-triggered SCM launch and host-positive controls, but does not establish arbitrary broker closure. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
 | Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
 | KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
 | Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
@@ -372,10 +372,13 @@ checks their absence, and requires class unavailability from a fresh client.
 It neither creates nor deletes shared registry ancestors. A missing per-user
 CLSID parent or an execution context that ignores per-user COM registration
 fails the host-positive control rather than falling back to machine registration.
-The same verified suspended-launch helper now runs registryRead and capability-free
-LPAC clients against the already running SCM-launched class, including direct
-descendants. This does not test an LPAC client starting an inactive server. Each
-run requires separate root and descendant observations. The final server dispatch
+Each registryRead and capability-free variant now receives a fresh disposable
+class with no running server. The verified suspended-launch helper runs the LPAC
+root first, followed by its direct descendant; mandatory host root and descendant
+activation follows, even if the LPAC reports denial or class unavailability. This
+separates inactive-server activation from access to a host-started server without
+requiring either contained activation outcome. Each run requires separate root
+and descendant observations. The final server dispatch
 count must equal the two host activations plus all reported contained activations;
 class unavailability and access denial remain characterization, not broker closure.
 The forty-second server deadline covers the bounded host and paired client waits.
