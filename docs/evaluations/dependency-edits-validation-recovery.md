@@ -196,3 +196,76 @@ using the full lane in `docs/testing.md`, with writable execution-enabled scratc
 and `TMPDIR` configured as documented. Linux validation cannot establish native
 macOS or Windows behavior; retain the existing exact-candidate hosted gates.
 Earlier receipts and published old-head workflows do not validate this source.
+
+## Recovered-source truncation-pointer repair
+
+The recovered branch `relay/20-f4e5d221` was synchronized by the engine at
+`857b3861847cda95a7bb2c7978dc7210af92e946`, incorporating main
+`8f85a1416ed41969ea7b96a4e85ed5ae9ecd972b`. No conflict markers or unmerged
+entries remained. Review [5663154538](https://github.com/LimeTip/tapid/pull/360#pullrequestreview-5663154538)
+was refreshed: its P3 remained actionable despite approval; inline threads were
+empty. Published workflow results do not validate this local repaired source.
+During validation, `origin/main` advanced to
+`99c2bffa2418cc49551db8ce64fe82c9c479b1ca`; integrating that newer base remains
+engine-owned. No merge, commit, push or delivery action was performed here.
+
+The batch renderer now sorts and deduplicates `truncated_fields` after all
+contributors append their evidence, matching ordinary dependency output. It
+reuses the existing exclusion serializer and scalar bounding. No extra resolution,
+transaction, public interface or protocol change is introduced. Ordinary
+add/remove keep their existing cross-section contracts.
+
+Two renderer regressions cover eleven exclusion groups and simultaneous graph
+and exclusion shortening. Both failed before the production repair on the
+expected ordering assertion (zero passed, two failed;
+`/tmp/tapid-pointers-red.log`). After repair, both passed in the library filter.
+Assertions require sorted, duplicate-free pointers, valid shortened scalar
+targets, expected graph/exclusion pointers, edit indices and dispositions, and
+unchanged graph omission accounting. Existing tests retain the empty-pointer
+case and durable failure-state coverage.
+
+Fresh focused validation used the supplied absolute Node 22 executable, its
+runtime directory first in `PATH`, `CARGO_TARGET_DIR=target`, and sequential
+`scripts/dev.ts` commands:
+
+| Command suffix | Actual result |
+| --- | --- |
+| `test -p tapid --lib --locked dependency_edit` | 10 passed, including both new regressions and the 60-sample matrix |
+| `test -p tapid --test cli --locked dependency_edits_` | 8 passed |
+| `test -p tapid --test json_results --locked candidate_exclusions` | 2 passed |
+| `test -p tapid --lib --locked batch_` | 11 passed, including five crash checkpoints |
+| `test -p tapid --test agent_workflows --locked` | 8 passed |
+| `test -p tapid --test cli --locked dependency_dry_run` | 17 passed |
+| `test -p tapid --lib --locked preview_rejects_inputs_changed` | 1 passed |
+
+Focused logs use `/tmp/tapid-repair-` with the filter (or `agent_workflows`)
+as suffix; the first library filter is `/tmp/tapid-repair-edit.log`.
+The fresh matrix verifies final-state equivalence and operation counts on this
+integrated implementation. Retained timing samples remain historical and are
+not replaced by this test run; no universal latency or tool-call claim follows.
+
+The final-source local lane ran sequentially with the same runtime and target:
+
+| Check | Actual result |
+| --- | --- |
+| `fmt --all --check` | Passed |
+| `clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
+| `test --workspace --all-features --locked --no-fail-fast` | Exit 101: only CLI integration, run planning and runner library failed. CLI library 303 passed; CLI integration 279 passed / 5 failed; run planning 11 passed / 2 failed; runner 152 passed / 25 failed. All other targets passed. |
+
+Failures explicitly report native macOS `UnsupportedContainment`, native probe
+profile installation failure and unavailable enforcement receipts. The assertions
+and containment policy were preserved. No product defect was inferred from these
+platform execution failures. Full-lane logs are
+`/tmp/tapid-current-{fmt,clippy,workspace,integration,architecture}.log`.
+A new engine-isolated full-lane receipt must cover the repaired source; historical
+receipts do not. Provision execution-enabled scratch and `TMPDIR` as described in
+[testing](../testing.md). Linux results cannot establish native macOS or Windows
+behavior. Fresh independent QA/Security and published-candidate Acceptance remain
+downstream gates; old published workflow results are not reused for this source.
+
+The separate integration workspace passed (1 consumer-install test and 4 contract
+tests). Architecture passed with 192 production Rust files scanned; existing
+source-size recommendations remain. Final whitespace checks passed. Documentation
+links and the recorded wrapper commands were reviewed. These results complete all
+independently executable local checks; the failed native containment lane requires
+the engine validation handoff rather than an unsandboxed host retry.
