@@ -602,6 +602,12 @@ fn perform_install(
             &lock,
             &node_engines,
         )?;
+        session
+            .outcome
+            .compatibility
+            .as_mut()
+            .expect("compatibility initialized")
+            .recover_original_manifests(&lock, &trees);
 
         session
             .outcome
@@ -870,6 +876,12 @@ fn perform_install(
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         )?;
         let mut lifecycle_snapshots = Vec::new();
+        session
+            .outcome
+            .compatibility
+            .as_mut()
+            .expect("compatibility initialized")
+            .recover_original_manifests(&lock, &trees);
         super::dependency_scripts::apply(
             &project_dir,
             &lifecycle_policy,
@@ -956,6 +968,12 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
+    session
+        .outcome
+        .compatibility
+        .as_mut()
+        .expect("compatibility initialized")
+        .recover_original_manifests(&lock, &trees);
     super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,

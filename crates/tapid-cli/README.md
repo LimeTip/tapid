@@ -514,9 +514,12 @@ Corepack or delegates to another manager.
 
 Fresh native locks persist selected declarations (including inspected absence and
 malformed types) under schema 11. Native replay reads this evidence without Node
-or metadata requests; older native locks and imported replay without evidence
-report unknown. Copied sources use their verified original manifest. Offline
+or metadata requests. Imported locks extract explicitly recorded declarations
+with `imported_lock` provenance; an omitted `engines` field remains unknown.
+For unavailable evidence, installation reads the verified original package
+manifest before hooks, with a 1 MiB bound and matching package identity. Successful
+recovery uses `verified_source_manifest` provenance. Unavailable or unreadable
+evidence remains unknown. Copied sources use their verified original manifest. Offline
 replay does not fetch metadata or rewrite locks to enrich the report. Inspected
 absence is `not_declared`, never a claim of universal runtime support. Status and
-explain
-have not yet acquired this install report.
+explain have not yet acquired this install report.

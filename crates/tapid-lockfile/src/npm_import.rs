@@ -39,6 +39,8 @@ pub struct ImportedNpmArtifactReceipt {
 /// Exact selected artifact and its npm placement, with no invented tree digest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedNpmPackage {
+    /// Imported metadata is not archive-authenticated. Omission is unknown.
+    pub node_engine: crate::LockedNodeEngine,
     pub path: String,
     pub name: PackageName,
     pub version: PackageVersion,

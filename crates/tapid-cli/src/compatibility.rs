@@ -152,6 +152,60 @@ impl Report {
         );
     }
 
+    /// Call only with verified original trees, before lifecycle hooks can derive outputs.
+    /// Recovery enriches this operation's report, never the serialized lock.
+    pub(crate) fn recover_original_manifests(
+        &mut self,
+        lock: &tapid_lockfile::Lockfile,
+        trees: &std::collections::BTreeMap<String, std::path::PathBuf>,
+    ) {
+        for fact in &mut self.facts {
+            if fact.status != "unknown_evidence" {
+                continue;
+            }
+            let recovered = (|| {
+                let package = lock.packages().get(&fact.identity)?;
+                let tree = trees.get(&fact.identity)?;
+                let root = crate::filesystem::tree::package_content_root(tree).ok()?;
+                let bytes = crate::filesystem::read::read_bounded_file(
+                    &root.join("package.json"),
+                    1024 * 1024,
+                )
+                .ok()?;
+                // Manifest owns project/source declaration classification; registry
+                // normalization is not needed when the original file is available.
+                let text = std::str::from_utf8(&bytes).ok()?;
+                let manifest = PackageManifest::parse(text).ok()?;
+                if manifest.name().as_str() != package.name()
+                    || manifest.version().to_string() != package.version()
+                {
+                    return None;
+                }
+                let evaluation = node_evaluation(manifest.node_engine());
+                let range = match manifest.node_engine() {
+                    NodeEngineDeclaration::Range(range) => Some(range.to_owned()),
+                    _ => None,
+                };
+                Some((evaluation, range))
+            })();
+            if let Some(((classification, status, reason), requirement)) = recovered {
+                fact.classification = classification;
+                fact.status = status;
+                fact.reason = reason;
+                fact.requirement = requirement;
+                fact.provenance = "verified_source_manifest";
+            }
+        }
+        self.evidence_complete = self
+            .facts
+            .iter()
+            .all(|fact| fact.status != "unknown_evidence");
+        self.strict_satisfied = self
+            .facts
+            .iter()
+            .all(|fact| matches!(fact.status, "satisfied" | "not_declared"));
+    }
+
     /// Historical locks have no declaration evidence. Omission cannot mean absence.
     pub(crate) fn unknown_package(&mut self, key: &str) {
         self.evidence_complete = false;

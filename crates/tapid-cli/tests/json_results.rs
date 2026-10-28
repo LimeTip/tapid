@@ -770,6 +770,14 @@ fn json_install_replays_imported_npm_selections() {
     ] {
         project.write(path, bytes).unwrap();
     }
+    let mut npm: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package-lock.json")).unwrap())
+            .unwrap();
+    npm["packages"]["node_modules/parent"]["engines"] = serde_json::json!({"node": ">=22"});
+    npm["packages"]["node_modules/shared"]["engines"] = serde_json::json!({"node": false});
+    project
+        .write("package-lock.json", npm.to_string().as_bytes())
+        .unwrap();
     let import = Command::new(env!("CARGO_BIN_EXE_tapid"))
         .current_dir(project.path())
         .args(["import-package-lock", "package-lock.json"])
@@ -781,6 +789,7 @@ fn json_install_replays_imported_npm_selections() {
         String::from_utf8_lossy(&import.stderr)
     );
     let store = project.path().join("store");
+    let mut hydrated_lock = None;
     for offline in [false, true] {
         let mut args = vec![
             "install",
@@ -799,6 +808,47 @@ fn json_install_replays_imported_npm_selections() {
         assert_eq!(result["operation"], "install");
         assert_eq!(result["data"]["package_count"], 4);
         assert_eq!(result["outcome"], "success");
+        let facts = result["data"]["compatibility"]["facts"].as_array().unwrap();
+        let parent = facts
+            .iter()
+            .find(|fact| {
+                fact["identity"]
+                    .as_str()
+                    .unwrap()
+                    .contains("|parent@1.0.0|")
+            })
+            .unwrap();
+        assert_eq!(parent["requirement"], ">=22");
+        assert_eq!(parent["provenance"], "imported_lock");
+        assert_eq!(parent["status"], "unchecked_runtime");
+        let malformed = facts
+            .iter()
+            .find(|fact| {
+                fact["identity"]
+                    .as_str()
+                    .unwrap()
+                    .contains("|shared@1.0.0|")
+            })
+            .unwrap();
+        assert_eq!(malformed["reason"], "node_not_string");
+        assert_eq!(malformed["provenance"], "imported_lock");
+        let recovered = facts
+            .iter()
+            .find(|fact| {
+                fact["identity"]
+                    .as_str()
+                    .unwrap()
+                    .contains("|consumer@1.0.0|")
+            })
+            .unwrap();
+        assert_eq!(recovered["status"], "not_declared");
+        assert_eq!(recovered["provenance"], "verified_source_manifest");
+        assert_eq!(result["data"]["compatibility"]["evidence_complete"], true);
+        let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+        if let Some(previous) = &hydrated_lock {
+            assert_eq!(&bytes, previous);
+        }
+        hydrated_lock = Some(bytes);
     }
 }
 
@@ -1806,7 +1856,7 @@ fn native_replay_retains_ranges_malformed_and_historical_unknown_evidence() {
             );
             assert!(output.status.success(), "{replay}");
             let report = &replay["data"]["compatibility"];
-            assert_eq!(report["evidence_complete"], !historical);
+            assert_eq!(report["evidence_complete"], true);
             let fact = report["facts"]
                 .as_array()
                 .unwrap()
@@ -1815,16 +1865,12 @@ fn native_replay_retains_ranges_malformed_and_historical_unknown_evidence() {
                 .unwrap();
             assert_eq!(
                 fact["status"],
-                if historical {
-                    "unknown_evidence"
-                } else {
-                    status
-                }
+                if historical { "not_declared" } else { status }
             );
             assert_eq!(
                 fact["provenance"],
                 if historical {
-                    "unavailable"
+                    "verified_source_manifest"
                 } else {
                     "native_lock"
                 }
@@ -1834,5 +1880,92 @@ fn native_replay_retains_ranges_malformed_and_historical_unknown_evidence() {
             }
             assert_eq!(fs::read(&lock_path).unwrap(), before);
         }
+    }
+}
+
+#[test]
+fn historical_replay_recovers_only_bounded_identity_matching_original_manifests() {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    for (manifest, expected, reason) in [
+        (
+            br#"{"name":"dep","version":"1.0.0","engines":{"node":">=22"}}"#.to_vec(),
+            "unchecked_runtime",
+            "identification_not_requested",
+        ),
+        (
+            br#"{"name":"dep","version":"1.0.0","engines":{"node":false}}"#.to_vec(),
+            "unsupported",
+            "node_not_string",
+        ),
+        (
+            br#"{"name":"other","version":"1.0.0","engines":{}}"#.to_vec(),
+            "unknown_evidence",
+            "selected_package_evidence_unavailable",
+        ),
+        (
+            serde_json::json!({"name":"dep","version":"1.0.0","padding":" ".repeat(1024 * 1024)})
+                .to_string()
+                .into_bytes(),
+            "unknown_evidence",
+            "selected_package_evidence_unavailable",
+        ),
+    ] {
+        let project = TempProject::new("historical-manifest-recovery").unwrap();
+        let source = TempProject::new("original-tree").unwrap();
+        source.write("package.json", &manifest).unwrap();
+        let root = br#"{"name":"app","version":"1.0.0","dependencies":{"dep":"1.0.0"}}"#;
+        project.write("package.json", root).unwrap();
+        let digest = tapid_archive::canonical_tree_digest(source.path()).unwrap();
+        let store = tapid_store::Store::new(project.path().join("store"));
+        let mut transaction = store.transaction();
+        transaction
+            .stage_verified_tree(&digest.parse().unwrap(), source.path())
+            .unwrap();
+        transaction.publish().unwrap().commit().unwrap();
+        let package = tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            "dep",
+            "1.0.0",
+            &format!(
+                "sha512-{}",
+                base64::engine::general_purpose::STANDARD.encode([0; 64])
+            ),
+            &digest,
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        let mut lock =
+            tapid_lockfile::Lockfile::new(&format!("sha256-{:x}", Sha256::digest(root))).unwrap();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([&key]).unwrap();
+        let before = lock.to_json().unwrap();
+        project.write("tapid.lock", before.as_bytes()).unwrap();
+        let (output, result) = invoke(
+            &project,
+            &[
+                "install",
+                "--offline",
+                "--json",
+                "--store-dir",
+                store.root().to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{result}");
+        let report = &result["data"]["compatibility"];
+        let fact = report["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fact| fact["identity"] == key)
+            .unwrap();
+        assert_eq!(fact["status"], expected);
+        assert_eq!(fact["reason"], reason);
+        assert_eq!(report["evidence_complete"], expected != "unknown_evidence");
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            before
+        );
     }
 }

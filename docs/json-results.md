@@ -105,10 +105,15 @@ are `unsupported`, and unavailable selected-package evidence is
 `incompatible` independently of Node evidence.
 
 Native schema-11 replay reports persisted declarations with `native_lock`
-provenance. Historical native omission remains `unknown_evidence`; replay does
-not rewrite the lock to supply evidence. Fresh copied-source declarations come
-from the verified original manifest (`verified_source_manifest`), independently
-of registry metadata.
+provenance. Imported schema-8 declarations use `imported_lock`; omitted imported
+`engines` and historical native omission initially mean unknown evidence.
+Installation can recover these facts from verified original manifests before
+hooks, with a 1 MiB read bound and matching package identity, using
+`verified_source_manifest` provenance. Unavailable or unreadable evidence remains
+`unknown_evidence`. Recovery never rewrites a lock solely to supply compatibility
+evidence. Copied-source declarations also come from the verified original
+manifest, independently of registry metadata. Derived hook outputs do not redefine
+original declarations.
 
 Compatibility strings use the envelope's sanitization and text bounds. The
 presentation includes at most 1,024 facts, `omitted_facts`, and

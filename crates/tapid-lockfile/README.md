@@ -71,3 +71,11 @@ absence. Schema 11 rejects missing evidence, invalid states and unexpected field
 older schemas reject populated evidence. Frozen readers do not enrich locks.
 Schema 11 retains alias/root validation, lifecycle output authentication and
 copied-source restrictions from schemas 7, 9 and 10. Older clients reject it.
+
+Imported schema 8 exposes `ImportedNpmPackage::node_engine` from preserved npm
+metadata without changing the wire format. Omitted `engines` means unknown,
+while an explicit object without `node` records inspected absence. Strings and
+malformed declarations remain classified without range evaluation. This is
+imported metadata evidence, not authenticated archive content. CLI installation
+may recover unavailable evidence from bounded verified original manifests without
+rewriting the imported lock solely to enrich compatibility facts.
