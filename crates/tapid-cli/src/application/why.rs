@@ -1,3 +1,5 @@
+mod imported;
+
 use crate::{
     application::{
         lifecycle::resolve_workspace,
@@ -30,6 +32,7 @@ pub(crate) struct WhyReport {
     pub(crate) package: String,
     pub(crate) paths: Vec<WhyPath>,
     pub(crate) omissions: Vec<tapid_lockfile::AcceptedOmission>,
+    pub(crate) imported_omissions: Vec<tapid_lockfile::ImportedOmission>,
     pub(crate) selection: Option<WhySelection>,
     pub(crate) truncated: bool,
 }
@@ -106,6 +109,11 @@ pub(crate) fn explain(
         };
         OperationalError::from_source(kind, error).context("cannot read tapid.lock")
     })?;
+    let wire: serde_json::Value = serde_json::from_str(&lock_bytes)
+        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+    if matches!(wire["lockfileVersion"].as_u64(), Some(8 | 12)) {
+        return imported::explain(&selection, &root_manifest_bytes, &lock_bytes, &requested);
+    }
     let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
     // Inspection describes the recorded target, even on another host. It does
     // not authorize installing that selection on the current host.
@@ -130,7 +138,7 @@ pub(crate) fn explain(
     let graph = graph(&lock)?;
     let mut state = SearchState::default();
     for root in roots {
-        let Some(source_kind) = graph.nodes.get(&root.key).map(source_kind) else {
+        let Some(source_kind) = graph.nodes.get(&root.key).map(|node| node.source_kind) else {
             continue;
         };
         let first = WhyStep {
@@ -222,6 +230,7 @@ pub(crate) fn explain(
         package: requested.to_string(),
         paths: state.paths,
         omissions,
+        imported_omissions: Vec::new(),
         selection: lock.selection().map(|facts| WhySelection {
             target: facts.target.clone(),
             profile: facts.profile,
@@ -387,9 +396,23 @@ pub(super) fn requiring_edges(
     Ok(reasons)
 }
 
+struct WhyNode {
+    name: tapid_core::PackageName,
+    source_kind: &'static str,
+}
+
+impl From<LockfilePackageKey> for WhyNode {
+    fn from(key: LockfilePackageKey) -> Self {
+        Self {
+            source_kind: source_kind(&key),
+            name: key.name,
+        }
+    }
+}
+
 struct WhyGraph {
     edges: BTreeMap<String, Vec<Edge>>,
-    nodes: BTreeMap<String, LockfilePackageKey>,
+    nodes: BTreeMap<String, WhyNode>,
 }
 
 fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
@@ -489,7 +512,10 @@ fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
     }
     Ok(WhyGraph {
         edges: graph,
-        nodes,
+        nodes: nodes
+            .into_iter()
+            .map(|(path, key)| (path, key.into()))
+            .collect(),
     })
 }
 
@@ -520,7 +546,11 @@ fn search_paths(
     let Some(current_key) = graph.nodes.get(current) else {
         return;
     };
-    if &current_key.name == requested {
+    if &current_key.name == requested
+        || path
+            .last()
+            .is_some_and(|step| step.via.as_deref() == Some(requested.as_str()))
+    {
         if state.paths.len() == MAX_PATHS {
             state.truncated = true;
         } else {
@@ -546,7 +576,7 @@ fn search_paths(
         if !visited.insert(edge.target.clone()) {
             continue;
         }
-        let Some(source_kind) = graph.nodes.get(&edge.target).map(source_kind) else {
+        let Some(source_kind) = graph.nodes.get(&edge.target).map(|node| node.source_kind) else {
             visited.remove(&edge.target);
             continue;
         };
@@ -847,7 +877,12 @@ mod tests {
         let graph = WhyGraph {
             nodes: graph
                 .keys()
-                .map(|key| (key.clone(), key.parse().unwrap()))
+                .map(|key| {
+                    (
+                        key.clone(),
+                        key.parse::<LockfilePackageKey>().unwrap().into(),
+                    )
+                })
                 .collect(),
             edges: graph,
         };
@@ -902,7 +937,12 @@ mod tests {
         let graph = WhyGraph {
             nodes: graph
                 .keys()
-                .map(|key| (key.clone(), key.parse().unwrap()))
+                .map(|key| {
+                    (
+                        key.clone(),
+                        key.parse::<LockfilePackageKey>().unwrap().into(),
+                    )
+                })
                 .collect(),
             edges: graph,
         };

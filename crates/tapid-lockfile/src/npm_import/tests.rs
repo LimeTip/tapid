@@ -269,6 +269,8 @@ fn npm_import_preserves_workspace_links_and_member_registry_selections() {
         "node_modules/shared":reference["packages"]["node_modules/shared"]
     }});
     let lock = ImportedNpmLockfile::import(&input.to_string(), &root.to_string(), DIGEST).unwrap();
+    assert!(lock.workspace_bindings("").unwrap().is_empty());
+    assert!(lock.workspace_bindings("missing").is_err());
     let graph = lock.graph().unwrap();
     assert_eq!(graph.roots["shared"], "node_modules/shared");
     assert_eq!(graph.packages.len(), 1);

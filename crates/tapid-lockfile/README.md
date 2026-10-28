@@ -52,6 +52,12 @@ Schema 9 adds ordered `derivedHooks` records with exact recipe keys, verified ou
 
 `ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements, root and member-level links to declared workspace members, separate member registry entry points with local or hoisted placements, member manifest digests, and constraints. It records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, or schema 9 with approved lifecycle outputs. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. `graph()` returns a shared `Arc<ImportedNpmGraph>` cached after validation; the cache is never serialized, and deserialized data is validated before caching. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).
 
+`ImportedNpmLockfile::workspace_bindings(parent)` exposes declared local-link
+placements using the same npm lookup as import validation. The empty parent
+denotes the root; other parents must be workspace placements. Physical links
+without a matching declaration are excluded. Registry entry points remain
+separate, preserving their existing selection contract.
+
 Schema 10 adds immutable copied package sources. File source identities pin a
 root-relative archive path and SHA-256; Git identities pin a canonical HTTPS
 repository, full commit, and archive SHA-256. `LockfilePackageSource::Copied`

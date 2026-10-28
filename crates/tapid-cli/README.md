@@ -221,6 +221,14 @@ integrity even when the artifact is cached.
 
 `tapid --json why PACKAGE` emits the version 1 JSON envelope with `schema_version: 1`, `operation: "why"`, `outcome`, `project`, `changes`, `warnings`, `errors`, `retry`, and a command-specific `data` object. The `data` object contains `package`, `paths`, `truncated`, `not_found`, and `graph_warnings`. Results are deterministic and bounded to 50 paths, 128 dependency levels, and 10,000 graph visits; `truncated: true` means the search is partial, so `not_found` is false and the command exits successfully even when no path was found. Transitive edge-kind limitations are surfaced in `data.graph_warnings`.
 
+
+`why` also inspects imported npm schema-8/12 locks. Paths retain exact npm
+placement keys, including nested packages and workspace links. Schema 12 uses
+its recorded target/profile and exposes matching placement-keyed omissions;
+schema 8 filters placements for the current host without inventing omission facts.
+Root and member manifest receipts must match. Member queries restrict paths and
+omissions to that member's reachable graph. Inspection does not verify artifacts
+or authorize replay on another target.
 ## Install and lifecycle outcomes
 
 `outdated` compares each direct dependency's declared range and locked version with registry metadata. It reports the newest compatible version and newest available version, with SemVer change labels and direct lockfile pin impact for each. `available-manifest=changed` means the available version requires a different declared range. Peer declarations do not select direct lockfile pins, so their lockfile impact is unchanged even when metadata is unavailable. Missing metadata leaves other impact fields unknown. The command never recovers interrupted transactions or changes the manifest, lockfile, store, or node_modules. A pending transaction stops inspection with recovery guidance. Live registry access is the default. Use `--offline` to forbid registry access; without a fixture, registry versions and impact are unknown, while local workspace versions remain available.

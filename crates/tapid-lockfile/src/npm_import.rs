@@ -282,6 +282,59 @@ impl ImportedNpmLockfile {
             .expect("validated graph was initialized")
             .clone())
     }
+    /// Resolve declared local workspace links using npm placement lookup.
+    /// The empty parent denotes the project root; other parents must be members.
+    pub fn workspace_bindings(
+        &self,
+        parent: &str,
+    ) -> Result<BTreeMap<String, String>, NpmImportError> {
+        let graph = self.graph()?;
+        if !parent.is_empty() && !graph.workspaces.contains_key(parent) {
+            return Err(parse::error(
+                "/packages",
+                parent,
+                "workspace",
+                "unknown workspace placement",
+            ));
+        }
+        let entry = self.npm_lock["packages"][parent]
+            .as_object()
+            .expect("validated project entry");
+        let placements: BTreeMap<_, _> = graph
+            .packages
+            .keys()
+            .chain(graph.workspace_links.keys())
+            .map(|path| (path.clone(), ()))
+            .collect();
+        let mut bindings = BTreeMap::new();
+        for field in [
+            "optionalDependencies",
+            "dependencies",
+            "devDependencies",
+            "peerDependencies",
+        ] {
+            if let Some(declarations) = entry.get(field).and_then(Value::as_object) {
+                for name in declarations.keys() {
+                    if field == "dependencies"
+                        && entry
+                            .get("optionalDependencies")
+                            .and_then(Value::as_object)
+                            .is_some_and(|optional| optional.contains_key(name))
+                    {
+                        continue;
+                    }
+                    if let Some(path) =
+                        parse::lookup(&placements, parent, name, field == "peerDependencies")
+                            .filter(|path| graph.workspace_links.contains_key(path))
+                    {
+                        bindings.entry(name.clone()).or_insert(path);
+                    }
+                }
+            }
+        }
+        Ok(bindings)
+    }
+
     pub fn root_manifest_digest(&self) -> &str {
         &self.root_manifest_digest
     }

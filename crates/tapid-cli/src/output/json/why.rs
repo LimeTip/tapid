@@ -16,7 +16,10 @@ fn why_result(
     project: &std::path::Path,
 ) -> (Value, u8) {
     let outcome = OperationOutcome::unchanged(project);
-    let not_found = report.paths.is_empty() && report.omissions.is_empty() && !report.truncated;
+    let not_found = report.paths.is_empty()
+        && report.omissions.is_empty()
+        && report.imported_omissions.is_empty()
+        && !report.truncated;
     let mut result = envelope(
         "why",
         if report.truncated {
@@ -29,7 +32,7 @@ fn why_result(
     result["data"] = json!({
         "package": &report.package,
         "paths": &report.paths,
-        "omissions": &report.omissions,
+        "omissions": if report.imported_omissions.is_empty() { json!(&report.omissions) } else { json!(&report.imported_omissions) },
         "selection": &report.selection,
         "truncated": report.truncated,
         "not_found": not_found,
@@ -86,6 +89,7 @@ mod tests {
             package: "missing".into(),
             paths: Vec::new(),
             omissions: Vec::new(),
+            imported_omissions: Vec::new(),
             selection: None,
             truncated: true,
         };

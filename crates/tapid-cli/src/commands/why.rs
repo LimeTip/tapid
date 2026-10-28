@@ -25,7 +25,10 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             if json {
                 return crate::output::json::why_success(&report, &args.project_dir);
             }
-            if report.paths.is_empty() && report.omissions.is_empty() {
+            if report.paths.is_empty()
+                && report.omissions.is_empty()
+                && report.imported_omissions.is_empty()
+            {
                 if report.truncated {
                     println!(
                         "No complete path to '{}' was found before the search safety bound; this result is incomplete.",
@@ -85,12 +88,36 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                     "Optional dependency {name}@{requirement} from {origin} omitted: {reason} (recorded selection)."
                 );
             }
+            for omission in &report.imported_omissions {
+                let (name, _) = crate::output::json::text(&omission.name);
+                let (requirement, _) = crate::output::json::text(&omission.requirement);
+                let origin = if omission.declaring_placement.is_empty() {
+                    "project root"
+                } else {
+                    &omission.declaring_placement
+                };
+                let (origin, _) = crate::output::json::text(origin);
+                let reason = match omission.reason {
+                    tapid_lockfile::OmissionReason::IncompatiblePlatform => "incompatible platform",
+                    tapid_lockfile::OmissionReason::ImportedPlacementAbsent => {
+                        "imported placement absent"
+                    }
+                    _ => unreachable!("validated imported omission reason"),
+                };
+                println!(
+                    "Optional dependency {name}@{requirement} from {origin} omitted: {reason} (recorded selection)."
+                );
+            }
             if report.truncated {
                 println!(
                     "Additional paths or omission records were omitted, or traversal reached a safety bound."
                 );
             }
-            if report.paths.is_empty() && report.omissions.is_empty() && !report.truncated {
+            if report.paths.is_empty()
+                && report.omissions.is_empty()
+                && report.imported_omissions.is_empty()
+                && !report.truncated
+            {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS
