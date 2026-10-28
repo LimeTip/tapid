@@ -1,3 +1,6 @@
+#[path = "dependency_provenance.rs"]
+pub(super) mod provenance;
+
 #[path = "dependency_node_gyp.rs"]
 mod node_gyp;
 
@@ -343,9 +346,14 @@ pub(super) fn apply(
                         Some("tool_verification_failed"),
                     );
                 })?;
-            let graph =
-                serde_json::to_string(&(&source_graph, &completed, &outputs)).map_err(error)?;
-            let recipe = policy.derived_key(approval, &toolchain, &graph);
+            let recipe = lifecycle_recipe(
+                policy,
+                approval,
+                &toolchain,
+                &source_graph,
+                &completed,
+                &outputs,
+            )?;
             let previous = cached
                 .as_ref()
                 .and_then(|l| l.packages().get(&key))
@@ -468,6 +476,18 @@ pub(super) fn apply(
     }
     outcome.lifecycle.as_mut().unwrap().finish();
     Ok(())
+}
+
+fn lifecycle_recipe(
+    policy: &DependencyLifecyclePolicy,
+    approval: &DependencyLifecycleApproval,
+    toolchain: &str,
+    source_graph: &str,
+    completed: &BTreeMap<String, Vec<DerivedHookOutput>>,
+    outputs: &[DerivedHookOutput],
+) -> Result<String, OperationalError> {
+    let graph = serde_json::to_string(&(source_graph, completed, outputs)).map_err(error)?;
+    Ok(policy.derived_key(approval, toolchain, &graph))
 }
 
 fn dependency_order(lock: &Lockfile) -> Result<Vec<String>, OperationalError> {
