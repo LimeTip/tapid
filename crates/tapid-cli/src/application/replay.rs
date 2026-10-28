@@ -55,7 +55,16 @@ pub(super) fn validate_workspace_dependency_edges(
     workspace: &online::WorkspaceMaterialization,
     registry_dependencies: &[online::WorkspaceRegistryDependency],
     lock: &Lockfile,
+    config: &crate::registry::RegistryConfig,
 ) -> Result<(), String> {
+    for (key, manifest) in &workspace.manifests {
+        validate_recorded_declarations(
+            lock,
+            manifest,
+            config,
+            &tapid_lockfile::OmissionOrigin::Workspace { key: key.clone() },
+        )?;
+    }
     for current in &workspace.locked {
         let key = current.key();
         let locked = lock
@@ -86,6 +95,15 @@ pub(super) fn validate_workspace_dependency_edges(
             .filter(|dependency| dependency.member_key == key)
         {
             let name = dependency.manifest_name.clone();
+            if lock.selection().is_some_and(|selection| {
+                selection.omissions.iter().any(|omission| {
+                    omission.origin
+                        == tapid_lockfile::OmissionOrigin::Workspace { key: key.clone() }
+                        && omission.name == name
+                })
+            }) {
+                continue;
+            }
             expected_names.insert(name.clone());
             let target = locked.dependencies().get(&name).ok_or_else(|| {
                 format!(
@@ -401,7 +419,12 @@ pub(crate) fn replay_root_keys_with_config(
     typed_keys: &[tapid_lockfile::LockfilePackageKey],
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<Vec<String>, String> {
-    validate_recorded_root_declarations(lock, manifest, registry_config)?;
+    validate_recorded_declarations(
+        lock,
+        manifest,
+        registry_config,
+        &tapid_lockfile::OmissionOrigin::Root,
+    )?;
     if lock.selection().is_some() && lock.root_bindings().is_empty() {
         return Ok(lock.roots().to_vec());
     }
@@ -612,12 +635,14 @@ pub(crate) fn replay_root_keys_with_config(
 
 /// Compare declaration facts before the legacy binding checks collapse sections.
 /// This does not authorize replay: callers must also validate digest, target and profile.
-fn validate_recorded_root_declarations(
+fn validate_recorded_declarations(
     lock: &Lockfile,
     manifest: &PackageManifest,
     config: &crate::registry::RegistryConfig,
+    origin: &tapid_lockfile::OmissionOrigin,
 ) -> Result<(), String> {
-    use tapid_lockfile::{DeclarationSection, OmissionOrigin, SelectionProfile};
+    use tapid_lockfile::{DeclarationSection, SelectionProfile};
+
     let Some(selection) = lock.selection() else {
         return Ok(());
     };
@@ -650,7 +675,7 @@ fn validate_recorded_root_declarations(
     }
     let mut recorded = BTreeMap::new();
     for declaration in &selection.declarations {
-        if declaration.origin == OmissionOrigin::Root {
+        if &declaration.origin == origin {
             recorded.insert(
                 (declaration.section, declaration.name.clone()),
                 declaration.requirement.as_str(),
@@ -658,13 +683,13 @@ fn validate_recorded_root_declarations(
         }
     }
     for omission in &selection.omissions {
-        if omission.origin != OmissionOrigin::Root {
+        if &omission.origin != origin {
             continue;
         }
         // Resolve the original spec so registry routing cannot be hidden by an omission.
-        let spec = optional_specs.get(&omission.name).ok_or_else(|| {
-            "recorded root omission has no current optional declaration".to_string()
-        })?;
+        let spec = optional_specs
+            .get(&omission.name)
+            .ok_or_else(|| "recorded omission has no current optional declaration".to_string())?;
         let (declared_registry, local_name) = online::dep_parts(spec)?;
         let requirement = omission
             .requirement
@@ -676,7 +701,7 @@ fn validate_recorded_root_declarations(
             config.origin_for_name(requirement.package_name(&local_name))?
         };
         if registry.as_str() != omission.registry {
-            return Err("recorded root omission registry does not match current routing".into());
+            return Err("recorded omission registry does not match current routing".into());
         }
         recorded.insert(
             (
@@ -688,8 +713,7 @@ fn validate_recorded_root_declarations(
     }
     if expected != recorded {
         return Err(
-            "recorded root declarations do not match current manifest sections and requirements"
-                .into(),
+            "recorded declarations do not match current manifest sections and requirements".into(),
         );
     }
     Ok(())
@@ -798,6 +822,80 @@ pub(crate) fn current_platform() -> Platform {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn recorded_workspace_omission_checks_exact_sections() {
+        let project = tapid_test_support::TempProject::new("recorded-workspace").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+            )
+            .unwrap();
+        let config = crate::registry::RegistryConfig::from_toml("").unwrap();
+        project
+            .write(
+                "packages/member/package.json",
+                br#"{"name":"member","version":"1.0.0","optionalDependencies":{"native":"^1"}}"#,
+            )
+            .unwrap();
+        let workspace = online::workspace_materialization(project.path(), &config).unwrap();
+        let mut lock = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let member = workspace.locked[0].clone();
+        let key = member.key();
+        lock.insert_workspace_package(member).unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: None,
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            declarations: vec![],
+            omissions: vec![tapid_lockfile::AcceptedOmission {
+                origin: tapid_lockfile::OmissionOrigin::Workspace { key },
+                name: "native".into(),
+                requirement: "^1".into(),
+                registry: "https://registry.npmjs.org".into(),
+                target: None,
+                reason: tapid_lockfile::OmissionReason::MetadataAbsent,
+            }],
+        })
+        .unwrap();
+        assert!(
+            validate_workspace_dependency_edges(
+                &workspace,
+                &workspace.registry_dependencies,
+                &lock,
+                &config
+            )
+            .is_ok()
+        );
+        for manifest in [
+            r#"{"name":"member","version":"1.0.0","optionalDependencies":{"native":"^2"}}"#,
+            r#"{"name":"member","version":"1.0.0","dependencies":{"native":"^1"}}"#,
+            r#"{"name":"member","version":"1.0.0"}"#,
+            r#"{"name":"member","version":"1.0.0","dependencies":{"native":"^1"},"optionalDependencies":{"native":"^1"}}"#,
+            r#"{"name":"member","version":"1.0.0","optionalDependencies":{"native":"^1","other":"1"}}"#,
+        ] {
+            project
+                .write("packages/member/package.json", manifest.as_bytes())
+                .unwrap();
+            let changed = online::workspace_materialization(project.path(), &config).unwrap();
+            assert!(
+                validate_workspace_dependency_edges(
+                    &changed,
+                    &changed.registry_dependencies,
+                    &lock,
+                    &config
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn recorded_selected_roots_preserve_required_optional_overlap() {

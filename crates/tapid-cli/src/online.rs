@@ -273,6 +273,7 @@ pub(crate) struct WorkspacePeerDependency {
 }
 
 pub(crate) struct WorkspaceMaterialization {
+    pub manifests: BTreeMap<String, PackageManifest>,
     pub links: WorkspaceLinkPlan,
     pub locked: Vec<LockedWorkspacePackage>,
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
@@ -320,6 +321,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     let mut packages = Vec::new();
     let mut locked = Vec::new();
     let mut members = BTreeMap::new();
+    let mut manifests = BTreeMap::new();
     let mut locked_by_name = BTreeMap::new();
     let mut registry_dependencies = Vec::new();
     let mut peer_dependencies = Vec::new();
@@ -387,6 +389,10 @@ pub(crate) fn workspace_materialization_from_discovered(
         locked.push(
             LockedWorkspacePackage::new(source.clone(), &digest(&manifest_bytes).to_string())
                 .map_err(|error| error.to_string())?,
+        );
+        manifests.insert(
+            LockfilePackageKey::workspace(source.clone()).to_string(),
+            manifest.clone(),
         );
         packages.push(WorkspacePackage {
             root: relative.to_path_buf(),
@@ -540,6 +546,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     }
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
+        manifests,
         links,
         locked,
         members,

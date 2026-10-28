@@ -243,7 +243,12 @@ fn inspect(
         }
         let dependencies =
             online::resolved_workspace_registry_dependencies(&manifest, &workspace, config)?;
-        super::replay::validate_workspace_dependency_edges(&workspace, &dependencies, lock)?;
+        super::replay::validate_workspace_dependency_edges(
+            &workspace,
+            &dependencies,
+            lock,
+            config,
+        )?;
         super::replay::validate_root_bindings(lock, &manifest, config)?;
         online::validate_locked_files(project, lock)?;
         if !online::validate_locked_routes(lock, config)? {

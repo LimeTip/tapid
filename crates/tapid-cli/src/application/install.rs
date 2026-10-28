@@ -784,6 +784,7 @@ fn perform_install(
         &workspace,
         &workspace_registry_dependencies,
         &lock,
+        &registry_config,
     )?;
     crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
     session

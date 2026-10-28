@@ -43,6 +43,7 @@ pub(super) fn resolve_package_graph(
         .map(|name| dep_parts(name).map(|(_, name)| name))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let WorkspaceMaterialization {
+        manifests: _,
         links: workspace_links,
         locked: workspace_locked,
         members: _,
