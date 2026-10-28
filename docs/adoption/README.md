@@ -27,6 +27,9 @@ A failed import does not suppress independent native maintenance attempts or npm
 restoration. Successful recovery after a failed mutation must be reported separately
 from rollback after a successful mutation. Pending lifecycle journals stop restoration;
 recover through Tapid before retrying, without deleting the journal.
+Restoration verifies all retained input bytes before deleting installation state or
+overwriting checkpoint inputs. Missing or changed retained inputs leave that checkpoint
+intact. This preflight is not an atomic recovery guarantee for later filesystem failures.
 
 Before using it, qualify a disposable environment with no host credentials and a
 private network namespace, verify/extract the pinned source archive, mount the

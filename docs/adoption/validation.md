@@ -1,5 +1,34 @@
 # Implementation validation — 2026-10-28
 
+## Recovery preflight correction
+
+This retry found and fixed a concrete recovery defect in `evaluate-uptime-kuma.ts`:
+restoration removed `node_modules` and `tapid.lock` before authenticating retained
+inputs. A new offline regression through `uptimeKumaRun` and `evaluate` first failed
+with the installed checkpoint missing. Restoration now reads and verifies all three
+retained inputs before mutation, then writes those same verified bytes. Changed or
+missing retained inputs preserve the checkpoint. Later filesystem failures are not
+covered by an atomicity claim.
+
+Fresh checks used the supplied absolute Node 22.23.3 executable and explicit PATH:
+
+- Focused capture/comparator suite: 22 tests, 21 passed, 1 existing native-probe
+  skip, 0 failed.
+- Full TypeScript lane (`tests/*_test.ts tools/release/*_test.ts`): 429 tests,
+  409 passed, 20 skipped, 0 failed, 114,611 ms after the code/test correction.
+- Entire pending diff reviewed; `git diff --check` passed. No Rust changes.
+- Registry metadata HTTP probe: 200. Docker API probe still fails because
+  `/Users/doug/.colima/default/docker.sock` does not exist. Available connected tools
+  provide no disposable application execution service. No third-party code ran.
+
+The configured isolated validation command is absent and no source-matched worker
+receipt was supplied. Passing local tests do not need sandbox-denial validation;
+an offline worker alone cannot supply the networked application journey. The first
+pilot still requires credential-free disposable source/registry and loopback execution.
+Zero complete external journeys are claimed. Four further projects follow the first
+report; qualified Linux lifecycle, native platform evidence and participant metrics
+remain outstanding. No commit, tracker publication, merge or deployment occurred.
+
 The current implementation adds capture tooling and static qualification; it does not complete #307.
 
 Commands used the supplied absolute Node 22.23.3 executable, with its directory explicitly prefixed to PATH:

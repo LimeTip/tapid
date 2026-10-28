@@ -115,13 +115,14 @@ export function uptimeKumaRun(options: Options): Specification {
       const dir=${JSON.stringify(join(root, name))},source=${JSON.stringify(source)};
       if(fs.readdirSync(dir).some(n=>n.startsWith('.tapid-') && n.includes('journal')))
         throw Error('Pending transaction: recover through Tapid before rollback');
-      for(const name of ['node_modules','tapid.lock']) fs.rmSync(path.join(dir,name),{recursive:true,force:true});
       const names=${JSON.stringify(inputNames)},expected=${JSON.stringify(expected)};
+      const retained=names.map(name=>fs.readFileSync(path.join(source,name)));
       for(let i=0;i<names.length;i++) {
-        fs.copyFileSync(path.join(source,names[i]),path.join(dir,names[i]));
-        if(crypto.createHash('sha256').update(fs.readFileSync(path.join(dir,names[i]))).digest('hex')!==expected[i])
+        if(crypto.createHash('sha256').update(retained[i]).digest('hex')!==expected[i])
           throw Error('Rollback input mismatch');
       }
+      for(const name of ['node_modules','tapid.lock']) fs.rmSync(path.join(dir,name),{recursive:true,force:true});
+      for(let i=0;i<names.length;i++) fs.writeFileSync(path.join(dir,names[i]),retained[i]);
       console.log('Original npm input hashes restored');
     `, ['prepare'], inputNames.map(file => join(root, name, file)));
     npm(name, name + '-rollback-install', ['ci', '--no-fund'], [name + '-restore', 'npm-version']);

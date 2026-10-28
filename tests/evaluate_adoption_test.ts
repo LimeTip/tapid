@@ -7,6 +7,36 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { evaluate } from '../scripts/evaluate-adoption.ts';
 
+test('pilot rollback preserves the checkpoint when retained inputs changed', async () => {
+  const { uptimeKumaRun } = await import('../scripts/evaluate-uptime-kuma.ts');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'adoption-restore-'));
+  const source = join(dir, 'source'), root = join(dir, 'run');
+  mkdirSync(source);
+  mkdirSync(join(root, 'add', 'node_modules'), { recursive: true });
+  for (const name of ['package.json', 'package-lock.json', 'LICENSE']) {
+    writeFileSync(join(source, name), 'changed retained input');
+    writeFileSync(join(root, 'add', name), 'checkpoint input');
+  }
+  writeFileSync(join(root, 'add', 'node_modules', 'checkpoint'), 'installed checkpoint');
+  writeFileSync(join(root, 'add', 'tapid.lock'), 'checkpoint lock');
+  try {
+    const spec = uptimeKumaRun({ source, root, node: process.execPath,
+      npmCli: join(dir, 'unused-npm.js'), tapid: process.execPath,
+      tapidRevision: 'a'.repeat(40), env: {} });
+    // Execute only the reviewed recovery command, modeling retained-input damage
+    // after preparation. No npm, Tapid or application command runs in this test.
+    const restore = spec.phases.find(p => p.id === 'add-restore')!;
+    const result = await evaluate({ ...spec, phases: [{ ...restore, prerequisites: [] }] });
+    assert.equal(result.phases[0].outcome, 'failed');
+    assert.match(result.phases[0].output, /Rollback input mismatch/);
+    assert.equal(readFileSync(join(root, 'add', 'node_modules', 'checkpoint'), 'utf8'), 'installed checkpoint');
+    assert.equal(readFileSync(join(root, 'add', 'tapid.lock'), 'utf8'), 'checkpoint lock');
+    for (const name of ['package.json', 'package-lock.json', 'LICENSE'])
+      assert.equal(readFileSync(join(root, 'add', name), 'utf8'), 'checkpoint input');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('captures a command without inheriting credentials and continues independent phases', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'adoption-'));
   try {
