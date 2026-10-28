@@ -8943,6 +8943,66 @@ fn why_reports_an_incomplete_empty_search_as_success() {
 }
 
 #[test]
+fn why_reports_recorded_omissions_in_human_and_json_output_without_mutation() {
+    use tapid_lockfile::{
+        AcceptedOmission, LockedSelection, OmissionOrigin, OmissionReason, SelectionProfile,
+        SelectionTarget,
+    };
+    let project = tapid_test_support::TempProject::new("why-omission-output").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"native":"^1"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    lock.set_selection(LockedSelection {
+        target: SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: Some("gnu".into()),
+        },
+        profile: SelectionProfile::Development,
+        declarations: vec![],
+        omissions: vec![AcceptedOmission {
+            origin: OmissionOrigin::Root,
+            name: "native".into(),
+            requirement: "^1".into(),
+            registry: "https://registry.npmjs.org".into(),
+            target: None,
+            reason: OmissionReason::MetadataAbsent,
+        }],
+    })
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let human = run(project.path(), &["why", "native"]);
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("Optional dependency native@^1 from project root omitted: metadata absent"),
+        "{text}"
+    );
+    assert!(!text.contains("Dependency paths"), "{text}");
+    assert!(
+        text.contains("Recorded selection: linux/x86_64, libc=gnu, profile=development."),
+        "{text}"
+    );
+    let json = run(project.path(), &["why", "native", "--json"]);
+    assert!(json.status.success());
+    let wire: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(wire["data"]["not_found"], false);
+    assert_eq!(wire["data"]["omissions"][0]["reason"], "metadataAbsent");
+    assert_eq!(wire["data"]["selection"]["target"]["os"], "linux");
+    assert_eq!(wire["changes"]["state"], "unchanged");
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
 fn why_confirmed_absent_package_still_exits_one() {
     let project = tapid_test_support::TempProject::new("why-confirmed-absent").unwrap();
     let manifest = br#"{"name":"demo","version":"1.0.0"}"#;
