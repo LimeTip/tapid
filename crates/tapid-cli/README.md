@@ -456,7 +456,14 @@ requests, does not load Cloud credentials, and does not recover pending project
 transactions or touch installed/store content. Invalid or manifest-mismatched
 locks produce typed errors without repair. Native graph counts distinguish
 reachable identities from orphan records and report missing roots and unresolved
-peer candidates. Imported reachable-occurrence selection,
+peer candidates. Native request projection preserves incoming aliases, exact
+registry origins and recorded platform context. Native peer identities do not
+record provider origins, so even unique explanation candidates cannot establish
+exact applicability. Copied and workspace sources, peer-bearing consumers and platform predicates that cannot be
+represented exactly are excluded from request counts. Opaque deterministic
+placement identifiers retain local mappings to exact graph keys; projection
+does not authorize disclosure, including for public registries.
+Imported reachable-occurrence selection,
 provider orchestration, findings output and result-file delivery are pending;
 recorded subject counts are not a completed coverage assessment.
 

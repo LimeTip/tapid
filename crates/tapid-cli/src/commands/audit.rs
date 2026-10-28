@@ -22,6 +22,14 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             );
             if let Some(count) = report.reachable_subjects {
                 println!("Reachable subjects: {count}");
+                if let Some(count) = report.requestable_occurrences {
+                    println!("Representable security occurrences: {count} (not checked)");
+                }
+                if let Some(count) = report.excluded_occurrences.filter(|count| *count > 0) {
+                    println!(
+                        "Graph limitation: {count} occurrences lack exact security applicability"
+                    );
+                }
                 if report.roots_recorded == Some(false) {
                     println!("Graph limitation: no recorded roots");
                 }

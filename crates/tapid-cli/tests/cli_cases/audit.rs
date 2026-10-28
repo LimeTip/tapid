@@ -140,6 +140,11 @@ fn audit_distinguishes_reachable_native_subjects_from_orphan_records() {
     assert_eq!(value["data"]["reachable_subjects"], 1);
     assert_eq!(value["data"]["graph_coverage"]["roots_recorded"], true);
     assert_eq!(
+        value["data"]["graph_coverage"]["requestable_occurrences"],
+        1
+    );
+    assert_eq!(value["data"]["graph_coverage"]["excluded_occurrences"], 0);
+    assert_eq!(
         fs::read(project.path().join("tapid.lock")).unwrap(),
         bytes.as_bytes()
     );

@@ -503,3 +503,9 @@ entry points exist; `graph_coverage.unresolved_peers` counts reachable peer name
 with zero or multiple recorded candidates. These fields do not establish checked
 security coverage. Imported graph projection is not yet implemented for these
 fields and returns `null`; audit remains `not_checked` with exit 3.
+`graph_coverage.requestable_occurrences` counts native incoming-name occurrences
+that can be represented as exact v2 advisory/reported-malware requests, while
+`excluded_occurrences` counts those lacking exact source, peer or platform
+applicability. Multiple aliases for one reachable identity count separately.
+These counts do not imply provider coverage, consent or completed checks. Both
+fields are `null` for imported locks.
