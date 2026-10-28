@@ -152,6 +152,7 @@ impl Reporter {
 
     pub(crate) fn failure(&self, mut failure: OperationFailure) {
         let phase = match failure.error.kind {
+            ErrorKind::SecurityEvidenceUnavailable => "security policy evaluation",
             ErrorKind::InvalidRequest
             | ErrorKind::Project
             | ErrorKind::ProjectChanged

@@ -18,6 +18,7 @@ clap = { version = "4", features = ["derive"] }
 tapid-lockfile = { version = "0.0.13", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
+tapid-policy = { version = "0.0.4", path = "../tapid-policy" }
 tapid-linker = { version = "0.0.8", path = "../tapid-linker" }
 tapid-store = { version = "0.0.8", path = "../tapid-store" }
 tapid-archive = { version = "0.0.6", path = "../tapid-archive" }

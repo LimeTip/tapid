@@ -341,6 +341,8 @@ impl RunConfig {
 #[serde(default, deny_unknown_fields)]
 struct ConfigDocument {
     run: RunSection,
+    #[serde(default, rename = "security")]
+    _security: Option<toml::Value>,
     #[serde(default, rename = "registries")]
     _registries: Option<toml::Value>,
 }
@@ -659,6 +661,12 @@ mod tests {
     fn accepts_registry_configuration_alongside_strict_run_policy() {
         let config = RunConfig::parse_toml(
             "[registries.default]\nurl='https://mirror.example'\n[run.scripts.dev]\nnetwork=false\n",
+        )
+        .unwrap();
+        assert!(!config.exact_profile("dev").unwrap().network());
+
+        let config = RunConfig::parse_toml(
+            "[security]\nversion=1\n[[security.rules]]\nid='malware'\nkind='malware'\nmode='required'\nsources=['provider']\nmax-age-seconds=60\nstatus='cached'\n[run.scripts.dev]\nnetwork=false\n",
         )
         .unwrap();
         assert!(!config.exact_profile("dev").unwrap().network());

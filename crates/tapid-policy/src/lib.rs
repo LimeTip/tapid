@@ -244,3 +244,6 @@ mod tests {
         assert!(decision.reasons().contains(&ReasonCode::AmbiguousEvidence));
     }
 }
+
+mod security;
+pub use security::{SecurityDecision, SecurityPolicy};

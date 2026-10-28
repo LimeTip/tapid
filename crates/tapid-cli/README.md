@@ -219,6 +219,17 @@ integrity even when the artifact is cached.
 
 ## Install and lifecycle outcomes
 
+Projects can declare explicit `[security]` requirements in `tapid.toml` using
+the [policy configuration](../tapid-policy/README.md). The initial implementation
+has no audit/provider consumer: required rules fail with
+`POLICY_SECURITY_EVIDENCE_UNAVAILABLE` before preparation, hooks or publication;
+advisory-only rules warn that coverage was not established. This also applies to
+offline, frozen and CI replay, and add/update/remove/prune installation paths.
+No security section introduces no hosted requirement or request. Standalone tools
+still ignore caller-project configuration; explicit tool-policy persistence is
+not implemented. Findings, exceptions and evidence-backed authorization remain
+pending; these configuration primitives do not establish complete enforcement.
+
 `outdated` compares each direct dependency's declared range and locked version with registry metadata. It reports the newest compatible version and newest available version, with SemVer change labels and direct lockfile pin impact for each. `available-manifest=changed` means the available version requires a different declared range. Peer declarations do not select direct lockfile pins, so their lockfile impact is unchanged even when metadata is unavailable. Missing metadata leaves other impact fields unknown. The command never recovers interrupted transactions or changes the manifest, lockfile, store, or node_modules. A pending transaction stops inspection with recovery guidance. Live registry access is the default. Use `--offline` to forbid registry access; without a fixture, registry versions and impact are unknown, while local workspace versions remain available.
 
 Lockfile impact describes selecting the shown direct version. An unchanged direct pin does not establish that the whole lockfile would stay unchanged after `update`. Named updates preserve unrelated compatible pins, but selected requirements and peer constraints can require transitive changes. Transitive changes and resolution failures require full resolution. Major, minor, patch, and prerelease labels compare version numbers; they do not establish API compatibility. Registry "available" means the highest published SemVer version, including prereleases, rather than npm's `latest` tag.

@@ -1493,6 +1493,7 @@ dependencies = [
  "tapid-linker",
  "tapid-lockfile",
  "tapid-manifest",
+ "tapid-policy",
  "tapid-registry-client",
  "tapid-release-client",
  "tapid-resolver",
