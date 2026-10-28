@@ -497,3 +497,35 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Contention and lost responses
+
+`PROJECT_BUSY` has zero intentional lock waiting. Normal store acquisitions use
+one five-second monotonic budget each and return `STORE_BUSY` on expiry; shared
+acquisition, exclusive recovery acquisition, and reacquisition retries within the
+same call consume that budget. Cache maintenance still returns `CACHE_BUSY`
+immediately. No new acquisition attempt starts after expiry, but scheduler and
+filesystem latency can delay return, and an in-flight attempt may succeed.
+Separate acquisitions have separate budgets. Lock ownership, recovery already
+started under a lock, filesystem work, network requests, lifecycle execution, and
+total command duration are not bounded by this policy. Legitimate long holders
+can cause failure; polling does not guarantee fairness. There is no timeout flag.
+
+Always inspect `changes.state`, warnings, and `retry` together. Contention alone
+does not establish that earlier recovery or preparation had no effects. Wait for
+contention to resolve before a justified retry; never blindly repeat a committed
+mutation. Recovery may preserve a durable commit or restore the prior state, and
+post-commit cleanup failure does not undo the commit.
+
+After response loss, use read-only `status` and compare expected manifest,
+lockfile, and installed state. Status does not open the store or recover anything;
+its observations are non-atomic current-state evidence. When recovery is pending,
+use the established install recovery path (frozen/offline only when its documented
+prerequisites hold) before another mutation. An `unchanged` result describes that
+invocation, including a read-only inspection; it does not prove that an earlier
+invocation failed to commit. Even after successful cleanup, or after a later
+mutation changes the state again, status cannot attribute changes to an invocation
+or reconstruct historical ownership or ordering. Optional operation IDs and durable
+completion records are deferred; no historical operation query is provided. The
+[controlled workflow evaluation](testing.md#bounded-wait-and-lost-response-evaluation)
+does not measure production response-loss frequency.
