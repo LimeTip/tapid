@@ -69,8 +69,12 @@ and instance context.
 The required `declarations` array retains selected dependency declarations by
 origin, original dependency section, local name, requirement and exact target
 key. Required and optional declarations sharing a binding remain separate records.
-Root bindings cover every root, and declaration records cover every root,
-workspace and package dependency edge. Records are sorted and unique by
+Root bindings cover registry roots; all workspace members are membership roots.
+Explicit root declarations targeting local members need no registry binding.
+Declaration records cover every explicit root declaration,
+workspace and package dependency edge. The supported `workspace:*`, `workspace:^`
+and `workspace:~` declarations require exact local workspace targets; they cannot
+authorize registry fallback. Records are sorted and unique by
 origin/section/name; duplicate, missing, dangling and mismatched facts fail
 validation. Package development declarations are rejected because they are not
 installed transitive dependencies. Peer-provider contexts retain their existing
@@ -88,9 +92,11 @@ separate placement contract and rejects these ordinary-lock fields. Schema 11
 replay through `validate_replay` still fails explicitly. The opt-in
 `validate_replay_with_selection` checks exact target/profile facts, validates the
 ledger, and retains manifest-digest and integrity-provenance checks;
-the CLI emits this schema for ordinary registry-only graphs without workspace
-members when optional metadata/candidate omissions are recorded. Workspace and
-copied-source selection generation remain pending. This persistence API alone
+the CLI emits this schema for ordinary registry graphs, including workspace
+members and local links, when optional metadata/candidate omissions are recorded.
+Overridden workspace declarations with omissions fail before publication until
+original and effective requirements can both be retained. Copied-source selection
+generation remains pending. This persistence API alone
 does not establish complete optional-dependency failure support.
 
 Imported schema 12 provides a separate `ImportedSelection` persistence building

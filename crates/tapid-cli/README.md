@@ -360,14 +360,19 @@ missing selected artifacts still fail offline and may be hydrated during frozen
 installation. Imported locks retain their existing ci restriction. Replay does
 not retry omitted branches. Human and JSON install outcomes include the recorded
 target/profile and at most 50 omission records, with explicit incomplete-detail
-counts. Ordinary registry-only graphs without workspace members now emit schema
+counts. Ordinary registry graphs, including workspace members, emit schema
 11 when recording omitted transitive optional declarations. They also accept and
 record confirmed metadata absence, incompatible-platform candidates, and no
 usable matching candidate for optional-only root declarations; a required
 declaration to the same registry/package keeps unavailability fatal, including through
-another alias. Metadata transport errors remain fatal. Existing transitive
-candidate/platform exclusions retain their reasons in the ledger. Workspace and
-copied-source selection generation, imported schema 12 generation, artifact/hook
+another alias or workspace member. Root and member omissions retain separate
+origins even when they share a local name. Local workspace links retain their
+original sections and requirements; automatic member roots describe membership.
+Metadata transport errors remain fatal. Existing transitive
+candidate/platform exclusions retain their reasons in the ledger. Selection with
+omissions and overridden workspace declarations is rejected before publication:
+the ledger cannot yet retain both original and effective requirements.
+Copied-source selection generation, imported schema 12 generation, artifact/hook
 omission selection and complete optional-failure semantics remain unfinished.
 Preview and status integration is not established by this replay API.
 

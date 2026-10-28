@@ -88,10 +88,11 @@ impl LockedSelection {
         {
             return Err(invalid());
         }
-        let bound_roots = lock
+        let mut bound_roots = lock
             .root_bindings()
             .values()
             .collect::<std::collections::BTreeSet<_>>();
+        bound_roots.extend(lock.workspace_packages().keys());
         if lock
             .roots()
             .iter()
@@ -114,10 +115,31 @@ impl LockedSelection {
             {
                 return Err(invalid());
             }
-            let requirement = declaration
-                .requirement
-                .parse::<tapid_resolver::Requirement>()
-                .map_err(|_| invalid())?;
+            // These protocol symbols describe the exact local member, and cannot
+            // authorize registry fallback or a package-origin local dependency.
+            let local_protocol = declaration.requirement.starts_with("workspace:");
+            if local_protocol
+                && (target.source.workspace().is_none()
+                    || matches!(declaration.origin, OmissionOrigin::Package { .. })
+                    || !matches!(
+                        declaration.requirement.as_str(),
+                        "workspace:*" | "workspace:^" | "workspace:~"
+                    ))
+            {
+                return Err(invalid());
+            }
+            let requirement = if local_protocol {
+                "*"
+            } else {
+                &declaration.requirement
+            }
+            .parse::<tapid_resolver::Requirement>()
+            .map_err(|_| invalid())?;
+            if target.source.workspace().is_some()
+                && (name != target.name || requirement.is_alias())
+            {
+                return Err(invalid());
+            }
             let dependencies = match &declaration.origin {
                 OmissionOrigin::Root => lock.root_bindings(),
                 OmissionOrigin::Workspace { key } => lock
@@ -132,7 +154,11 @@ impl LockedSelection {
                     lock.packages().get(key).ok_or_else(invalid)?.dependencies()
                 }
             };
-            if dependencies.get(&declaration.name) != Some(&declaration.target)
+            let local_root = declaration.origin == OmissionOrigin::Root
+                && target.source.workspace().is_some()
+                && !dependencies.contains_key(&declaration.name)
+                && lock.roots().contains(&declaration.target);
+            if (!local_root && dependencies.get(&declaration.name) != Some(&declaration.target))
                 || requirement.package_name(&name) != &target.name
                 || !requirement.matches_locked_version(&target.version)
             {

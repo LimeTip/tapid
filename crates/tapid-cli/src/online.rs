@@ -962,6 +962,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
+        workspace_manifests,
         omissions,
         candidate_exclusions,
         metadata_lookups: _,
@@ -1268,6 +1269,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
     .map_err(OperationalError::from)?;
     selection::record_registry_selection(
         &mut lock,
+        manifest,
+        &workspace_manifests,
         &resolution,
         &records,
         registry_config,

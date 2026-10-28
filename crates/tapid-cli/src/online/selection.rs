@@ -8,18 +8,18 @@ use tapid_resolver::{DeclarationKind, EntryPointSection};
 
 pub(super) fn record_registry_selection(
     lock: &mut Lockfile,
+    manifest: &PackageManifest,
+    workspace_manifests: &BTreeMap<String, PackageManifest>,
     resolution: &Resolution,
     records: &BTreeMap<PackageRecordKey, PackageRecord>,
     config: &crate::registry::RegistryConfig,
     mut omissions: Vec<AcceptedOmission>,
 ) -> Result<(), OperationalError> {
-    // Workspace roots and copied sources have separate declaration contracts.
-    // Keep their existing formats until their complete provenance is available.
-    if !lock.workspace_packages().is_empty()
-        || resolution
-            .selected
-            .iter()
-            .any(|id| id.registry.registry().is_none())
+    // Copied sources retain their separate declaration contract.
+    if resolution
+        .selected
+        .iter()
+        .any(|id| id.registry.registry().is_none())
     {
         return Ok(());
     }
@@ -101,6 +101,16 @@ pub(super) fn record_registry_selection(
     if omissions.is_empty() {
         return Ok(());
     }
+    for omission in &omissions {
+        if let OmissionOrigin::Workspace { key } = &omission.origin
+            && workspace_manifests[key]
+                .optional_dependencies()
+                .get(&omission.name)
+                != Some(&omission.requirement)
+        {
+            return Err("recording optional omissions with overridden workspace declarations is unsupported".into());
+        }
+    }
     let mut declarations = Vec::new();
     for declaration in &resolution.declarations {
         if matches!(
@@ -125,8 +135,25 @@ pub(super) fn record_registry_selection(
                 .entry_point
                 .as_ref()
                 .ok_or("missing manifest declaration origin")?;
+            if let Some(key) = &entry.workspace {
+                let manifest = &workspace_manifests[key];
+                let dependencies = match entry.section {
+                    EntryPointSection::Dependencies => manifest.dependencies(),
+                    EntryPointSection::DevDependencies => manifest.dev_dependencies(),
+                    EntryPointSection::OptionalDependencies => manifest.optional_dependencies(),
+                };
+                if dependencies.get(declaration.name.as_str()) != Some(&declaration.requirement.raw)
+                {
+                    return Err("recording optional omissions with overridden workspace declarations is unsupported".into());
+                }
+            }
             (
-                OmissionOrigin::Root,
+                entry
+                    .workspace
+                    .as_ref()
+                    .map_or(OmissionOrigin::Root, |key| OmissionOrigin::Workspace {
+                        key: key.clone(),
+                    }),
                 match entry.section {
                     EntryPointSection::Dependencies => DeclarationSection::Dependencies,
                     EntryPointSection::DevDependencies => DeclarationSection::DevDependencies,
@@ -143,6 +170,49 @@ pub(super) fn record_registry_selection(
             requirement: declaration.requirement.raw.clone(),
             target: keys[&declaration.target].clone(),
         });
+    }
+    // Local links never enter registry resolution. Preserve their original
+    // declarations alongside registry edges; automatic member roots are membership,
+    // not invented root dependency declarations.
+    for (origin, manifest) in std::iter::once((OmissionOrigin::Root, manifest)).chain(
+        workspace_manifests
+            .iter()
+            .map(|(key, manifest)| (OmissionOrigin::Workspace { key: key.clone() }, manifest)),
+    ) {
+        for (section, dependencies) in [
+            (DeclarationSection::Dependencies, manifest.dependencies()),
+            (
+                DeclarationSection::DevDependencies,
+                manifest.dev_dependencies(),
+            ),
+            (
+                DeclarationSection::OptionalDependencies,
+                manifest.optional_dependencies(),
+            ),
+        ] {
+            for (name, requirement) in dependencies {
+                let target = match &origin {
+                    OmissionOrigin::Root => lock.workspace_packages().keys().find(|key| {
+                        key.parse::<LockfilePackageKey>()
+                            .is_ok_and(|key| key.name.as_str() == name)
+                    }),
+                    OmissionOrigin::Workspace { key } => lock.workspace_packages()[key]
+                        .dependencies()
+                        .get(name)
+                        .filter(|target| lock.workspace_packages().contains_key(*target)),
+                    OmissionOrigin::Package { .. } => unreachable!(),
+                };
+                if let Some(target) = target {
+                    declarations.push(RetainedDeclaration {
+                        origin: origin.clone(),
+                        section,
+                        name: name.clone(),
+                        requirement: requirement.clone(),
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
     }
     declarations.sort();
     declarations.dedup();

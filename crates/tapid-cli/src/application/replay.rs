@@ -865,6 +865,7 @@ mod replay_tests {
         let member = workspace.locked[0].clone();
         let key = member.key();
         lock.insert_workspace_package(member).unwrap();
+        lock.set_roots([key.clone()]).unwrap();
         lock.set_selection(tapid_lockfile::LockedSelection {
             target: tapid_lockfile::SelectionTarget {
                 os: "linux".into(),

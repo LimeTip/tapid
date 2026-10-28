@@ -9666,3 +9666,221 @@ fn sandbox_json_rejects_install_before_privileged_management() {
 }
 #[path = "cli_cases/preview.rs"]
 mod preview_tests;
+
+#[test]
+fn workspace_optional_omissions_preserve_local_links_and_exact_origins() {
+    let project = tapid_test_support::TempProject::new("workspace-optional-ledger").unwrap();
+    project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"app":"workspace:*"},"optionalDependencies":{"missing":"^1"}}"#).unwrap();
+    project.write("packages/app/package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"lib":"workspace:^"},"optionalDependencies":{"missing":"^2"}}"#).unwrap();
+    project
+        .write(
+            "packages/lib/package.json",
+            br#"{"name":"lib","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let output = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let lock = tapid_lockfile::Lockfile::from_json(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    let selection = lock.selection().expect("workspace omission ledger");
+    assert_eq!(selection.omissions.len(), 2);
+    assert_eq!(
+        selection.omissions[0].origin,
+        tapid_lockfile::OmissionOrigin::Root
+    );
+    assert_eq!(selection.omissions[0].requirement, "^1");
+    let app = lock
+        .workspace_packages()
+        .values()
+        .find(|p| {
+            p.key()
+                .parse::<tapid_lockfile::LockfilePackageKey>()
+                .unwrap()
+                .name
+                .as_str()
+                == "app"
+        })
+        .unwrap();
+    assert_eq!(
+        selection.omissions[1].origin,
+        tapid_lockfile::OmissionOrigin::Workspace { key: app.key() }
+    );
+    assert_eq!(selection.omissions[1].requirement, "^2");
+    assert!(
+        selection
+            .declarations
+            .iter()
+            .any(|d| d.requirement == "workspace:*")
+    );
+    assert!(
+        selection
+            .declarations
+            .iter()
+            .any(|d| d.requirement == "workspace:^")
+    );
+    for args in [
+        vec!["ci", "--offline", "--json"],
+        vec!["install", "--frozen", "--json"],
+    ] {
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+    }
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    for changed in [
+        br#"{"name":"app","version":"1.0.0","dependencies":{"lib":"workspace:^"},"optionalDependencies":{"missing":"^3"}}"#.as_slice(),
+        br#"{"name":"app","version":"1.0.0","dependencies":{"lib":"workspace:^","missing":"^2"}}"#.as_slice(),
+    ] {
+        project.write("packages/app/package.json", changed).unwrap();
+        let output = run(project.path(), &["ci", "--offline", "--json"]);
+        assert!(!output.status.success());
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert_eq!(fs::read(project.path().join(".tapid-managed")).unwrap(), marker);
+    }
+}
+
+#[test]
+fn workspace_required_alias_prevents_optional_omission_and_publication() {
+    let project = tapid_test_support::TempProject::new("workspace-required-optional").unwrap();
+    project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["member"],"optionalDependencies":{"local":"npm:missing@^1"}}"#).unwrap();
+    project
+        .write(
+            "member/package.json",
+            br#"{"name":"member","version":"1.0.0","dependencies":{"required":"npm:missing@^1"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let output = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json", "--json"],
+    );
+    assert!(!output.status.success());
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join(".tapid-managed").exists());
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn workspace_optional_candidate_pruning_keeps_other_declaration_origins() {
+    for root_omitted in [false, true] {
+        let project = tapid_test_support::TempProject::new("workspace-optional-origins").unwrap();
+        let (root_range, member_range) = if root_omitted {
+            ("npm:h3@^9", "npm:h3@1.0.0")
+        } else {
+            ("npm:h3@1.0.0", "npm:h3@^9")
+        };
+        let root = serde_json::json!({"name":"root", "version":"1.0.0", "workspaces":["member"], "optionalDependencies":{"local":root_range}});
+        let member = serde_json::json!({"name":"member", "version":"1.0.0", "optionalDependencies":{"local":member_range}});
+        project
+            .write("package.json", root.to_string().as_bytes())
+            .unwrap();
+        project
+            .write("member/package.json", member.to_string().as_bytes())
+            .unwrap();
+        project
+            .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+            .unwrap();
+        let output = run(
+            project.path(),
+            &["install", "--registry-fixture", "registry.json", "--json"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+        let lock =
+            tapid_lockfile::Lockfile::from_json(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let selection = lock.selection().unwrap();
+        assert_eq!(selection.omissions.len(), 1);
+        assert_eq!(
+            matches!(
+                selection.omissions[0].origin,
+                tapid_lockfile::OmissionOrigin::Root
+            ),
+            root_omitted
+        );
+        assert_eq!(
+            selection.omissions[0].reason,
+            tapid_lockfile::OmissionReason::NoUsableCandidate
+        );
+        assert_eq!(lock.root_bindings().contains_key("local"), !root_omitted);
+        assert_eq!(
+            lock.workspace_packages()
+                .values()
+                .next()
+                .unwrap()
+                .dependencies()
+                .contains_key("local"),
+            root_omitted
+        );
+        let output = run(
+            project.path(),
+            &[
+                "ci",
+                "--offline",
+                "--registry-fixture",
+                "registry.json",
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn workspace_overridden_optional_omission_fails_before_publication() {
+    let project = tapid_test_support::TempProject::new("workspace-override-omission").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["member"],"overrides":{"h3":"^9"}}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "member/package.json",
+            br#"{"name":"member","version":"1.0.0","optionalDependencies":{"local":"npm:h3@^1"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let output = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json"],
+    );
+    assert!(
+        !output.status.success(),
+        "overridden provenance must be rejected until both original and effective requirements can be retained"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("overridden workspace declarations"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join(".tapid-managed").exists());
+}

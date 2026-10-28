@@ -2,6 +2,7 @@ use super::*;
 use crate::application::lifecycle::UpdateRequest;
 
 pub(super) struct ResolvedGraph {
+    pub workspace_manifests: BTreeMap<String, PackageManifest>,
     pub omissions: Vec<tapid_lockfile::AcceptedOmission>,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub updated_manifest: Option<PackageManifest>,
@@ -33,7 +34,7 @@ pub(super) fn resolve_package_graph(
         mut roots,
         direct_root_identities: mut root_registry_identities,
         workspace_root_keys,
-        registry_dependencies: workspace_registry_dependencies,
+        registry_dependencies: mut workspace_registry_dependencies,
         overrides,
     } = workspace_root_resolution(manifest, &workspace, registry_config)?;
     let direct_local_names = manifest
@@ -44,7 +45,7 @@ pub(super) fn resolve_package_graph(
         .map(|name| dep_parts(name).map(|(_, name)| name))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let WorkspaceMaterialization {
-        manifests: _,
+        manifests: workspace_manifests,
         links: workspace_links,
         locked: workspace_locked,
         members: _,
@@ -339,7 +340,7 @@ pub(super) fn resolve_package_graph(
         }
     }
     let mut omissions = Vec::new();
-    if workspace_locked.is_empty() && roots.iter().all(|root| root.registry.registry().is_some()) {
+    if roots.iter().all(|root| root.registry.registry().is_some()) {
         let required = entry_points
             .iter()
             .filter(|(_, entry)| {
@@ -414,9 +415,18 @@ pub(super) fn resolve_package_graph(
                 None
             };
             if let Some(reason) = reason {
-                absent.insert((dependency.registry.clone(), dependency.name.clone()));
+                absent.insert((
+                    entry.clone(),
+                    dependency.registry.clone(),
+                    dependency.name.clone(),
+                ));
                 omissions.push(tapid_lockfile::AcceptedOmission {
-                    origin: tapid_lockfile::OmissionOrigin::Root,
+                    origin: entry
+                        .workspace
+                        .as_ref()
+                        .map_or(tapid_lockfile::OmissionOrigin::Root, |key| {
+                            tapid_lockfile::OmissionOrigin::Workspace { key: key.clone() }
+                        }),
                     name: dependency.name.to_string(),
                     requirement: dependency.requirement.raw.clone(),
                     registry: dependency.registry.to_string(),
@@ -427,12 +437,39 @@ pub(super) fn resolve_package_graph(
                 seed.extend(candidates);
             }
         }
-        roots.retain(|dependency| {
-            !absent.contains(&(dependency.registry.clone(), dependency.name.clone()))
+        entry_points.retain(|(dependency, entry)| {
+            !absent.contains(&(
+                entry.clone(),
+                dependency.registry.clone(),
+                dependency.name.clone(),
+            ))
         });
-        entry_points.retain(|(dependency, _)| {
-            !absent.contains(&(dependency.registry.clone(), dependency.name.clone()))
+        roots = entry_points
+            .iter()
+            .map(|(dependency, _)| dependency.clone())
+            .collect();
+        workspace_registry_dependencies.retain(|dependency| {
+            !omissions.iter().any(|omission| {
+                omission.origin
+                    == tapid_lockfile::OmissionOrigin::Workspace {
+                        key: dependency.member_key.clone(),
+                    }
+                    && omission.name == dependency.manifest_name
+            })
         });
+        root_registry_identities = entry_points
+            .iter()
+            .filter(|(_, entry)| entry.workspace.is_none())
+            .map(|(dependency, _)| {
+                (
+                    dependency.registry.clone(),
+                    dependency
+                        .requirement
+                        .package_name(&dependency.name)
+                        .clone(),
+                )
+            })
+            .collect();
     }
     resolving.set(true);
     let (mut resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
@@ -514,6 +551,7 @@ pub(super) fn resolve_package_graph(
         })
         .transpose()?;
     Ok(ResolvedGraph {
+        workspace_manifests,
         omissions,
         candidate_exclusions,
         updated_manifest,
