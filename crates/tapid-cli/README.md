@@ -41,6 +41,7 @@ tapid install [OPTIONS]
 tapid ci [OPTIONS]
 tapid add <PACKAGE>... [OPTIONS]
 tapid remove <PACKAGE>... [OPTIONS]
+tapid edit-dependencies --file <PATH> [OPTIONS]
 tapid update [OPTIONS]
 tapid outdated [OPTIONS]
 tapid prune [OPTIONS]
@@ -493,3 +494,10 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+`tapid edit-dependencies --file edits.json` applies a strict version-1 JSON batch
+of section-specific additions, removals and declaration moves with one recoverable
+install. It supports one selected root or workspace member, limits input to a
+regular file of 1 MiB and 256 edits, and rejects conflicts before recovery.
+See the [JSON request and result contract](../../docs/json-results.md#structured-dependency-edits)
+for shapes, indexed outcomes, bounded graph evidence and durable-commit semantics.

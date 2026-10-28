@@ -116,6 +116,7 @@ fn success(result: &Value) {
 fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
     let guide = include_str!("../../../docs/agent-guide.md");
     assert!(guide.contains(&format!("CLI source version {}", env!("CARGO_PKG_VERSION"))));
+    assert!(guide.len() < 6000, "keep the shared guide compact");
     let lf = guide.replace("\r\n", "\n");
     let crlf = lf.replace('\n', "\r\n");
     for (representation, text) in [("LF", &lf), ("CRLF", &crlf)] {

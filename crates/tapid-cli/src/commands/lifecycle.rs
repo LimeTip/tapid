@@ -3,6 +3,10 @@ use clap::Args as ClapArgs;
 use std::{path::PathBuf, process::ExitCode};
 use tapid_manifest::DependencyKind;
 
+#[cfg(test)]
+#[path = "lifecycle_evaluation.rs"]
+mod evaluation;
+
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
@@ -121,6 +125,8 @@ pub(crate) struct CommonArgs {
 }
 
 pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
+    #[cfg(test)]
+    crate::application::dependency_edit_evaluation::observe(|counts| counts.command_entries += 1);
     if args.packages.is_empty() {
         return crate::output::json::failure_or_human(
             &OperationFailure::unchanged(
@@ -162,6 +168,8 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
 }
 
 pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
+    #[cfg(test)]
+    crate::application::dependency_edit_evaluation::observe(|counts| counts.command_entries += 1);
     if args.packages.is_empty() {
         return crate::output::json::failure_or_human(
             &OperationFailure::unchanged(

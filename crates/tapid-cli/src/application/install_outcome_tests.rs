@@ -35,6 +35,41 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
 const ARTIFACT: &str = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
 const INTEGRITY: &str = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
 
+#[test]
+fn dependency_edit_evaluation_observes_one_real_install_without_leaking_counts() {
+    use crate::application::dependency_edit_evaluation::measure;
+    let (project, fixture) = project_with_fixture("edit-evaluation-counts", INTEGRITY);
+    let original =
+        PackageManifest::parse(&fs::read_to_string(project.path().join("package.json")).unwrap())
+            .unwrap();
+    let updated = original.clone().with_dependency("plugin", "1.0.0").unwrap();
+    let (_, counts) = measure(|| {
+        run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::ReplaceManifest(ManifestEdit {
+                    expected: &original,
+                    updated: &updated,
+                }),
+                store_root: Some(&project.path().join("store")),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap()
+    });
+    assert_eq!(counts.graph_operations, 1);
+    assert_eq!(counts.metadata_retrievals, 1);
+    assert_eq!(counts.artifact_requests, 1);
+    assert_eq!(counts.materializations, 1);
+    assert_eq!(counts.activations, 1);
+    assert_eq!(counts.durable_decisions, 1);
+    assert_eq!(measure(|| ()).1, Default::default());
+}
+
 fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) {
     let project = TempProject::new(label).unwrap();
     project
@@ -52,6 +87,370 @@ fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) 
         )
         .unwrap();
     (project, fixture)
+}
+
+#[test]
+fn batch_install_rolls_back_resolution_integrity_and_staging_failures() {
+    use crate::application::lifecycle::batch::{self, Edit};
+    use tapid_manifest::DependencyKind as Kind;
+    for failure_kind in [
+        ErrorKind::Resolution,
+        ErrorKind::Integrity,
+        ErrorKind::Materialization,
+    ] {
+        let (project, fixture) = project_with_fixture("batch-install-failure", INTEGRITY);
+        let store = project.path().join("store");
+        let initial = run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(initial.outcome.state, ChangeState::Committed);
+        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+        let before = Lockfile::from_json(std::str::from_utf8(&lock).unwrap()).unwrap();
+        let digest = before.packages().values().next().unwrap().tree_digest();
+        let digest = digest.parse().unwrap();
+        let verified_store = tapid_store::Store::new(&store);
+        let snapshot = verified_store.verified_tree_snapshot(&digest).unwrap();
+        let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
+        let second_spec = if failure_kind == ErrorKind::Resolution {
+            "missing@1.0.0"
+        } else {
+            "new@npm:plugin@2.0.0"
+        };
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&fixture).unwrap()).unwrap();
+        let mut second = metadata["packages"][0].clone();
+        second["version"] = "2.0.0".into();
+        if failure_kind == ErrorKind::Integrity {
+            second["integrity"] = format!(
+                "sha512-{}",
+                base64::engine::general_purpose::STANDARD.encode([0; 64])
+            )
+            .into();
+        }
+        metadata["packages"].as_array_mut().unwrap().push(second);
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let _fault = (failure_kind == ErrorKind::Materialization).then(|| inject(Fault::Stage));
+        let failure = batch::run(
+            project.path(),
+            None,
+            &store,
+            &fixture,
+            &[
+                Edit::Move {
+                    name: "plugin",
+                    from: Kind::Dependencies,
+                    to: Kind::DevDependencies,
+                },
+                Edit::Add {
+                    section: Kind::Dependencies,
+                    spec: second_spec,
+                },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, failure_kind);
+        assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("node_modules/plugin/package.json")).unwrap(),
+            installed
+        );
+        assert!(verified_store.verified_tree_snapshot(&digest).is_ok());
+        drop(snapshot);
+    }
+}
+
+#[test]
+fn batch_postcommit_failures_retain_the_combined_state() {
+    use crate::application::lifecycle::batch::{self, Edit};
+    use tapid_manifest::DependencyKind as Kind;
+    for fault in [Fault::AfterCommit, Fault::CleanupPending] {
+        let (project, fixture) = project_with_fixture("batch-postcommit", INTEGRITY);
+        let edits = [
+            Edit::Add {
+                section: Kind::Dependencies,
+                spec: "runtime@npm:plugin@1.0.0",
+            },
+            Edit::Add {
+                section: Kind::DevDependencies,
+                spec: "dev@npm:plugin@1.0.0",
+            },
+        ];
+        let _fault = inject(fault);
+        let failure = batch::run(
+            project.path(),
+            None,
+            &project.path().join("store"),
+            &fixture,
+            &edits,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure.outcome.state,
+            ChangeState::Committed | ChangeState::CommittedCleanupPending
+        ));
+        let manifest = PackageManifest::parse(
+            &fs::read_to_string(project.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.dependencies()["runtime"], "npm:plugin@1.0.0");
+        assert_eq!(manifest.dev_dependencies()["dev"], "npm:plugin@1.0.0");
+        assert!(project.path().join("tapid.lock").is_file());
+        assert!(
+            project
+                .path()
+                .join("node_modules/runtime/package.json")
+                .is_file()
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/dev/package.json")
+                .is_file()
+        );
+    }
+}
+
+#[test]
+fn batch_candidate_retains_installer_project_change_detection() {
+    use crate::application::lifecycle::{
+        self,
+        batch::{self, Edit},
+    };
+    use tapid_manifest::DependencyKind as Kind;
+    let (project, fixture) = project_with_fixture("batch-project-changed", INTEGRITY);
+    let selection = lifecycle::resolve_workspace(project.path(), None).unwrap();
+    let updated = batch::plan(
+        &selection,
+        &[Edit::Add {
+            section: Kind::DevDependencies,
+            spec: "plugin@1.0.0",
+        }],
+    )
+    .unwrap();
+    let changed = br#"{"name":"app","version":"1.0.0","scripts":{"test":"other edit"}}"#;
+    project.write("package.json", changed).unwrap();
+    let failure = run(
+        InstallRequest {
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::ReplaceManifest(ManifestEdit {
+                expected: &selection.manifest,
+                updated: &updated,
+            }),
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::ProjectChanged);
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        changed
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn batch_install_keeps_optional_and_peer_root_semantics() {
+    use crate::application::lifecycle::batch::{self, Edit};
+    use tapid_manifest::DependencyKind as Kind;
+    let (project, fixture) = project_with_fixture("batch-optional-peer", INTEGRITY);
+    let report = batch::run(
+        project.path(),
+        None,
+        &project.path().join("store"),
+        &fixture,
+        &[
+            Edit::Add {
+                section: Kind::OptionalDependencies,
+                spec: "plugin@1.0.0",
+            },
+            Edit::Add {
+                section: Kind::PeerDependencies,
+                spec: "peer-only@^1",
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(report.outcome.state, ChangeState::Committed);
+    assert_eq!(report.package_count, 1);
+    assert!(
+        project
+            .path()
+            .join("node_modules/plugin/package.json")
+            .is_file()
+    );
+    assert!(!project.path().join("node_modules/peer-only").exists());
+}
+
+#[test]
+fn batch_recovers_existing_transaction_crash_points() {
+    use crate::application::lifecycle::batch::{self, Edit};
+    use tapid_manifest::DependencyKind as Kind;
+    let edits = [
+        Edit::Move {
+            name: "plugin",
+            from: Kind::Dependencies,
+            to: Kind::DevDependencies,
+        },
+        Edit::Add {
+            section: Kind::Dependencies,
+            spec: "h3@2.0.0",
+        },
+    ];
+    // Re-execute only this test to abort the real private batch path without
+    // process-global environment changes in the parent test runner.
+    if let Some(project) = std::env::var_os("TAPID_BATCH_CRASH_PROJECT") {
+        let project = PathBuf::from(project);
+        assert_eq!(
+            fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+            fs::canonicalize(&project).unwrap(),
+            "crash artifacts must stay in the isolated temporary project"
+        );
+        batch::run(
+            &project,
+            None,
+            &project.join("store"),
+            &project.join("registry.json"),
+            &edits,
+        )
+        .unwrap();
+        panic!("requested crash checkpoint was not reached");
+    }
+    for point in [
+        "store_published",
+        "lockfile_replaced",
+        "node_modules_backed_up",
+        "activation_complete",
+        "commit_decision",
+    ] {
+        let (project, fixture) = project_with_fixture("batch-crash-recovery", INTEGRITY);
+        let home = tapid_test_support::TempHome::new("batch-crash-recovery").unwrap();
+        let store = project.path().join("store");
+        run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap();
+        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+        let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
+        let trees = || {
+            fs::read_dir(store.join("trees"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let prior_trees = trees();
+        let aliases: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/npm-aliases.json")).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&fixture).unwrap()).unwrap();
+        metadata["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(aliases["packages"][1].clone());
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "application::install::outcome_tests::batch_recovers_existing_transaction_crash_points", "--nocapture"])
+            // Abort may write a core dump on Linux. Keep it in the fixture,
+            // where TempProject removes it along with the interrupted state.
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", home.path()).env("USERPROFILE", home.path())
+            .env("XDG_CACHE_HOME", home.path()).env("LOCALAPPDATA", home.path())
+            .env("TAPID_BATCH_CRASH_PROJECT", project.path())
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{point}: child unexpectedly completed"
+        );
+        assert!(
+            project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .is_file(),
+            "{point}: crash did not leave a journal; {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recovery = ActivationLock::acquire(project.path()).unwrap();
+        assert!(recovery.recovered, "{point}");
+        drop(recovery);
+        if point == "commit_decision" {
+            let current = PackageManifest::parse(
+                &fs::read_to_string(project.path().join("package.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(current.dev_dependencies()["plugin"], "1.0.0");
+            assert_eq!(current.dependencies()["h3"], "2.0.0");
+            assert!(
+                project
+                    .path()
+                    .join("node_modules/h3/package.json")
+                    .is_file()
+            );
+            assert_ne!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+            assert!(trees().is_superset(&prior_trees));
+            assert!(trees().len() > prior_trees.len());
+        } else {
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest,
+                "{point}"
+            );
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                lock,
+                "{point}"
+            );
+            assert_eq!(
+                fs::read(project.path().join("node_modules/plugin/package.json")).unwrap(),
+                installed,
+                "{point}"
+            );
+            assert!(!project.path().join("node_modules/h3").exists());
+            assert_eq!(
+                trees(),
+                prior_trees,
+                "{point}: newly published objects must roll back"
+            );
+        }
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+    }
 }
 
 #[test]
@@ -223,6 +622,7 @@ fn integrity_failure_is_typed_and_rolls_back_the_manifest() {
 
 #[derive(Clone, Copy)]
 enum Fault {
+    Stage,
     AfterCommit,
     CleanupPending,
     RollbackPending,
@@ -243,6 +643,10 @@ fn inject(fault: Fault) -> FaultGuard {
 // Mutate only this thread's temporary fixture at real filesystem boundaries.
 pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(), OperationalError> {
     match (FAULT.get(), point) {
+        (Some(Fault::Stage), "before_stage") => Err(OperationalError::new(
+            ErrorKind::Materialization,
+            "injected staging failure",
+        )),
         (Some(Fault::PolicyChanged), "before_acquire") => {
             fs::write(project.join("tapid.lifecycle.toml"), b"schema = 2").unwrap();
             Ok(())
@@ -2047,4 +2451,109 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
             installed
         );
     }
+}
+
+#[test]
+fn dependency_edit_graph_evidence_is_bounded_at_exact_record_limit() {
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    let digest = format!("sha256-{}", "0".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    for index in 0..=MAX_GRAPH_CHANGES {
+        if index == MAX_GRAPH_CHANGES {
+            let exact = PackageChanges::between(None, &lock).unwrap();
+            assert_eq!(exact.records.len(), 256);
+            assert_eq!(exact.omitted, 0);
+        }
+        let package = LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            &format!("package{index}"),
+            "1.0.0",
+            INTEGRITY,
+            &digest,
+            RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        lock.insert_package(package).unwrap();
+    }
+    lock.set_roots(lock.packages().keys().cloned().collect::<Vec<_>>())
+        .unwrap();
+    let extra = PackageChanges::between(None, &lock).unwrap();
+    assert_eq!(extra.added, 257);
+    assert_eq!(extra.records.len(), 256);
+    assert_eq!(extra.omitted, 1);
+    let unchanged =
+        PackageChanges::between(Some(lock.to_json().unwrap().as_bytes()), &lock).unwrap();
+    assert!(unchanged.records.is_empty());
+    assert_eq!(unchanged.omitted, 0);
+    let removed = PackageChanges::between(
+        Some(lock.to_json().unwrap().as_bytes()),
+        &Lockfile::new(&digest).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(removed.removed, 257);
+    assert_eq!(removed.omitted, 1);
+}
+
+#[test]
+fn dependency_edit_graph_preserves_origin_peer_platform_and_root_only_changes() {
+    use tapid_core::{PeerContext, PlatformContext};
+    use tapid_lockfile::{LockedPackage, RegistryIntegrityProvenance};
+    let digest = format!("sha256-{}", "0".repeat(64));
+    let mut lock = Lockfile::new(&digest).unwrap();
+    let peer = PeerContext::default().with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+    let plain = PeerContext::default();
+    let any = PlatformContext::new(None, None, None).unwrap();
+    let linux = PlatformContext::new(Some("linux"), Some("x86_64"), None).unwrap();
+    for (origin, peers, platform) in [
+        ("https://registry.npmjs.org", &plain, &any),
+        ("https://other.example.test", &plain, &any),
+        ("https://registry.npmjs.org", &peer, &any),
+        ("https://registry.npmjs.org", &plain, &linux),
+    ] {
+        lock.insert_package(
+            LockedPackage::new_with_context_and_provenance(
+                origin,
+                "same",
+                "1.0.0",
+                INTEGRITY,
+                &digest,
+                (peers, platform),
+                RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let changes = PackageChanges::between(None, &lock).unwrap();
+    let identities = changes
+        .records
+        .iter()
+        .map(|record| match record {
+            GraphChange::Package { identity, .. } => identity.clone(),
+            _ => panic!("unexpected record"),
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(identities.len(), 4);
+    assert_eq!(identities, lock.packages().keys().cloned().collect());
+    lock.set_roots(lock.packages().keys().cloned().collect::<Vec<_>>())
+        .unwrap();
+    let before = lock.to_json().unwrap();
+    let bindings = lock
+        .packages()
+        .keys()
+        .enumerate()
+        .map(|(index, key)| (format!("alias{index}"), key.clone()))
+        .collect();
+    lock.set_root_bindings(bindings).unwrap();
+    let roots = PackageChanges::between(Some(before.as_bytes()), &lock).unwrap();
+    assert_eq!(roots.reused, 4);
+    assert_eq!(roots.records.len(), 4);
+    assert!(roots.records.iter().all(|record| matches!(
+        record,
+        GraphChange::Root {
+            before: None,
+            after: Some(_),
+            ..
+        }
+    )));
 }
