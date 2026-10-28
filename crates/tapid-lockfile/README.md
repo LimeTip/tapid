@@ -77,9 +77,12 @@ different source trees. Receipt construction records caller-supplied verificatio
 evidence; it does not download or verify an archive. Producers must perform those
 checks before attachment. Pending receipts cannot carry lifecycle output records.
 
-The schema model is groundwork for selection-only writes. The CLI does not yet
-expose `--lockfile-only` or hydrate pending native receipts. It rejects pending
-receipts for replay. When no earlier transaction needs recovery, ci/offline
+`validate_selection` checks manifest binding and replay provenance independently
+of receipt completeness. `validate_replay` additionally requires complete receipts.
+The CLI does not yet expose `--lockfile-only`. Matching ordinary and frozen installs
+hydrate pending native receipts from exact pinned artifacts, verifying archive
+integrity, safety and identity before publishing receipts and activating in the
+existing project transaction. Hydration retains schema 11. When no earlier transaction needs recovery, ci/offline
 preflight rejects them before project exclusion or mutation; existing recovery
 still precedes classification of the restored lock. Complete native locks retain their serialization and replay
 contract. Imported schema 8 remains a separate placement and hydration contract.

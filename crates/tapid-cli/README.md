@@ -36,8 +36,20 @@ Version-4 recovery also recognizes metadata-only decisions with bounded, sorted
 root/member `package.json` and root `tapid.lock` before/after evidence. Prepared
 decisions preserve prior outputs; committed decisions complete publication only
 when every current output matches its recorded old or new value. Metadata recovery
-never enters store or installed-layout recovery. The lockfile-only command writer
-remains unavailable until pending-receipt hydration is implemented.
+never enters store or installed-layout recovery. Metadata preparation rechecks
+recorded output bytes before the durable decision; publication uses that same
+prepared output set. Selection-only project acquisition settles metadata journals
+and refuses journals or backups requiring activation recovery. The lockfile-only
+command writer remains unavailable while selection assembly and command routing
+are under implementation.
+
+Matching ordinary installs and frozen installs can hydrate native schema-11
+pending receipts from their exact pinned artifacts without resolving metadata.
+Archive integrity, safety, and package identity are verified before attaching tree
+receipts. Receipt publication and activation share the project transaction; failed
+hydration preserves the pending lock and installed application. Schema 11 is
+retained after hydration. Pending receipts are rejected by ci and offline replay;
+retain the completed lock after frozen hydration before using those commands.
 
 ## Commands
 

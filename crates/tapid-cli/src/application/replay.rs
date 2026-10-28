@@ -186,11 +186,12 @@ pub(super) fn can_replay_inspected(
         online::validate_locked_files(project, lock)?;
     }
     Ok(routes_match
-        && policy.approvals().is_empty()
-        && lock
-            .packages()
-            .values()
-            .all(|p| p.derived_hooks().is_empty())
+        && (lock.has_pending_receipts()
+            || (policy.approvals().is_empty()
+                && lock
+                    .packages()
+                    .values()
+                    .all(|p| p.derived_hooks().is_empty())))
         && digest_matches
         && online::workspace_matches_lock(workspace, lock))
 }

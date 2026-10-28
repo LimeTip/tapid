@@ -1,5 +1,50 @@
 use super::*;
 
+/// Archive identity is independent of registry metadata and receipt availability.
+pub(super) fn validate_archive_identity(
+    tree: &Path,
+    name: &PackageName,
+    version: &PackageVersion,
+) -> Result<(), OperationalError> {
+    let bytes = crate::filesystem::read::read_bounded_file(
+        &tree.join("package/package.json"),
+        tapid_manifest::MAX_MANIFEST_BYTES,
+    )
+    .map_err(|error| {
+        OperationalError::new(
+            ErrorKind::Integrity,
+            format!("cannot read archive identity: {error:?}"),
+        )
+    })?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Integrity, error))?;
+    if manifest["name"].as_str() == Some(name.as_str())
+        && manifest["version"].as_str() == Some(&version.to_string())
+    {
+        return Ok(());
+    }
+    let observed = manifest["name"]
+        .as_str()
+        .and_then(|value| value.parse::<PackageName>().ok())
+        .zip(
+            manifest["version"]
+                .as_str()
+                .and_then(|value| value.parse::<PackageVersion>().ok()),
+        )
+        .map(|(name, version)| format!("{name}@{version}"))
+        .unwrap_or_else(|| "invalid_package_identity".into());
+    Err(OperationalError::new(
+        ErrorKind::Integrity,
+        "archive identity disagrees with selected package",
+    )
+    .with_diagnostic(crate::application::outcome::DiagnosticContext::comparison(
+        "artifact_identity",
+        None,
+        format!("{name}@{version}"),
+        observed,
+    )))
+}
+
 pub(super) struct ArtifactFetcher<'a> {
     pub(super) store: &'a Store,
     pub(super) config: &'a crate::registry::RegistryConfig,
@@ -16,7 +61,7 @@ impl ArtifactFetcher<'_> {
         store_transaction: &mut StoreTransaction,
     ) -> Result<(PackageIntegrity, ArtifactDigest, PathBuf), OperationalError> {
         let store = self.store;
-        if let Some(package) = pinned {
+        if let Some(package) = pinned.filter(|package| package.source_tree_receipt().is_some()) {
             let digest: ArtifactDigest = package
                 .tree_digest()?
                 .parse()
@@ -149,6 +194,10 @@ impl ArtifactFetcher<'_> {
                 id.name, id.version, id.registry
             ))
         })?;
+        if pinned.is_some_and(|package| package.source_tree_receipt().is_none()) {
+            validate_archive_identity(&temp, &id.name, &id.version)
+                .map_err(|error| error.for_package(id.into()))?;
+        }
         let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
             .map_err(|e| OperationalError::from_source(ErrorKind::Archive, e))?
             .parse()
@@ -156,8 +205,9 @@ impl ArtifactFetcher<'_> {
                 OperationalError::from_source(ErrorKind::Archive, e)
             })?;
         if pinned
-            .map(|package| package.tree_digest())
-            .transpose()?
+            .and_then(|package| package.source_tree_receipt())
+            .as_ref()
+            .map(|receipt| receipt.tree_digest())
             .is_some_and(|expected| expected != tree_digest.as_str())
         {
             return Err(OperationalError::new(

@@ -509,7 +509,7 @@ fn perform_install(
     });
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
-        match lock.validate_replay(lock.root_manifest_digest()) {
+        match lock.validate_selection(lock.root_manifest_digest()) {
             Ok(()) => {}
             Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
                 if allow_unverified_registry_artifacts
@@ -752,7 +752,7 @@ fn perform_install(
             ),
         ));
     }
-    let lock = read_lock(&lock_path)?;
+    let mut lock = read_lock(&lock_path)?;
     session.package_changes = PackageChanges::between(original_lock.as_deref(), &lock);
     let current_manifest_digest = fs::read(project_dir.join("package.json"))
         .map(|bytes| crate::filesystem::atomic::digest_bytes(&bytes))
@@ -760,7 +760,7 @@ fn perform_install(
             OperationalError::from_source(ErrorKind::Manifest, error)
                 .context("cannot read root manifest for lockfile replay")
         })?;
-    lock.validate_replay(&current_manifest_digest)
+    lock.validate_selection(&current_manifest_digest)
         .map_err(|error| {
             OperationalError::from(error)
                 .at_manifest(&project_dir.join("package.json"))
@@ -829,6 +829,7 @@ fn perform_install(
         ));
     }
     if !offline
+        && !lock.has_pending_receipts()
         && (ci
             || lock
                 .packages()
@@ -910,10 +911,11 @@ fn perform_install(
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
         return Ok((lock.packages().len(), true));
     }
+    let pending_receipts = lock.has_pending_receipts();
     let mut publication = None;
     if !offline
         && let Some(transaction) = online::hydrate_locked(
-            &lock,
+            &mut lock,
             &store,
             &registry_config,
             registry_fixture,
@@ -927,6 +929,15 @@ fn perform_install(
                 .map_err(OperationalError::from)?,
         );
         crate::filesystem::activation::test_crash_at("store_published");
+    }
+    if pending_receipts {
+        lock.validate_replay(&current_manifest_digest)?;
+        let json = lock.to_json()?;
+        session.mutated = true;
+        session.lock_backup = crate::filesystem::atomic::replace_lockfile(&lock_path, &json)
+            .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+        session.outcome.changed_files.push(lock_path.clone());
+        crate::filesystem::activation::test_crash_at("lockfile_replaced");
     }
     let crate::application::replay::ReplayInput {
         mut input,
@@ -979,6 +990,9 @@ fn perform_install(
     if let Some(publication) = publication {
         publication.commit().map_err(OperationalError::from)?;
     }
+    crate::filesystem::atomic::discard_lockfile_backup(session.lock_backup.as_deref())
+        .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
+    session.lock_backup = None;
     journal
         .finish()
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;

@@ -952,6 +952,15 @@ impl Lockfile {
         {
             return Err(LockfileError::PendingSourceTreeReceipt(package.key()));
         }
+        self.validate_selection(current_root_manifest_digest)
+    }
+
+    /// Validates pinned selection inputs without requiring completed tree receipts.
+    /// Callers must verify pending artifacts before store publication or activation.
+    pub fn validate_selection(
+        &self,
+        current_root_manifest_digest: &str,
+    ) -> Result<(), LockfileError> {
         let current_root_manifest_digest = canonical_artifact_digest(current_root_manifest_digest)?;
         if self.root_manifest_digest != current_root_manifest_digest {
             return Err(LockfileError::RootManifestDigestMismatch {

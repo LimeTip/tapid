@@ -225,35 +225,12 @@ pub(crate) fn fetch_imported(
                 (digest, ImportedTree::Extracted(temp))
             }
         };
-        let artifact_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.path().join("package/package.json")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        if artifact_manifest["name"].as_str() != Some(package.name.as_str())
-            || artifact_manifest["version"].as_str() != Some(&package.version.to_string())
-        {
-            let observed = artifact_manifest["name"]
-                .as_str()
-                .and_then(|value| value.parse::<PackageName>().ok())
-                .zip(
-                    artifact_manifest["version"]
-                        .as_str()
-                        .and_then(|value| value.parse::<PackageVersion>().ok()),
-                )
-                .map(|(name, version)| format!("{name}@{version}"))
-                .unwrap_or_else(|| "invalid_package_identity".into());
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                format!("archive identity disagrees with imported selection at {path}"),
-            )
-            .with_diagnostic(DiagnosticContext::comparison(
-                "artifact_identity",
-                None,
-                format!("{}@{}", package.name, package.version),
-                observed,
-            ))
-            .for_package(identity));
-        }
+        super::artifact::validate_archive_identity(temp.path(), &package.name, &package.version)
+            .map_err(|error| {
+                error
+                    .context(format!("imported selection at {path}"))
+                    .for_package(identity)
+            })?;
         let tree = transaction
             .stage_verified_tree(&digest, temp.path())
             .map_err(OperationalError::from)?;

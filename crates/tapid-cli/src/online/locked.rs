@@ -46,7 +46,7 @@ pub(super) fn reusable_locked_packages(
 }
 
 pub(crate) fn hydrate_locked(
-    lock: &Lockfile,
+    lock: &mut Lockfile,
     store: &Store,
     config: &crate::registry::RegistryConfig,
     fixture_path: Option<&Path>,
@@ -107,25 +107,32 @@ pub(crate) fn hydrate_locked(
 }
 
 fn hydrate_with_fetch(
-    lock: &Lockfile,
+    lock: &mut Lockfile,
     store: &Store,
     mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
     let mut transaction = store.transaction();
     let mut staged = BTreeSet::new();
+    let mut receipts = Vec::new();
     for (key, package) in lock.packages_typed()? {
-        let digest: ArtifactDigest = package
-            .tree_digest()?
-            .parse()
-            .map_err(|error: tapid_core::DomainError| error.to_string())?;
-        if staged.contains(digest.as_str()) {
-            continue;
-        }
-        match store.verified_tree_path(&digest) {
-            Ok(_) => continue,
-            Err(tapid_store::IngestError::TreeMissing(_)) => {}
-            Err(error) => {
-                return Err(OperationalError::from(error).context("locked store tree is invalid"));
+        let expected_digest = package
+            .source_tree_receipt()
+            .map(|receipt| receipt.tree_digest().to_owned());
+        if let Some(digest) = &expected_digest {
+            let digest: ArtifactDigest = digest
+                .parse()
+                .map_err(|error: tapid_core::DomainError| error.to_string())?;
+            if staged.contains(digest.as_str()) {
+                continue;
+            }
+            match store.verified_tree_path(&digest) {
+                Ok(_) => continue,
+                Err(tapid_store::IngestError::TreeMissing(_)) => {}
+                Err(error) => {
+                    return Err(
+                        OperationalError::from(error).context("locked store tree is invalid")
+                    );
+                }
             }
         }
         if key.source.registry().is_some() && package.registry_integrity_declared() != Some(true) {
@@ -191,7 +198,10 @@ fn hydrate_with_fetch(
         .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
         let actual = canonical_tree_digest(&temp)
             .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
-        if actual != digest.as_str() {
+        if expected_digest
+            .as_ref()
+            .is_some_and(|expected| expected != &actual)
+        {
             return Err(OperationalError::new(
                 ErrorKind::Integrity,
                 format!("locked tree digest mismatch for {}", key.name),
@@ -199,16 +209,31 @@ fn hydrate_with_fetch(
             .with_diagnostic(DiagnosticContext::comparison(
                 "tree_digest",
                 Some("sha256"),
-                &digest,
+                expected_digest.as_deref().unwrap(),
                 &actual,
             ))
             .for_package((&key).into()));
         }
+        if expected_digest.is_none() {
+            super::artifact::validate_archive_identity(&temp, &key.name, &key.version)
+                .map_err(|error| error.for_package((&key).into()))?;
+            receipts.push((
+                key.to_string(),
+                tapid_lockfile::SourceTreeReceipt::new(package, &actual, &actual)?,
+            ));
+        }
+        let digest: ArtifactDigest = actual
+            .parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?;
         if staged.insert(digest.to_string()) {
             transaction
                 .stage_verified_tree(&digest, &temp)
                 .map_err(OperationalError::from)?;
         }
+    }
+    // No partial receipt attachment when any artifact fails verification.
+    for (key, receipt) in receipts {
+        lock.attach_source_tree_receipt(&key, receipt)?;
     }
     Ok((!staged.is_empty()).then_some(transaction))
 }
@@ -341,7 +366,7 @@ mod tests {
             lock.insert_package(package).unwrap();
         }
         let mut fetches = 0;
-        let transaction = hydrate_with_fetch(&lock, &store, |_, _| {
+        let transaction = hydrate_with_fetch(&mut lock, &store, |_, _| {
             fetches += 1;
             if fetches > 1 {
                 return Err(OperationalError::new(
