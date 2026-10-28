@@ -53,12 +53,14 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str], online: bool) -> Output {
+        self.command_at(args, online, self.project.path())
+    }
+
+    fn command_at(&self, args: &[&str], online: bool, cwd: &Path) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
         command
             .args(args)
-            .arg("--store-dir")
-            .arg(self.home.path().join("store"))
-            .current_dir(self.project.path())
+            .current_dir(cwd)
             .env_clear()
             .env("HOME", self.home.path())
             .env("USERPROFILE", self.home.path());
@@ -66,6 +68,11 @@ impl Fixture {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
+        }
+        if args.first() != Some(&"run") {
+            command
+                .arg("--store-dir")
+                .arg(self.home.path().join("store"));
         }
         if online {
             command
@@ -356,4 +363,350 @@ fn root_run_rejects_symlinked_manifest_before_script_or_policy_loading() {
         assert!(output.stdout.is_empty());
         assert_eq!(snapshot(project.path()), before);
     }
+}
+
+#[test]
+fn nested_member_install_uses_workspace_owner() {
+    for relative in ["apps/news", "apps/news/src/nested"] {
+        let fixture = Fixture::new();
+        let root = fixture.project.path();
+        fs::create_dir_all(root.join(relative)).unwrap();
+        let original_root = fs::read(root.join("package.json")).unwrap();
+        let original_ui = fs::read(root.join("packages/ui/package.json")).unwrap();
+        let output = fixture.command_at(&["install", "external@1.0.0"], true, &root.join(relative));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(root.join("package.json")).unwrap(), original_root);
+        assert_eq!(
+            fs::read(root.join("packages/ui/package.json")).unwrap(),
+            original_ui
+        );
+        let news: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("apps/news/package.json")).unwrap())
+                .unwrap();
+        assert_eq!(news["dependencies"]["external"], "1.0.0");
+        fixture.assert_imports("nested-install");
+    }
+}
+
+#[test]
+fn inferred_run_rejects_result_file_in_sibling_before_launch() {
+    let fixture = Fixture::new();
+    let root = fixture.project.path();
+    for destination in [
+        "result.json",
+        "apps/news/result.json",
+        "packages/ui/result.json",
+    ] {
+        let destination = root.join(destination);
+        let output = fixture.command_at(
+            &[
+                "run",
+                "probe",
+                "--result-file",
+                destination.to_str().unwrap(),
+            ],
+            false,
+            &root.join("apps/news"),
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("result file must be outside the project root"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn inferred_lifecycle_and_replay_keep_root_ownership_and_selected_manifest() {
+    for relative in [
+        ".",
+        "apps/news",
+        "apps/news/src/deep",
+        "packages/ui",
+        "packages/ui/src/deep",
+    ] {
+        let fixture = Fixture::new();
+        let root = fixture.project.path();
+        fs::create_dir_all(root.join(relative)).unwrap();
+        let selected = if relative.starts_with("apps/") {
+            "apps/news/package.json"
+        } else if relative.starts_with("packages/") {
+            "packages/ui/package.json"
+        } else {
+            "package.json"
+        };
+        let untouched = [
+            "package.json",
+            "apps/news/package.json",
+            "packages/ui/package.json",
+        ]
+        .into_iter()
+        .filter(|path| *path != selected)
+        .map(|path| (path, fs::read(root.join(path)).unwrap()))
+        .collect::<Vec<_>>();
+        for args in [
+            vec!["install"],
+            vec!["add", "external@1.0.0", "--dry-run"],
+            vec!["add", "external@1.0.0"],
+            vec!["update", "external", "--dry-run"],
+            vec!["update", "external"],
+            vec!["remove", "external", "--dry-run"],
+            vec!["remove", "external"],
+            vec!["install", "external@1.0.0"],
+            vec!["prune"],
+            vec!["install", "--offline"],
+            vec!["install", "--frozen"],
+        ] {
+            let preview = args.contains(&"--dry-run");
+            let before = preview.then(|| snapshot(root));
+            let online =
+                !args.contains(&"--offline") && !args.contains(&"--frozen") && args[0] != "prune";
+            let output = fixture.command_at(&args, online, &root.join(relative));
+            assert!(
+                output.status.success(),
+                "{relative} {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            for (path, bytes) in &untouched {
+                assert_eq!(
+                    &fs::read(root.join(path)).unwrap(),
+                    bytes,
+                    "{relative} {args:?}: {path}"
+                );
+            }
+            if let Some(before) = before {
+                assert_eq!(snapshot(root), before);
+            }
+            assert!(root.join("tapid.lock").exists());
+            assert!(!root.join("apps/news/tapid.lock").exists());
+            assert!(!root.join("packages/ui/tapid.lock").exists());
+            assert!(!root.join("apps/news/node_modules").exists());
+            assert!(!root.join("packages/ui/node_modules").exists());
+        }
+        fixture.assert_imports(relative);
+    }
+}
+
+#[test]
+fn explicit_selection_precedes_inference_without_owner_fallback() {
+    let fixture = Fixture::new();
+    fixture.succeeds(&["install"], true);
+    let root = fixture.project.path();
+    let original_news = fs::read(root.join("apps/news/package.json")).unwrap();
+    let original_root = fs::read(root.join("package.json")).unwrap();
+    let output = fixture.command_at(
+        &["add", "external@1.0.0", "--workspace", "@example/ui"],
+        true,
+        &root.join("apps/news"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(root.join("apps/news/package.json")).unwrap(),
+        original_news
+    );
+    assert_eq!(fs::read(root.join("package.json")).unwrap(), original_root);
+    let other = TempProject::new("explicit-project-cwd").unwrap();
+    let output = fixture.command_at(
+        &[
+            "add",
+            "external@1.0.0",
+            "--project-dir",
+            root.to_str().unwrap(),
+        ],
+        true,
+        other.path(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(root.join("apps/news/package.json")).unwrap(),
+        original_news
+    );
+    for args in [
+        vec!["install", "--workspace", "missing"],
+        vec!["install", "--project-dir", "missing"],
+    ] {
+        let before = snapshot(root);
+        let store = snapshot(&fixture.home.path().join("store"));
+        let output = fixture.command_at(&args, true, &root.join("apps/news"));
+        assert!(!output.status.success());
+        assert_eq!(snapshot(root), before);
+        assert_eq!(snapshot(&fixture.home.path().join("store")), store);
+    }
+}
+
+#[test]
+fn explicit_dot_preserves_standalone_target_even_inside_workspace() {
+    let fixture = Fixture::new();
+    // UI has no dependencies, so exact standalone selection is observable without
+    // involving the outer workspace's local dependency graph.
+    let root = fixture.project.path();
+    let output = fixture.command_at(
+        &["install", "--project-dir", "."],
+        true,
+        &root.join("packages/ui"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.join("packages/ui/tapid.lock").exists());
+    assert!(!root.join("tapid.lock").exists());
+}
+
+#[test]
+fn discovery_rejections_preserve_existing_project_and_store() {
+    let fixture = Fixture::new();
+    fixture.succeeds(&["install"], true);
+    let root = fixture.project.path();
+    fixture
+        .project
+        .write(
+            "apps/news/undeclared/package.json",
+            br#"{"name":"rogue","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let cwd = root.join("apps/news/undeclared");
+    let before = snapshot(root);
+    let store = snapshot(&fixture.home.path().join("store"));
+    for args in [
+        vec!["install"],
+        vec!["install", "--offline"],
+        vec!["install", "--frozen"],
+        vec!["add", "external"],
+        vec!["remove", "external"],
+        vec!["update"],
+        vec!["prune"],
+        vec!["run", "probe"],
+    ] {
+        let output = fixture.command_at(&args, false, &cwd);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("undeclared package"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(snapshot(root), before);
+        assert_eq!(snapshot(&fixture.home.path().join("store")), store);
+    }
+}
+
+#[test]
+fn inferred_run_rejects_member_grants_above_root_policy_before_launch() {
+    let fixture = Fixture::new();
+    let root = fixture.project.path();
+    fixture
+        .project
+        .write(
+            "tapid.toml",
+            b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nsubprocess=true\nnetwork=false\n",
+        )
+        .unwrap();
+    fixture
+        .project
+        .write(
+            "apps/news/tapid.toml",
+            b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['.']\nsubprocess=true\nnetwork=true\n",
+        )
+        .unwrap();
+    fs::create_dir_all(root.join("apps/news/src/deep")).unwrap();
+    let before = snapshot(root);
+    for relative in ["apps/news", "apps/news/src/deep"] {
+        for grant in [vec!["--allow-write", "."], vec!["--allow-network"]] {
+            let mut args = vec!["run", "probe"];
+            args.extend(grant);
+            let output = fixture.command_at(&args, false, &root.join(relative));
+            assert!(!output.status.success(), "{relative}: {args:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("exceeds the configured run policy"),
+                "{relative}: {args:?}: {stderr}"
+            );
+            assert_eq!(snapshot(root), before);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inferred_run_uses_member_cwd_and_root_relative_policy() {
+    let fixture = Fixture::new();
+    let root = fixture.project.path();
+    fixture.project.write("tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['output']\nsubprocess=true\nnetwork=false\n").unwrap();
+    fs::create_dir(root.join("output")).unwrap();
+    fs::create_dir_all(root.join("apps/news/src/deep")).unwrap();
+    fixture
+        .project
+        .write(
+            "apps/news/tapid.toml",
+            b"malformed member policy must not be read",
+        )
+        .unwrap();
+    fixture.project.write("apps/news/probe.js", br#"const fs = require('node:fs'); const path = require('node:path'); if (path.basename(process.cwd()) !== 'news') process.exit(41); fs.writeFileSync('../../output/ok', 'member cwd under root grant'); console.log('MEMBER_POLICY_OK');"#).unwrap();
+    fixture
+        .project
+        .write(
+            "packages/ui/package.json",
+            br#"{"name":"@example/ui","version":"1.2.0","scripts":{"probe":"node probe.js"}}"#,
+        )
+        .unwrap();
+    fixture.project.write("packages/ui/probe.js", br#"const fs=require('node:fs'); if(require('node:path').basename(process.cwd())!=='ui') process.exit(42); fs.writeFileSync('../../output/ok','member cwd under root grant'); console.log('UI_POLICY_OK');"#).unwrap();
+    fixture.project.write("probe.js", br#"require('node:fs').writeFileSync('output/ok','member cwd under root grant'); console.log('ROOT_POLICY_OK');"#).unwrap();
+    fs::create_dir_all(root.join("packages/ui/src/deep")).unwrap();
+    for (relative, args, marker) in [
+        (".", vec!["run", "probe"], "ROOT_POLICY_OK"),
+        ("apps/news", vec!["run", "probe"], "MEMBER_POLICY_OK"),
+        (
+            "apps/news/src/deep",
+            vec!["run", "probe"],
+            "MEMBER_POLICY_OK",
+        ),
+        ("packages/ui/src/deep", vec!["run", "probe"], "UI_POLICY_OK"),
+        (
+            "apps/news",
+            vec!["run", "probe", "--workspace", "@example/ui"],
+            "UI_POLICY_OK",
+        ),
+    ] {
+        let output = fixture.command_at(&args, false, &root.join(relative));
+        assert!(
+            output.status.success(),
+            "{relative}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(marker));
+        assert_eq!(
+            fs::read(root.join("output/ok")).unwrap(),
+            b"member cwd under root grant"
+        );
+    }
+    // A member cannot replace the root's denied write authority with its own policy.
+    fixture.project.write("tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nsubprocess=true\nnetwork=false\n").unwrap();
+    fixture.project.write("apps/news/tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['.']\nsubprocess=true\nnetwork=true\n").unwrap();
+    fs::remove_file(root.join("output/ok")).unwrap();
+    let output = fixture.command_at(&["run", "probe"], false, &root.join("apps/news"));
+    assert!(!output.status.success());
+    assert!(
+        ["EACCES", "EPERM", "EROFS"]
+            .iter()
+            .any(|code| String::from_utf8_lossy(&output.stderr).contains(code)),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.join("output/ok").exists());
 }

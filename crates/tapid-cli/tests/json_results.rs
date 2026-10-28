@@ -1481,3 +1481,15 @@ fn terminal_candidate_exclusions_are_structured_in_json() {
         }
     }
 }
+
+#[test]
+fn invocation_discovery_does_not_change_exact_root_inspection_errors() {
+    let project = TempProject::new("workspace-inspection-error-contract").unwrap();
+    project.write("package.json", b"invalid json").unwrap();
+    let (output, result) = invoke(&project, &["--json", "outdated", "--offline"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["errors"][0]["code"], "PROJECT_UNAVAILABLE");
+    let (output, result) = invoke(&project, &["--json", "install"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_INVALID");
+}

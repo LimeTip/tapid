@@ -42,3 +42,13 @@ UTF-8 source to a borrowed callback. Snapshot consumers can fingerprint those by
 before a later filesystem read. Discovery discards the source after each member;
 the shared workspace model retains only parsed manifests. Callback observations
 are partial if discovery fails.
+
+`Workspace::discover_ancestor(directory, selector)` walks canonical ancestry for
+the nearest workspace declaration, retaining the nearest standalone package as a
+fallback. It returns the validated owner and exact selected member name (or None
+for root). Explicit selectors override containing-member inference within that
+owner. Invalid encountered manifests fail; undeclared intervening packages and
+multiple containing members require explicit selection. It reuses the regular-file,
+size, pattern, and canonical-containment checks above. Existing supplied-root and
+bounded interfaces retain their exact-root behavior. See the workspace contract
+for nested roots, nonmember directories, and symlink rules.

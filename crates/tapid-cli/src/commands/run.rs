@@ -6,7 +6,6 @@ use result::RunFailure;
 use std::{
     env,
     ffi::OsString,
-    fs,
     io::{self, Write},
     path::PathBuf,
     process::ExitCode,
@@ -16,9 +15,9 @@ use std::{
 pub(crate) struct Args {
     /// Script name from package.json. Use a configured profile or explicit invocation permission flags.
     pub(crate) script: String,
-    /// Project directory containing package.json.
-    #[arg(long, default_value = ".")]
-    pub(crate) project_dir: PathBuf,
+    /// Exact project root; omission discovers ancestors and infers the containing member.
+    #[arg(long)]
+    pub(crate) project_dir: Option<PathBuf>,
     /// Select a workspace member by package name while retaining root policy and containment.
     #[arg(long)]
     pub(crate) workspace: Option<String>,
@@ -54,8 +53,41 @@ fn config_error_category(category: tapid_runner::ConfigErrorCategory) -> &'stati
 }
 
 pub(crate) fn run(args: Args) -> ExitCode {
+    let selected = crate::application::lifecycle::resolve_invocation(
+        args.project_dir.as_deref(),
+        args.workspace.as_deref(),
+    )
+    .map_err(|error| {
+        // Discovery retains the workspace reader's bounds. Preserve root run's
+        // tighter execution-manifest bound and diagnostics even when discovery
+        // cannot parse the candidate (for example oversized invalid JSON).
+        if let Some(tapid_manifest::WorkspaceError::Manifest {
+            member: false,
+            path,
+            ..
+        }) = std::error::Error::source(&error).and_then(|source| source.downcast_ref())
+            && let Err(manifest_error) = super::manifest::read_manifest_typed(path)
+        {
+            return manifest_error;
+        }
+        error
+    })
+    .and_then(|mut selection| {
+        if selection.manifest_path == selection.root_dir.join("package.json") {
+            selection.manifest = super::manifest::read_manifest_typed(&selection.manifest_path)?;
+        }
+        Ok(selection)
+    });
+    let result_root = selected
+        .as_ref()
+        .map(|selection| selection.root_dir.as_path())
+        .unwrap_or_else(|_| {
+            args.project_dir
+                .as_deref()
+                .unwrap_or(std::path::Path::new("."))
+        });
     let mut result_file = match args.result_file.as_deref() {
-        Some(path) => match result::create_file(path, &args.project_dir) {
+        Some(path) => match result::create_file(path, result_root) {
             Ok(file) => Some(file),
             Err(error) => {
                 eprintln!("error: cannot create run result file: {error}");
@@ -65,7 +97,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
         None => None,
     };
     let mut policy_inputs = None;
-    let outcome = execute(&args, &mut policy_inputs);
+    let outcome = execute(&args, &mut policy_inputs, selected);
     if let Some(file) = &mut result_file
         && let Err(error) = result::write(file, &outcome, policy_inputs.as_ref())
     {
@@ -87,61 +119,32 @@ pub(crate) fn run(args: Args) -> ExitCode {
 fn execute(
     args: &Args,
     policy_inputs: &mut Option<serde_json::Value>,
+    selected: Result<
+        crate::application::lifecycle::WorkspaceSelection,
+        crate::application::outcome::OperationalError,
+    >,
 ) -> Result<tapid_runner::ExecutionOutcome, RunFailure> {
-    let project_dir = match fs::canonicalize(&args.project_dir) {
-        Ok(path) if path.is_dir() => path,
-        Ok(path) => {
-            eprintln!(
-                "error: project directory is not a directory: {}",
-                path.display()
-            );
-            return Err(RunFailure::ProjectUnavailable);
+    let selected = selected.map_err(|error| {
+        eprintln!("error: {error}");
+        if args
+            .project_dir
+            .as_deref()
+            .is_some_and(|path| !path.is_dir())
+        {
+            RunFailure::ProjectUnavailable
+        } else if args.workspace.is_some() {
+            RunFailure::WorkspaceInvalid
+        } else {
+            RunFailure::ManifestInvalid
         }
-        Err(error) => {
-            eprintln!(
-                "error: cannot access project directory '{}': {error}",
-                args.project_dir.display()
-            );
-            return Err(RunFailure::ProjectUnavailable);
-        }
-    };
-    let (manifest, working_directory) = if let Some(workspace_name) = args.workspace.as_deref() {
-        let workspace = match tapid_manifest::Workspace::discover(&project_dir) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::WorkspaceInvalid);
-            }
-        };
-        let manifest = match workspace.select(Some(workspace_name)) {
-            Ok(manifest) => manifest.clone(),
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::WorkspaceInvalid);
-            }
-        };
-        let member_manifest = match workspace.select_path(Some(workspace_name)) {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::WorkspaceInvalid);
-            }
-        };
-        let Some(working_directory) = member_manifest.parent() else {
-            eprintln!("error: workspace member manifest has no parent");
-            return Err(RunFailure::WorkspaceInvalid);
-        };
-        (manifest, working_directory.to_owned())
-    } else {
-        let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::ManifestInvalid);
-            }
-        };
-        (manifest, project_dir.clone())
-    };
+    })?;
+    let project_dir = selected.root_dir;
+    let working_directory = selected
+        .manifest_path
+        .parent()
+        .expect("selected manifest parent")
+        .to_owned();
+    let manifest = selected.manifest;
     let Some(script) = manifest.scripts().get(&args.script).cloned() else {
         match args.workspace.as_deref() {
             Some(workspace_name) => eprintln!(
@@ -246,7 +249,7 @@ fn execute(
             &args.arguments,
             host,
         )
-    } else if args.workspace.is_some() {
+    } else if working_directory != project_dir {
         crate::run::prepare_execution_request_with_working_directory(
             &project_dir,
             &working_directory,

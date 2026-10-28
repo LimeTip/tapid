@@ -299,9 +299,52 @@ pub(crate) fn resolve_workspace(
     }
     let project_dir = fs::canonicalize(project_dir).map_err(|error| {
         OperationalError::from_source(ErrorKind::Project, error)
-            .context("cannot open project directory")
+            .context("cannot access project directory")
     })?;
     let workspace = Workspace::discover_typed(&project_dir).map_err(OperationalError::from)?;
+    selection_from_workspace(workspace, selector)
+}
+
+pub(crate) fn resolve_invocation(
+    project_dir: Option<&Path>,
+    selector: Option<&str>,
+) -> Result<WorkspaceSelection, OperationalError> {
+    let result = if let Some(project_dir) = project_dir {
+        resolve_workspace(project_dir, selector)
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|error| OperationalError::from_source(ErrorKind::Project, error))?;
+        Workspace::discover_ancestor(&cwd, selector)
+            .map_err(OperationalError::from)
+            .and_then(|(workspace, selected)| {
+                selection_from_workspace(workspace, selected.as_deref())
+            })
+    };
+    // Keep supplied-root inspection diagnostics unchanged. Invocation commands
+    // historically distinguish malformed roots from malformed declared members.
+    result.map_err(|mut error| {
+        if let Some(workspace_error) = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<tapid_manifest::WorkspaceError>())
+        {
+            error.kind = match workspace_error {
+                tapid_manifest::WorkspaceError::Selection(_)
+                | tapid_manifest::WorkspaceError::Manifest { member: true, .. } => {
+                    ErrorKind::InvalidRequest
+                }
+                tapid_manifest::WorkspaceError::Manifest { member: false, .. } => {
+                    ErrorKind::Manifest
+                }
+                _ => error.kind,
+            };
+        }
+        error
+    })
+}
+
+fn selection_from_workspace(
+    workspace: Workspace,
+    selector: Option<&str>,
+) -> Result<WorkspaceSelection, OperationalError> {
     let manifest = workspace
         .select(selector)
         .map_err(|error| OperationalError::new(ErrorKind::InvalidRequest, error))?
