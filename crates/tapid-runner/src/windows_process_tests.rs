@@ -76,7 +76,64 @@ fn host_authority_probe_timeout_terminates_and_reaps_helper() {
 }
 
 #[test]
+fn host_authority_probe_preserves_output_and_rejects_each_oversized_stream() {
+    let helper = format!(
+        "{}::provider_helper",
+        module_path!().split_once("::").unwrap().1
+    );
+    for marker in [
+        "host-output",
+        "host-stdout-overflow",
+        "host-stderr-overflow",
+    ] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &helper, "--nocapture"])
+            .env("TAPID_TEST_MARKER", marker);
+        let result = bounded_host_output(&mut command, 10_000);
+        if marker == "host-output" {
+            let output = result.unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("host-output:stdout"));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("host-output:stderr"));
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(
+                error.to_string(),
+                "host authority probe output exceeded limit"
+            );
+        }
+    }
+}
+
+#[test]
 fn provider_helper() {
+    // Direct writes bypass libtest capture so the supervisor observes the actual
+    // native stdout/stderr streams, including stderr-only overflow.
+    match std::env::var("TAPID_TEST_MARKER").as_deref() {
+        Ok("host-output") => {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(b"host-output:stdout\n")
+                .unwrap();
+            std::io::stderr()
+                .write_all(b"host-output:stderr\n")
+                .unwrap();
+            return;
+        }
+        Ok(marker @ ("host-stdout-overflow" | "host-stderr-overflow")) => {
+            use std::io::Write;
+            let bytes = [b'x'; 16_385];
+            if marker == "host-stdout-overflow" {
+                std::io::stdout().write_all(&bytes).unwrap();
+            } else {
+                std::io::stderr().write_all(&bytes).unwrap();
+            }
+            return;
+        }
+        _ => {}
+    }
     if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("provider-stalled") {
         std::thread::sleep(std::time::Duration::from_secs(30));
         panic!("stalled helper must be terminated");

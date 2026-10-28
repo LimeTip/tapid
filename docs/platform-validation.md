@@ -300,7 +300,11 @@ for EOF on handles retained by an activated server; each returned stream is
 limited to 16 KiB. This is test supervision of a trusted Rust fixture, not a
 tree-containment guarantee or a live output/disk quota. The nonignored
 `host_authority_probe_timeout_terminates_and_reaps_helper` control exercises the
-stalled-helper path. Native Windows execution of that control remains required.
+stalled-helper path. The nonignored
+`host_authority_probe_preserves_output_and_rejects_each_oversized_stream` control
+pairs successful stdout/stderr capture with separate stdout-only and stderr-only
+overflow helpers, using direct native stream writes rather than libtest capture.
+Native Windows execution of these controls remains required.
 
 ## Private Windows dependency write and key validation
 
