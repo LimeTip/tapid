@@ -22,6 +22,132 @@ pub(super) struct PreparedNativeSource {
     pub(super) tree: PathBuf,
 }
 
+/// Replay source verification without modifying the complete accepted selection.
+/// The fetch boundary must provide the exact pinned archive (including offline cache
+/// lookup); mutable installation receipts are deliberately not accepted here.
+#[allow(dead_code)]
+pub(super) fn prepare_native_replay(
+    selection: &NativeSelection,
+    config: &crate::registry::RegistryConfig,
+    store: &Store,
+    profile: tapid_lockfile::InstallProfile,
+    mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
+) -> Result<PreparedNativeProfile, OperationalError> {
+    let materialized_keys = selection.materialized_keys(profile)?;
+    // Check all identities before archive access or store mutation, even omitted ones.
+    for key in selection.packages().keys() {
+        let key: LockfilePackageKey = key.parse()?;
+        if !locked::locked_platform_matches(&key)? {
+            return Err(OperationalError::new(
+                ErrorKind::Lockfile,
+                "native selection target differs from current platform",
+            ));
+        }
+        if let Some(registry) = key.source.registry()
+            && registry.as_str() != JSR
+            && config.origin_for_name(&key.name)? != *registry
+        {
+            return Err(OperationalError::new(
+                ErrorKind::RegistryConfiguration,
+                "native selection registry route differs",
+            ));
+        }
+    }
+    store.recover_transactions()?;
+    fs::create_dir_all(store.root())
+        .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
+    let mut transaction = store.transaction();
+    let mut fetcher = artifact::ArtifactFetcher {
+        store,
+        config,
+        transports: BTreeMap::new(),
+        allowed_origins: config.configured_origins(),
+    };
+    let mut sources = BTreeMap::new();
+    for key in &materialized_keys {
+        let identity: LockfilePackageKey = key.parse()?;
+        let evidence = &selection.packages()[key].source_evidence;
+        let (url, expected, pinned) = match evidence {
+            NativeSourceEvidence::Pending {
+                artifact_url,
+                artifact_integrity,
+            } => (artifact_url.as_str(), artifact_integrity.as_str(), None),
+            NativeSourceEvidence::Verified { package } => (
+                package
+                    .artifact_url()
+                    .ok_or("native replay requires pinned archive URL")?,
+                package.artifact_integrity(),
+                Some(package.as_ref()),
+            ),
+            NativeSourceEvidence::Workspace { .. } => continue,
+        };
+        let record = PackageRecord {
+            complete_dependency_kinds: true,
+            git_reference: None,
+            copied_archive: Some(std::sync::Arc::new(fetch(&identity, url)?)),
+            dist_tags: BTreeSet::new(),
+            registry: identity
+                .source
+                .package_source()
+                .ok_or("expected artifact source")?,
+            name: identity.name.clone(),
+            version: identity.version.clone(),
+            integrity: Some(
+                expected
+                    .parse()
+                    .map_err(|error: tapid_core::DomainError| error.to_string())?,
+            ),
+            artifact: url.to_owned(),
+            dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
+            optional_peer_dependencies: BTreeSet::new(),
+            optional_dependencies: BTreeMap::new(),
+            platform: PackagePlatform::unrestricted(),
+            fixture: false,
+        };
+        let id = tapid_registry_client::RegistryPackageId {
+            registry: record.registry.clone(),
+            name: record.name.clone(),
+            version: record.version.clone(),
+        };
+        let (integrity, digest, tree) = fetcher.prepare(&id, &record, pinned, &mut transaction)?;
+        validate_native_source_identity(&id, &tree)?;
+        sources.insert(
+            key.clone(),
+            PreparedNativeSource {
+                integrity,
+                digest,
+                tree,
+            },
+        );
+    }
+    Ok(PreparedNativeProfile {
+        selection: selection.clone(),
+        materialized_keys,
+        sources,
+        transaction,
+    })
+}
+
+fn validate_native_source_identity(
+    id: &tapid_registry_client::RegistryPackageId,
+    tree: &Path,
+) -> Result<(), OperationalError> {
+    let root = crate::filesystem::tree::package_content_root(tree)?;
+    let bytes = fs::read_to_string(root.join("package.json"))
+        .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
+    let manifest = PackageManifest::parse(&bytes)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
+    if manifest.name() != &id.name || manifest.version() != id.version {
+        return Err(OperationalError::new(
+            ErrorKind::Integrity,
+            "native archive package identity mismatch",
+        )
+        .for_package(id.into()));
+    }
+    Ok(())
+}
+
 impl graph::ResolvedGraph {
     /// Validate the entire selection, then fetch only its enabled closure. Source
     /// receipts remain separate so omitted selections never need invented trees.
@@ -60,6 +186,7 @@ impl graph::ResolvedGraph {
             let (integrity, digest, tree) = fetcher
                 .prepare(id, record, None, &mut transaction)
                 .map_err(|error| error.for_package(id.into()))?;
+            validate_native_source_identity(id, &tree)?;
             sources.insert(
                 key,
                 PreparedNativeSource {
@@ -370,7 +497,90 @@ mod tests {
             store.verified_tree_snapshot(&receipt.digest),
             Err(tapid_store::IngestError::TreeMissing(_))
         ));
+        let selection = prepared.selection.clone();
+        let lock_bytes = selection.to_json().unwrap();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
         drop(prepared);
+        let mut fetches = 0;
+        let replayed = prepare_native_replay(
+            &selection,
+            &config,
+            &store,
+            tapid_lockfile::InstallProfile::production(),
+            |key, url| {
+                fetches += 1;
+                assert_eq!(key.name.as_str(), "shared");
+                assert_eq!(url, "https://registry.npmjs.org/shared.tgz");
+                Ok(graph.records[&record_key]
+                    .copied_archive
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(fetches, 1);
+        assert_eq!(replayed.sources.len(), 1);
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
+        drop(replayed);
+        let error = prepare_native_replay(
+            &selection,
+            &config,
+            &store,
+            tapid_lockfile::InstallProfile::production(),
+            |_, _| Ok(b"forged receipt cannot authorize this archive".to_vec()),
+        )
+        .err()
+        .expect("replay must reverify the pinned archive");
+        assert!(error.to_string().contains("integrity mismatch"), "{error}");
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
+        let mut wire: serde_json::Value = serde_json::from_str(&lock_bytes).unwrap();
+        let old_key = selection
+            .materialized_keys(tapid_lockfile::InstallProfile::production())
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let new_key = old_key.replace("shared", "impostor");
+        let package = wire["packages"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&old_key)
+            .unwrap();
+        wire["packages"]
+            .as_object_mut()
+            .unwrap()
+            .insert(new_key.clone(), package);
+        for declaration in wire["declarations"].as_array_mut().unwrap() {
+            if declaration["target"] == old_key {
+                declaration["target"] = new_key.clone().into();
+            }
+        }
+        let wrong_identity = NativeSelection::from_json(&wire.to_string()).unwrap();
+        let error = prepare_native_replay(
+            &wrong_identity,
+            &config,
+            &store,
+            tapid_lockfile::InstallProfile::production(),
+            |_, _| {
+                Ok(graph.records[&record_key]
+                    .copied_archive
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .clone())
+            },
+        )
+        .err()
+        .expect("integrity alone cannot authorize a different package identity");
+        assert!(error.to_string().contains("identity mismatch"), "{error}");
         graph.records.get_mut(&record_key).unwrap().copied_archive =
             Some(std::sync::Arc::new(b"tampered".to_vec()));
         let error = graph
@@ -385,7 +595,10 @@ mod tests {
             .expect("retained integrity failure must fail closed");
         assert!(error.to_string().contains("integrity mismatch"), "{error}");
         assert!(!project.path().join("node_modules").exists());
-        assert!(!project.path().join("tapid.lock").exists());
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
     }
 
     #[test]

@@ -162,6 +162,11 @@ impl NativeSelection {
         Ok(selection)
     }
 
+    /// Complete validated records, including selections omitted from installation.
+    pub fn packages(&self) -> &BTreeMap<String, SelectedPackage> {
+        &self.packages
+    }
+
     pub fn to_json(&self) -> Result<String, LockfileError> {
         serde_json::to_string_pretty(self).map_err(LockfileError::Serialization)
     }
