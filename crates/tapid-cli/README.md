@@ -32,6 +32,13 @@ Installation transactions write lifecycle journal version 4 with an explicit
 activation semantics. Older clients reject the new journals; finish interrupted
 transactions with a compatible client before downgrading.
 
+Version-4 recovery also recognizes metadata-only decisions with bounded, sorted
+root/member `package.json` and root `tapid.lock` before/after evidence. Prepared
+decisions preserve prior outputs; committed decisions complete publication only
+when every current output matches its recorded old or new value. Metadata recovery
+never enters store or installed-layout recovery. The lockfile-only command writer
+remains unavailable until pending-receipt hydration is implemented.
+
 ## Commands
 
 ```text

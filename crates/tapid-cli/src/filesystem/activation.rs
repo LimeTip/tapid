@@ -394,7 +394,7 @@ impl ActivationLock {
             .as_ref()
             .map(|decision| decision.owner.as_str())
             .unwrap_or(&previous_owner);
-        if !recovery_owner.is_empty() {
+        if !recovery_owner.is_empty() && !decision.as_ref().is_some_and(|d| d.metadata_only) {
             recover_owned_activation(project, recovery_owner, decision.clone())
                 .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
             recover_owned_stages(project, recovery_owner)
@@ -570,6 +570,9 @@ pub(crate) fn recover_owned_activation(
     decision: Option<crate::filesystem::lifecycle_journal::RecoveryDecision>,
 ) -> Result<(), String> {
     if let Some(decision) = decision {
+        if decision.metadata_only {
+            return Ok(());
+        }
         if decision.committed {
             return commit_owned_activation(project, owner);
         }
@@ -882,6 +885,7 @@ mod activation_tests {
         fs::write(destination.join("new"), b"uncommitted activation").unwrap();
 
         let decision = super::super::lifecycle_journal::RecoveryDecision {
+            metadata_only: false,
             owner: owner.to_owned(),
             committed: false,
             marker_existed: true,
@@ -921,6 +925,7 @@ mod activation_tests {
         fs::write(project.join(".tapid-managed"), MANAGED_MARKER).unwrap();
 
         let decision = super::super::lifecycle_journal::RecoveryDecision {
+            metadata_only: false,
             owner: owner.to_owned(),
             committed: true,
             marker_existed: true,
