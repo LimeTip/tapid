@@ -78,3 +78,17 @@ separate placement contract and rejects these ordinary-lock fields. Schema 11
 replay currently fails explicitly until target/profile-aware replay is integrated;
 normal CLI selection does not yet emit this schema. This persistence API alone
 does not establish complete optional-dependency failure support.
+
+Imported schema 12 provides a separate `ImportedSelection` persistence building
+block. `placementSelection` records target/profile and ordered cuts identified by
+exact declaring npm placement (the empty string denotes the root). Each local
+name and requirement must match that placement's retained optional declaration;
+root, workspace, and nested placements remain distinct. Selected or hoisted
+providers, workspace links, unknown origins, duplicate cuts, and unsafe facts are
+rejected. `set_placement_selection` validates atomically. Shared target validation
+and the existing narrow reason enum are reused from ordinary selection facts.
+This initial contract represents absent placements only; it does not remove npm
+placements, record artifact/hook failures, or enable omission success. Schema 8
+rejects the new ledger, schema 12 requires it, and replay explicitly rejects schema
+12 until target/profile-aware selection is integrated. Normal CLI imports still
+emit schema 8.

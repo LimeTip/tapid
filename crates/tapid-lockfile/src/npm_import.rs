@@ -6,8 +6,10 @@ use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion};
 
 mod json;
 mod parse;
+mod selection;
 mod workspace;
 pub use parse::NpmImportError;
+pub use selection::{ImportedOmission, ImportedSelection};
 
 /// Imported locks retain npm placement and constraints until and after verification.
 /// Schema 8 deliberately cannot be read as a schema 7 verified-tree lock.
@@ -15,6 +17,8 @@ pub use parse::NpmImportError;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportedNpmLockfile {
     lockfile_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement_selection: Option<ImportedSelection>,
     root_manifest_digest: String,
     npm_lock: Value,
     #[serde(skip)]
@@ -86,6 +90,7 @@ impl ImportedNpmLockfile {
             .map_err(|e| parse::error("/rootManifestDigest", "root", "digest", &e.to_string()))?;
         Ok(Self {
             lockfile_version: 8,
+            placement_selection: None,
             root_manifest_digest: digest.to_string(),
             npm_lock,
             graph: std::sync::OnceLock::from(std::sync::Arc::new(graph)),
@@ -98,18 +103,14 @@ impl ImportedNpmLockfile {
     pub fn from_json(input: &str) -> Result<Self, NpmImportError> {
         let lock: Self = serde_json::from_value(parse::json(input)?)
             .map_err(|e| parse::error("/", "root", "JSON", &e.to_string()))?;
-        if lock.lockfile_version != 8 {
-            return Err(parse::error(
-                "/lockfileVersion",
-                "root",
-                "lockfileVersion",
-                "expected imported Tapid schema 8",
-            ));
-        }
+        lock.validate_selection_schema()?;
         lock.root_manifest_digest
             .parse::<ArtifactDigest>()
             .map_err(|e| parse::error("/rootManifestDigest", "root", "digest", &e.to_string()))?;
         let graph = lock.graph()?;
+        if let Some(selection) = &lock.placement_selection {
+            selection.validate(&lock)?;
+        }
         for (path, digest) in &lock.workspace_manifest_digests {
             if !graph.workspaces.contains_key(path) {
                 return Err(parse::error(
@@ -166,13 +167,39 @@ impl ImportedNpmLockfile {
         Ok(lock)
     }
 
+    fn validate_selection_schema(&self) -> Result<(), NpmImportError> {
+        if !matches!(self.lockfile_version, 8 | 12)
+            || (self.lockfile_version == 12) != self.placement_selection.is_some()
+        {
+            return Err(parse::error(
+                "/lockfileVersion",
+                "root",
+                "lockfileVersion",
+                "expected imported schema 8 without selection or schema 12 with placement selection",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Result<String, NpmImportError> {
+        self.validate_selection_schema()?;
+        if let Some(selection) = &self.placement_selection {
+            selection.validate(self)?;
+        }
         serde_json::to_string_pretty(self)
             .map(|s| s + "\n")
             .map_err(|e| parse::error("/", "root", "JSON", &e.to_string()))
     }
 
     pub fn validate_replay(&self, manifest: &str, digest: &str) -> Result<(), NpmImportError> {
+        if self.placement_selection.is_some() {
+            return Err(parse::error(
+                "/placementSelection",
+                "root",
+                "selection",
+                "recorded selection replay is not integrated; regenerate online",
+            ));
+        }
         if self.root_manifest_digest != digest {
             return Err(parse::error(
                 "/rootManifestDigest",

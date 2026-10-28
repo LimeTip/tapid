@@ -60,15 +60,7 @@ pub enum OmissionReason {
 impl LockedSelection {
     pub(crate) fn validate(&self, lock: &Lockfile) -> Result<(), LockfileError> {
         let invalid = || LockfileError::InvalidSelection;
-        let token = |s: &str| {
-            !s.is_empty()
-                && s.len() <= 64
-                && s.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        };
-        if !token(&self.target.os)
-            || !token(&self.target.cpu)
-            || self.target.libc.as_ref().is_some_and(|s| !token(s))
+        if !self.target.is_valid()
             || self.omissions.len() > 100_000
             || self.omissions.windows(2).any(|w| w[0] >= w[1])
         {
@@ -126,5 +118,17 @@ impl LockedSelection {
             }
         }
         Ok(())
+    }
+}
+
+impl SelectionTarget {
+    pub(crate) fn is_valid(&self) -> bool {
+        let token = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
+        token(&self.os) && token(&self.cpu) && self.libc.as_ref().is_none_or(|s| token(s))
     }
 }
