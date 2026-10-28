@@ -172,7 +172,10 @@ fn inspect(
             Lockfile::from_json(text).map_err(OperationalError::from)
         })
         .transpose()?;
-    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
+    let offline = matches!(
+        mode,
+        InstallMode::Offline | InstallMode::CiOffline | InstallMode::Prune
+    );
     let frozen = matches!(
         mode,
         InstallMode::Frozen | InstallMode::Ci | InstallMode::CiOffline

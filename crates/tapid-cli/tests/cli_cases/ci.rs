@@ -61,6 +61,12 @@ fn native_selection_recovery_keeps_profile_and_layout_in_one_generation() {
             String::from_utf8_lossy(&recovered.stderr)
         );
         let after = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+        let profile: serde_json::Value = serde_json::from_slice(&after).unwrap();
+        assert_eq!(
+            fs::read_to_string(project.path().join("node_modules/.tapid-generation")).unwrap(),
+            profile["generation"].as_str().unwrap(),
+            "generation must recover with its profile at {point}"
+        );
         if point == "commit_decision" {
             assert_ne!(before, after);
         } else {

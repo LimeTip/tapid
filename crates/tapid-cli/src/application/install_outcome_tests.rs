@@ -242,6 +242,49 @@ fn native_selection_profiles_switch_without_fetching_omitted_archives_or_rewriti
             .unwrap();
             assert_eq!(state["includeDev"], profile.include_dev);
             assert_eq!(state["includeOptional"], profile.include_optional);
+            if !materialized {
+                let report = run(
+                    InstallRequest {
+                        profile: tapid_lockfile::InstallProfile::default(),
+                        project_dir: project.path(),
+                        target_manifest_path: Path::new("package.json"),
+                        mutation: ManifestMutation::None,
+                        store_root: Some(&project.path().join("store")),
+                        mode: InstallMode::Prune,
+                        registry_fixture: None,
+                        allow_unverified_registry_artifacts: false,
+                    },
+                    |_| {},
+                )
+                .unwrap();
+                assert_eq!(report.package_count, 0);
+                assert_eq!(
+                    fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+                    selection
+                );
+                let path = project.path().join("node_modules/.tapid-profile.json");
+                let mut forged: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                forged["generation"] = "stale".into();
+                let forged = serde_json::to_vec(&forged).unwrap();
+                fs::write(&path, &forged).unwrap();
+                let failure = run(
+                    InstallRequest {
+                        profile: tapid_lockfile::InstallProfile::default(),
+                        project_dir: project.path(),
+                        target_manifest_path: Path::new("package.json"),
+                        mutation: ManifestMutation::None,
+                        store_root: Some(&project.path().join("store")),
+                        mode: InstallMode::Prune,
+                        registry_fixture: None,
+                        allow_unverified_registry_artifacts: false,
+                    },
+                    |_| {},
+                )
+                .unwrap_err();
+                assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+                assert_eq!(fs::read(&path).unwrap(), forged);
+            }
         }
     }
 }

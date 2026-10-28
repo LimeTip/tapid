@@ -70,6 +70,21 @@ pub(crate) fn stage_profile(
 
 /// Validates layout description only, never source-tree or derived-output integrity.
 #[allow(dead_code)]
+pub(crate) fn load_profile(
+    project: &Path,
+    selection: &NativeSelection,
+    target: &str,
+) -> Result<InstallProfile, String> {
+    super::activation::validate_managed_node_modules(project)?;
+    let bytes =
+        super::read::read_bounded_file(&project.join("node_modules/.tapid-generation"), 128)
+            .map_err(|e| format!("cannot read layout generation: {e:?}"))?;
+    let generation = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    validate_profile(project, selection, target, generation)
+}
+
+/// Validates layout description only, never source-tree or derived-output integrity.
+#[allow(dead_code)]
 pub(crate) fn validate_profile(
     project: &Path,
     selection: &NativeSelection,
@@ -110,6 +125,47 @@ pub(crate) fn validate_profile(
 mod tests {
     use super::*;
     use tapid_lockfile::{InstallProfile, NativeSelection};
+
+    #[test]
+    fn active_profile_uses_activation_generation_and_rejects_forgery() {
+        use crate::filesystem::activation::{ActivationLock, activate_node_modules_with_preflight};
+        let project = tapid_test_support::TempProject::new("active-profile").unwrap();
+        let selection = NativeSelection::new(
+            "0".into(),
+            "0".into(),
+            format!("sha256-{}", "a".repeat(64)),
+            Default::default(),
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let lock = ActivationLock::acquire(project.path()).unwrap();
+        let stage = lock.create_stage(project.path()).unwrap();
+        fs::create_dir_all(stage.join("node_modules")).unwrap();
+        stage_profile(
+            &stage,
+            &selection,
+            InstallProfile::production(),
+            "linux-x64",
+            lock.owner_line(),
+        )
+        .unwrap();
+        assert!(load_profile(&stage, &selection, "linux-x64").is_err());
+        activate_node_modules_with_preflight(project.path(), &stage, &lock, false, || Ok(()))
+            .unwrap();
+        assert_eq!(
+            load_profile(project.path(), &selection, "linux-x64").unwrap(),
+            InstallProfile::production()
+        );
+        let path = project.path().join(RECORD);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["generation"] = serde_json::json!("forged");
+        let forged = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &forged).unwrap();
+        assert!(load_profile(project.path(), &selection, "linux-x64").is_err());
+        assert_eq!(fs::read(&path).unwrap(), forged);
+    }
 
     #[test]
     fn staged_profile_binds_selection_target_keys_and_generation() {

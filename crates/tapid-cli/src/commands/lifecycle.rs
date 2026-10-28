@@ -309,7 +309,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             target_manifest_path: &selection.manifest_path,
             mutation: crate::application::install::ManifestMutation::None,
             store_root: args.common.store_dir.as_deref(),
-            mode: crate::application::install::InstallMode::Offline,
+            mode: crate::application::install::InstallMode::Prune,
             registry_fixture: None,
             allow_unverified_registry_artifacts: false,
         },

@@ -89,6 +89,12 @@ receipt validation does not authenticate a derived output or authorize activatio
 Offline CLI status recognizes schema 11 and checks the root and workspace
 manifest snapshots with bounded reads. It explicitly reports registry declaration
 bindings, installed-profile validation and source integrity as checks not performed.
+Prune preserves a schema-11 installation's recorded profile, validating its
+selection, target, exact closure and activation generation before replay. Missing
+or stale profile metadata fails before materialization. The generation record
+travels with the layout during activation and recovery; neither record grants
+source integrity or lifecycle-output authority. Older layouts without a generation
+record require explicit install replay before schema-11 prune.
 The existing `Lockfile` reader continues to reject schema 11. See
 [ADR 0012](../../docs/adr/0012-native-profile-selection-evidence.md) for evidence
 authority, frozen replay and transaction integration requirements.

@@ -163,6 +163,7 @@ pub(crate) enum InstallMode<'a> {
     Refresh,
     Update(super::lifecycle::UpdateRequest<'a>),
     Offline,
+    Prune,
     Frozen,
     Ci,
     CiOffline,
@@ -311,7 +312,10 @@ fn perform_install(
         ManifestMutation::AddPackage(package) => (None, Some(package)),
         ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
     };
-    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
+    let offline = matches!(
+        mode,
+        InstallMode::Offline | InstallMode::CiOffline | InstallMode::Prune
+    );
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
     if overrides.enabled() && (offline || frozen || allow_unverified_registry_artifacts) {
@@ -472,6 +476,16 @@ fn perform_install(
         Some(InstallLock::Native(lock)) => (Some(lock), None),
         Some(InstallLock::Imported(lock)) => (None, Some(lock)),
         Some(InstallLock::Profile(selection)) => {
+            let profile = if matches!(mode, InstallMode::Prune) {
+                crate::filesystem::installed_profile::load_profile(
+                    &project_dir,
+                    &selection,
+                    &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                )
+                .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?
+            } else {
+                profile
+            };
             if package.is_some()
                 || manifest_override.is_some()
                 || matches!(mode, InstallMode::Refresh | InstallMode::Update(_))
