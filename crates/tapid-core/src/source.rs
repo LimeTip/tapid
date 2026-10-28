@@ -19,6 +19,11 @@ impl PackageSource {
     pub fn file(path: &str, digest: ArtifactDigest) -> Result<Self, DomainError> {
         format!("file:{path}#{digest}").parse()
     }
+    /// Identity of an accepted canonical directory snapshot, never a live link.
+    /// The caller resolves the declaration to a normalized project-relative path.
+    pub fn directory(path: &str, digest: ArtifactDigest) -> Result<Self, DomainError> {
+        format!("directory-v1:{path}#{digest}").parse()
+    }
     pub fn git(
         repository: &str,
         commit: &str,
@@ -29,6 +34,11 @@ impl PackageSource {
     pub fn file_parts(&self) -> Option<(&str, &str)> {
         self.identity.strip_prefix("file:")?.rsplit_once('#')
     }
+    pub fn directory_parts(&self) -> Option<(&str, &str)> {
+        self.identity
+            .strip_prefix("directory-v1:")?
+            .rsplit_once('#')
+    }
     pub fn git_parts(&self) -> Option<(&str, &str, &str)> {
         let (repository, pin) = self.identity.strip_prefix("git+")?.rsplit_once('#')?;
         let (commit, digest) = pin.split_once('!')?;
@@ -37,6 +47,7 @@ impl PackageSource {
     pub fn artifact_digest(&self) -> Option<&str> {
         self.file_parts()
             .map(|(_, digest)| digest)
+            .or_else(|| self.directory_parts().map(|(_, digest)| digest))
             .or_else(|| self.git_parts().map(|(_, _, digest)| digest))
     }
 }
@@ -58,7 +69,10 @@ impl FromStr for PackageSource {
     type Err = DomainError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let invalid = || DomainError::InvalidPackageSource;
-        if let Some(rest) = value.strip_prefix("file:") {
+        if let Some(rest) = value
+            .strip_prefix("file:")
+            .or_else(|| value.strip_prefix("directory-v1:"))
+        {
             let (path, digest) = rest.rsplit_once('#').ok_or_else(invalid)?;
             if path.is_empty()
                 || path.starts_with('/')

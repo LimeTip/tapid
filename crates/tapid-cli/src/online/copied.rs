@@ -3,6 +3,46 @@ use super::*;
 use crate::application::outcome::DiagnosticContext;
 use tapid_registry_client::GitDependency;
 
+/// Captures belong to one command, never to the persistent verified cache.
+/// Origin is retained even when two captures contain identical bytes.
+type CapturedArtifacts = BTreeMap<(PathBuf, String), (PackageSource, std::sync::Arc<Vec<u8>>)>;
+
+#[derive(Clone, Default)]
+pub(crate) struct CapturedSources(std::rc::Rc<std::cell::RefCell<CapturedArtifacts>>);
+
+impl CapturedSources {
+    pub(super) fn capture_manifest(
+        &self,
+        project: &Path,
+        manifest: &PackageManifest,
+    ) -> Result<(), String> {
+        for (name, raw) in declarations(manifest) {
+            if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
+                self.artifact(project, &path)
+                    .map_err(|reason| format!("dependency '{name}': {reason}"))?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn clear(&self) {
+        self.0.borrow_mut().clear();
+    }
+    fn artifact(
+        &self,
+        project: &Path,
+        relative: &str,
+    ) -> Result<(PackageSource, std::sync::Arc<Vec<u8>>), String> {
+        let key = (project.to_owned(), relative.to_owned());
+        if let Some(artifact) = self.0.borrow().get(&key) {
+            return Ok(artifact.clone());
+        }
+        let (source, bytes) = local_artifact(project, relative)?;
+        let artifact = (source, std::sync::Arc::new(bytes));
+        self.0.borrow_mut().insert(key, artifact.clone());
+        Ok(artifact)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum CopiedDeclaration {
     File(String),
@@ -16,14 +56,9 @@ pub(crate) fn declaration(raw: &str) -> Result<Option<CopiedDeclaration>, String
             || path.starts_with('/')
             || path.contains(['\\', ':', '|', '#'])
             || path.chars().any(char::is_control)
-            || path
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            || ![".tgz", ".tar.gz", ".tar"]
-                .iter()
-                .any(|extension| path.ends_with(extension))
+            || path.split('/').any(|part| part.is_empty() || part == ".")
         {
-            return Err("file dependency must name a project-relative .tgz, .tar.gz, or .tar regular file; directory links and traversal are unsupported".into());
+            return Err("file dependency must name a contained project-relative directory or tarball; traversal is unsupported".into());
         }
         return Ok(Some(CopiedDeclaration::File(path.into())));
     }
@@ -50,12 +85,80 @@ fn declarations(manifest: &PackageManifest) -> impl Iterator<Item = (&String, &S
         .chain(manifest.optional_dependencies())
 }
 
+/// Interpret a declaration from its manifest, retaining only contained,
+/// project-relative origins before any filesystem access is attempted.
+pub(super) fn normalized_manifest(
+    project: &Path,
+    declaring_directory: &Path,
+    manifest: &PackageManifest,
+) -> Result<PackageManifest, String> {
+    let relative = declaring_directory
+        .strip_prefix(project)
+        .map_err(|_| "declaring manifest is outside the project")?;
+    let mut normalized = manifest.clone();
+    for (kind, map) in [
+        (
+            tapid_manifest::DependencyKind::Dependencies,
+            manifest.dependencies(),
+        ),
+        (
+            tapid_manifest::DependencyKind::DevDependencies,
+            manifest.dev_dependencies(),
+        ),
+        (
+            tapid_manifest::DependencyKind::OptionalDependencies,
+            manifest.optional_dependencies(),
+        ),
+    ] {
+        for (name, raw) in map {
+            let Some(CopiedDeclaration::File(path)) =
+                declaration(raw).map_err(|reason| format!("dependency '{name}': {reason}"))?
+            else {
+                continue;
+            };
+            let mut parts = relative
+                .iter()
+                .map(|part| {
+                    part.to_str()
+                        .ok_or("non-UTF-8 declaring path")
+                        .map(str::to_owned)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for part in path.split('/') {
+                if part == ".." {
+                    parts
+                        .pop()
+                        .ok_or_else(|| format!("copied dependency '{name}' escapes the project"))?;
+                } else {
+                    parts.push(part.to_owned());
+                }
+            }
+            if parts.is_empty() {
+                return Err(format!(
+                    "copied dependency '{name}' cannot contain its declaring manifest"
+                ));
+            }
+            let path = parts.join("/");
+            if declaring_directory.starts_with(project.join(&path)) {
+                return Err(format!(
+                    "copied dependency '{name}' cannot contain its declaring manifest"
+                ));
+            }
+            normalized = normalized
+                .update_dependency_kind(kind, name, &format!("file:{path}"))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(normalized)
+}
+
 pub(super) fn validate_declarations(
     project: &Path,
     manifest: &PackageManifest,
 ) -> Result<(), String> {
+    let manifest = normalized_manifest(project, project, manifest)?;
     let mut identities = BTreeMap::new();
-    for (name, raw) in declarations(manifest) {
+    for (name, raw) in declarations(&manifest) {
         let parsed = declaration(raw).map_err(|reason| format!("dependency '{name}': {reason}"))?;
         let copied = parsed.is_some();
         let mut identity = raw.clone();
@@ -65,8 +168,6 @@ pub(super) fn validate_declarations(
             })?;
             identity = match parsed {
                 CopiedDeclaration::File(path) => {
-                    file_bytes(project, &path)
-                        .map_err(|reason| format!("dependency '{name}': {reason}"))?;
                     format!("file:{path}")
                 }
                 CopiedDeclaration::Git(spec) => {
@@ -86,7 +187,38 @@ pub(super) fn validate_declarations(
     Ok(())
 }
 
+pub(super) fn validate_directory_overlap<'a>(
+    project: &Path,
+    manifests: impl IntoIterator<Item = &'a PackageManifest>,
+) -> Result<(), String> {
+    let mut directories = BTreeSet::<PathBuf>::new();
+    for manifest in manifests {
+        for (_, raw) in declarations(manifest) {
+            if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
+                let path = project.join(path);
+                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                    continue;
+                }
+                let path = fs::canonicalize(path).map_err(|_| "cannot resolve directory source")?;
+                if directories.iter().any(|other| {
+                    other != &path && (other.starts_with(&path) || path.starts_with(other))
+                }) {
+                    return Err("directory dependencies overlap".into());
+                }
+                directories.insert(path);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    if ![".tgz", ".tar.gz", ".tar"]
+        .iter()
+        .any(|extension| relative.ends_with(extension))
+    {
+        return Err("file dependency must name a .tgz, .tar.gz, or .tar regular file".into());
+    }
     let root =
         fs::canonicalize(project).map_err(|_| "cannot resolve project for file dependency")?;
     let mut path = root.clone();
@@ -107,6 +239,115 @@ pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, Stri
         crate::filesystem::atomic::MAX_ARTIFACT_BYTES,
     )
     .map_err(|_| "file dependency must be a regular file no larger than 512 MiB".into())
+}
+
+fn directory_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    if relative.split('/').any(|part| {
+        ["node_modules", ".git", ".tapid"].iter().any(|managed| {
+            if cfg!(windows) {
+                part.eq_ignore_ascii_case(managed)
+            } else {
+                part == *managed
+            }
+        })
+    }) {
+        return Err("directory dependency is inside a managed tree".into());
+    }
+    tapid_archive::capture_directory(
+        project,
+        relative,
+        &["node_modules", ".git", ".tapid"],
+        ArchiveLimits::default(),
+    )
+    .map_err(|error| format!("directory dependency capture failed: {error}"))
+}
+
+/// Check the configured store even when it does not exist yet. This comparison
+/// supplies no filesystem authority; source traversal remains capture's job.
+pub(crate) fn validate_directory_store(
+    project: &Path,
+    manifest: &PackageManifest,
+    manifest_path: &Path,
+    store: &Path,
+) -> Result<(), OperationalError> {
+    let mut resolved = PathBuf::new();
+    let absolute = std::path::absolute(store)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => {
+                resolved.push(other);
+                match fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(OperationalError::from_source(ErrorKind::Store, error));
+                    }
+                }
+            }
+        }
+    }
+    let workspace = Workspace::discover(project)?;
+    let manifests = std::iter::once((workspace.root_path(), workspace.root()))
+        .chain(
+            workspace
+                .members()
+                .iter()
+                .map(|member| (member.path(), member.manifest())),
+        )
+        .map(|(path, current)| {
+            normalized_manifest(
+                project,
+                path.parent().ok_or("manifest has no parent")?,
+                if path == manifest_path {
+                    manifest
+                } else {
+                    current
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    for (_, raw) in manifests.iter().flat_map(declarations) {
+        if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
+            let source = project.join(path);
+            if !fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir()) {
+                continue;
+            }
+            let source = fs::canonicalize(&source)
+                .map_err(|error| OperationalError::from_source(ErrorKind::Project, error))?;
+            if resolved.starts_with(&source) || source.starts_with(&resolved) {
+                return Err(OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "directory dependency overlaps the managed store",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_artifact(project: &Path, relative: &str) -> Result<(PackageSource, Vec<u8>), String> {
+    // Classification grants no authority: capture reopens every component with
+    // no-follow semantics and verifies the held objects before returning bytes.
+    let directory = fs::symlink_metadata(project.join(relative))
+        .map_err(|_| "file dependency is missing or inaccessible")?
+        .is_dir();
+    let bytes = if directory {
+        directory_bytes(project, relative)?
+    } else {
+        file_bytes(project, relative)?
+    };
+    let source = if directory {
+        PackageSource::directory(relative, digest(&bytes))
+    } else {
+        PackageSource::file(relative, digest(&bytes))
+    }
+    .map_err(|error| error.to_string())?;
+    Ok((source, bytes))
 }
 
 fn scratch() -> Result<TemporaryTree, String> {
@@ -137,7 +378,11 @@ pub(super) fn archive_format(source: &PackageSource, bytes: &[u8]) -> ArchiveFor
     }
 }
 
-fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, OperationalError> {
+fn record(
+    source: PackageSource,
+    bytes: impl Into<std::sync::Arc<Vec<u8>>>,
+) -> Result<PackageRecord, OperationalError> {
+    let bytes = bytes.into();
     if source.artifact_digest() != Some(digest(&bytes).as_str()) {
         return Err(
             OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
@@ -215,10 +460,11 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
             libc: platform_list("libc")?,
         },
         fixture: false,
-        copied_archive: Some(std::sync::Arc::new(bytes)),
+        copied_archive: Some(bytes),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_roots(
     project: &Path,
     manifest: &PackageManifest,
@@ -226,7 +472,10 @@ pub(super) fn prepare_roots(
     fixture_records: &BTreeMap<PackageRecordKey, PackageRecord>,
     using_fixture: bool,
     update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
+    member: Option<(&str, &Path)>,
+    captures: &CapturedSources,
 ) -> Result<Vec<(Dependency, PackageRecord)>, OperationalError> {
+    let manifest = normalized_manifest(project, project, manifest)?;
     let current_digest = root_digest(project)?;
     let previous = previous.filter(|lock| {
         lock.root_manifest_digest() == current_digest
@@ -235,7 +484,7 @@ pub(super) fn prepare_roots(
             })
     });
     let mut prepared = BTreeMap::<PackageName, (Dependency, PackageRecord)>::new();
-    for (local, raw) in declarations(manifest) {
+    for (local, raw) in declarations(&manifest) {
         let Some(spec) =
             declaration(raw).map_err(|reason| format!("dependency '{local}': {reason}"))?
         else {
@@ -250,73 +499,105 @@ pub(super) fn prepare_roots(
         let pinned = previous
             .filter(|_| {
                 !update.is_some_and(|request| {
-                    request
-                        .plan
-                        .mutations
-                        .iter()
-                        .any(|mutation| mutation.name == *local)
+                    !(request.offline && matches!(&spec, CopiedDeclaration::Git(_)))
+                        && request.target
+                            == member.map_or_else(
+                                || project.join("package.json"),
+                                |(_, path)| path.to_path_buf(),
+                            )
+                        && request
+                            .plan
+                            .mutations
+                            .iter()
+                            .any(|mutation| mutation.name == *local)
                 })
             })
-            .and_then(|lock| lock.root_bindings().get(local))
+            .and_then(|lock| match member {
+                Some((key, _)) => lock
+                    .workspace_packages()
+                    .get(key)
+                    .and_then(|package| package.dependencies().get(local)),
+                None => lock.root_bindings().get(local),
+            })
             .and_then(|key| key.parse::<LockfilePackageKey>().ok())
             .and_then(|key| key.source.package_source());
         let package = match spec {
             CopiedDeclaration::File(path) => {
-                let bytes = file_bytes(project, &path)?;
-                let source = PackageSource::file(&path, digest(&bytes))
-                    .map_err(|error| error.to_string())?;
+                let (source, bytes) = captures.artifact(project, &path)?;
+                if pinned.as_ref().is_some_and(|pin| pin != &source) {
+                    return Err(OperationalError::new(
+                        ErrorKind::Integrity,
+                        "local dependency digest mismatch; use an explicit update to accept changes",
+                    ));
+                }
                 record(source, bytes)?
             }
             CopiedDeclaration::Git(spec) => {
-                let pinned = pinned.filter(|source| matches_source(raw, source).unwrap_or(false));
-                let fixture_record = fixture_records.values().find(|record| {
-                    record
-                        .registry
-                        .git_parts()
-                        .is_some_and(|(repository, commit, _)| {
-                            repository == spec.repository().as_str()
-                                && pinned.as_ref().map_or_else(
-                                    || {
-                                        if is_commit(spec.reference()) {
-                                            spec.reference().eq_ignore_ascii_case(commit)
-                                        } else {
-                                            record.git_reference.as_deref()
-                                                == Some(spec.reference())
-                                        }
-                                    },
-                                    |pin| pin == &record.registry,
-                                )
-                        })
-                });
-                if let Some(fixture) = fixture_record {
-                    let encoded = fixture
-                        .artifact
-                        .strip_prefix("base64:")
-                        .ok_or("Git fixture artifact must use base64 bytes")?;
-                    let bytes = STANDARD
-                        .decode(encoded)
-                        .map_err(|_| "invalid Git fixture archive encoding")?;
-                    record(fixture.registry.clone(), bytes)?
-                } else {
-                    if using_fixture {
-                        return Err("Git fixture has no matching pinned artifact".into());
-                    }
-                    let reference = pinned
+                if update.is_some_and(|request| request.offline) && !using_fixture {
+                    let lock = previous
+                        .ok_or("offline: Git source requires a previous local selection")?;
+                    let source = pinned
                         .as_ref()
-                        .and_then(PackageSource::git_parts)
-                        .map(|(_, commit, _)| commit)
-                        .unwrap_or(spec.reference());
-                    let pinned_spec =
-                        GitDependency::parse(&format!("git+{}#{reference}", spec.repository()))?;
-                    let staging = scratch()?;
-                    let (commit, bytes) = pinned_spec.fetch(&staging.0)?;
-                    let source =
-                        PackageSource::git(spec.repository().as_str(), &commit, digest(&bytes))
-                            .map_err(|error| error.to_string())?;
-                    if pinned.as_ref().is_some_and(|pin| pin != &source) {
-                        return Err("pinned Git artifact digest mismatch".into());
+                        .filter(|source| matches_source(raw, source).unwrap_or(false))
+                        .ok_or("offline: Git source has no matching local selection")?;
+                    locked::locked_records(lock, fixture_records, false)?
+                        .into_iter()
+                        .find(|record| &record.registry == source)
+                        .ok_or("offline: Git source metadata is unavailable")?
+                } else {
+                    let pinned =
+                        pinned.filter(|source| matches_source(raw, source).unwrap_or(false));
+                    let fixture_record = fixture_records.values().find(|record| {
+                        record
+                            .registry
+                            .git_parts()
+                            .is_some_and(|(repository, commit, _)| {
+                                repository == spec.repository().as_str()
+                                    && pinned.as_ref().map_or_else(
+                                        || {
+                                            if is_commit(spec.reference()) {
+                                                spec.reference().eq_ignore_ascii_case(commit)
+                                            } else {
+                                                record.git_reference.as_deref()
+                                                    == Some(spec.reference())
+                                            }
+                                        },
+                                        |pin| pin == &record.registry,
+                                    )
+                            })
+                    });
+                    if let Some(fixture) = fixture_record {
+                        let encoded = fixture
+                            .artifact
+                            .strip_prefix("base64:")
+                            .ok_or("Git fixture artifact must use base64 bytes")?;
+                        let bytes = STANDARD
+                            .decode(encoded)
+                            .map_err(|_| "invalid Git fixture archive encoding")?;
+                        record(fixture.registry.clone(), bytes)?
+                    } else {
+                        if using_fixture {
+                            return Err("Git fixture has no matching pinned artifact".into());
+                        }
+                        let reference = pinned
+                            .as_ref()
+                            .and_then(PackageSource::git_parts)
+                            .map(|(_, commit, _)| commit)
+                            .unwrap_or(spec.reference());
+                        let pinned_spec = GitDependency::parse(&format!(
+                            "git+{}#{reference}",
+                            spec.repository()
+                        ))?;
+                        let staging = scratch()?;
+                        let (commit, bytes) = pinned_spec.fetch(&staging.0)?;
+                        let source =
+                            PackageSource::git(spec.repository().as_str(), &commit, digest(&bytes))
+                                .map_err(|error| error.to_string())?;
+                        if pinned.as_ref().is_some_and(|pin| pin != &source) {
+                            return Err("pinned Git artifact digest mismatch".into());
+                        }
+                        record(source, bytes)?
                     }
-                    record(source, bytes)?
                 }
             }
         };
@@ -342,6 +623,7 @@ pub(super) fn matches_source(raw: &str, source: &PackageSource) -> Result<bool, 
     Ok(match declaration(raw)? {
         Some(CopiedDeclaration::File(path)) => source
             .file_parts()
+            .or_else(|| source.directory_parts())
             .is_some_and(|(locked, _)| locked == path),
         Some(CopiedDeclaration::Git(spec)) => {
             source.git_parts().is_some_and(|(repository, commit, _)| {
@@ -358,12 +640,20 @@ pub(crate) fn validate_locked_files(
     project: &Path,
     lock: &Lockfile,
 ) -> Result<(), OperationalError> {
+    validate_locked_files_with_captures(project, lock, &CapturedSources::default())
+}
+
+pub(crate) fn validate_locked_files_with_captures(
+    project: &Path,
+    lock: &Lockfile,
+    captures: &CapturedSources,
+) -> Result<(), OperationalError> {
     for (key, _) in lock.packages_typed()? {
         if let Some(source) = key.source.copied()
-            && let Some((path, expected)) = source.file_parts()
+            && let Some((path, expected)) = source.file_parts().or_else(|| source.directory_parts())
         {
-            let bytes = file_bytes(project, path)?;
-            if digest(&bytes).as_str() != expected {
+            let (actual_source, bytes) = captures.artifact(project, path)?;
+            if &actual_source != source || digest(&bytes).as_str() != expected {
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
                     format!("file dependency '{}' digest mismatch", key.name),
@@ -385,9 +675,17 @@ pub(super) fn fetch_pinned(
     project: &Path,
     source: &PackageSource,
     fixture_path: Option<&Path>,
+    captures: &CapturedSources,
 ) -> Result<Vec<u8>, OperationalError> {
-    let bytes = if let Some((path, _)) = source.file_parts() {
-        file_bytes(project, path)?
+    let bytes = if let Some((path, _)) = source.directory_parts().or_else(|| source.file_parts()) {
+        let (actual_source, bytes) = captures.artifact(project, path)?;
+        if &actual_source != source {
+            return Err(OperationalError::new(
+                ErrorKind::Integrity,
+                "copied source identity changed",
+            ));
+        }
+        bytes.as_ref().clone()
     } else if let Some((repository, commit, _)) = source.git_parts() {
         if let Some(path) = fixture_path {
             let fixture = fixture(path)?;

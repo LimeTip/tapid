@@ -3,8 +3,9 @@ mod copied;
 mod graph;
 mod preview;
 pub(crate) use copied::{
-    copied_root_names, declaration as copied_declaration, validate_copied_root_binding,
-    validate_locked_files,
+    CapturedSources, copied_root_names, declaration as copied_declaration,
+    validate_copied_root_binding, validate_directory_store, validate_locked_files,
+    validate_locked_files_with_captures,
 };
 pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview_graph};
 mod locked;
@@ -117,6 +118,111 @@ pub(crate) struct WorkspaceMemberInstall {
     pub links: WorkspaceLinkPlan,
 }
 impl WorkspaceInstallPlan {
+    pub(crate) fn include_copied_member_roots(
+        &mut self,
+        project: &Path,
+        lock: &Lockfile,
+    ) -> Result<(), String> {
+        self.include_owned_members()?;
+        for member in lock.workspace_packages().values() {
+            if member.dependencies().values().any(|target| {
+                target
+                    .parse::<LockfilePackageKey>()
+                    .is_ok_and(|key| key.source.copied().is_some())
+            }) {
+                let key: LockfilePackageKey = member
+                    .key()
+                    .parse()
+                    .map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
+                let path = key
+                    .source
+                    .workspace()
+                    .ok_or("missing workspace source")?
+                    .path();
+                self.members
+                    .entry(project.join(path))
+                    .or_insert_with(|| WorkspaceMemberInstall {
+                        input: NamedLayoutInput {
+                            instances: Vec::new(),
+                            root_dependencies: Vec::new(),
+                            dependency_edges: Vec::new(),
+                        },
+                        links: WorkspaceLinkPlan::default(),
+                    });
+            }
+        }
+        Ok(())
+    }
+    /// Copied declarations are owned by their member rather than hoisted by
+    /// local name. Reuse the imported-layout reachability projection and the
+    /// same coordinated activation plan as all other member layouts.
+    pub(crate) fn include_copied_members(
+        &mut self,
+        project: &Path,
+        lock: &Lockfile,
+        input: &NamedLayoutInput,
+    ) -> Result<(), String> {
+        self.include_owned_members()?;
+        let instances = input
+            .instances
+            .iter()
+            .map(|instance| {
+                (
+                    LockfilePackageKey::from_source(
+                        instance.id.registry.clone(),
+                        instance.id.name.clone(),
+                        instance.id.version.clone(),
+                        &instance.peer_context,
+                        &instance.platform_context,
+                    )
+                    .to_string(),
+                    InstanceKey::from(instance),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for member in lock.workspace_packages().values() {
+            let mut roots = Vec::new();
+            for (name, target) in member.dependencies() {
+                let key: LockfilePackageKey = target
+                    .parse()
+                    .map_err(|error: tapid_lockfile::LockfileError| error.to_string())?;
+                if key.source.copied().is_some() {
+                    roots.push(NamedDependency {
+                        name: name
+                            .parse()
+                            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+                        child: instances
+                            .get(target)
+                            .cloned()
+                            .ok_or("missing copied member instance")?,
+                    });
+                }
+            }
+            if !roots.is_empty() {
+                self.members.insert(
+                    project.join(
+                        member
+                            .key()
+                            .parse::<LockfilePackageKey>()
+                            .map_err(|error| error.to_string())?
+                            .source
+                            .workspace()
+                            .ok_or("missing workspace source")?
+                            .path(),
+                    ),
+                    WorkspaceMemberInstall {
+                        input: npm_import::pinned_layout(
+                            roots,
+                            &input.instances,
+                            &input.dependency_edges,
+                        ),
+                        links: WorkspaceLinkPlan::default(),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
     /// Clear prior member layouts when converting an imported lock to native resolution.
     pub(crate) fn include_owned_members(&mut self) -> Result<(), String> {
         for link in &self.links.links {
@@ -272,12 +378,20 @@ pub(crate) struct WorkspacePeerDependency {
 }
 
 pub(crate) struct WorkspaceMaterialization {
+    pub captures: CapturedSources,
     pub links: WorkspaceLinkPlan,
     pub locked: Vec<LockedWorkspacePackage>,
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
     pub registry_dependencies: Vec<WorkspaceRegistryDependency>,
     pub peer_dependencies: Vec<WorkspacePeerDependency>,
     pub declarations: Vec<crate::application::outcome::RequirementDiagnostic>,
+    pub copied_members: Vec<WorkspaceCopiedMember>,
+}
+
+pub(crate) struct WorkspaceCopiedMember {
+    pub key: String,
+    pub manifest_path: PathBuf,
+    pub manifest: PackageManifest,
 }
 
 pub(crate) fn workspace_materialization(
@@ -307,6 +421,22 @@ pub(crate) fn workspace_materialization_from_discovered(
     replacement: Option<(&Path, &PackageManifest)>,
     workspace: &Workspace,
 ) -> Result<WorkspaceMaterialization, OperationalError> {
+    workspace_materialization_with_captures(
+        project,
+        registry_config,
+        replacement,
+        workspace,
+        &CapturedSources::default(),
+    )
+}
+
+pub(crate) fn workspace_materialization_with_captures(
+    project: &Path,
+    registry_config: &crate::registry::RegistryConfig,
+    replacement: Option<(&Path, &PackageManifest)>,
+    workspace: &Workspace,
+    captures: &CapturedSources,
+) -> Result<WorkspaceMaterialization, OperationalError> {
     let root = workspace
         .root_path()
         .parent()
@@ -323,6 +453,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     let mut registry_dependencies = Vec::new();
     let mut peer_dependencies = Vec::new();
     let mut declarations = Vec::new();
+    let mut copied_members = Vec::new();
     for member in workspace.members() {
         let manifest = replacement
             .filter(|(path, _)| *path == member.path())
@@ -404,6 +535,19 @@ pub(crate) fn workspace_materialization_from_discovered(
         let package_index = *locked_by_name
             .get(member.name())
             .ok_or("workspace member has no lockfile identity")?;
+        let normalized = copied::normalized_manifest(
+            root,
+            member.path().parent().ok_or("member has no parent")?,
+            manifest,
+        )?;
+        copied::validate_declarations(root, &normalized)?;
+        if !copied::copied_root_names(&normalized)?.is_empty() {
+            copied_members.push(WorkspaceCopiedMember {
+                key: locked[package_index].key(),
+                manifest_path: member.path().to_owned(),
+                manifest: normalized,
+            });
+        }
         for (name, range) in manifest.peer_dependencies() {
             let (requirement, provider) = if let Some((source, version)) = members.get(name) {
                 let requirement = workspace_requirement(range, version)?;
@@ -478,9 +622,7 @@ pub(crate) fn workspace_materialization_from_discovered(
                         .map_err(|reason| format!("dependency '{name}': {reason}"))?
                         .is_some()
                     {
-                        return Err(format!(
-                            "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
-                        ).into());
+                        continue;
                     }
                     let requirement = range.parse::<Requirement>().map_err(|error| {
                         format!(
@@ -527,14 +669,23 @@ pub(crate) fn workspace_materialization_from_discovered(
             }
         }
     }
+    let root_manifest = replacement
+        .filter(|(path, _)| *path == workspace.root_path())
+        .map_or(workspace.root(), |(_, manifest)| manifest);
+    copied::validate_directory_overlap(
+        root,
+        std::iter::once(root_manifest).chain(copied_members.iter().map(|member| &member.manifest)),
+    )?;
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
+        captures: captures.clone(),
         links,
         locked,
         members,
         registry_dependencies,
         peer_dependencies,
         declarations,
+        copied_members,
     })
 }
 
@@ -719,16 +870,46 @@ fn artifact_progress_checkpoint(completed: usize, total: usize) -> bool {
 pub(crate) fn validate_manifest_roots(
     project: &Path,
     manifest: &PackageManifest,
+    manifest_path: &Path,
+    captures: &CapturedSources,
 ) -> Result<(), OperationalError> {
     let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
     let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
-    copied::validate_declarations(project, manifest).map_err(invalid)?;
-    let workspace = workspace_materialization(project, &registry_config).map_err(|mut error| {
+    let normalized = copied::normalized_manifest(
+        project,
+        manifest_path.parent().ok_or("manifest has no parent")?,
+        manifest,
+    )
+    .map_err(invalid)?;
+    copied::validate_declarations(project, &normalized).map_err(invalid)?;
+    let discovered = Workspace::discover_typed(project)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
+    let workspace = workspace_materialization_with_captures(
+        project,
+        &registry_config,
+        Some((manifest_path, manifest)),
+        &discovered,
+        captures,
+    )
+    .map_err(|mut error| {
         // Preserve the request-validation category while retaining typed evidence.
         error.kind = ErrorKind::InvalidRequest;
         error
     })?;
-    workspace_root_resolution(manifest, &workspace, &registry_config)
+    let root_manifest = if manifest_path == discovered.root_path() {
+        manifest
+    } else {
+        discovered.root()
+    };
+    captures
+        .capture_manifest(project, &normalized)
+        .map_err(invalid)?;
+    for member in &workspace.copied_members {
+        captures
+            .capture_manifest(project, &member.manifest)
+            .map_err(invalid)?;
+    }
+    workspace_root_resolution(root_manifest, &workspace, &registry_config)
         .map(|_| ())
         .map_err(invalid)
 }
@@ -907,9 +1088,18 @@ pub(crate) fn resolve_and_fetch_with_lock(
     registry_config: &crate::registry::RegistryConfig,
     previous_lock: Option<&Lockfile>,
     update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
+    captures: &CapturedSources,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
-    let workspace = workspace_materialization(project, registry_config)?;
+    let discovered = Workspace::discover_typed(project)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+    let workspace = workspace_materialization_with_captures(
+        project,
+        registry_config,
+        None,
+        &discovered,
+        captures,
+    )?;
     let graph::ResolvedGraph {
         candidate_exclusions,
         metadata_lookups: _,
@@ -940,7 +1130,16 @@ pub(crate) fn resolve_and_fetch_with_lock(
             OperationalError::from_source(ErrorKind::Transaction, error)
                 .context("cannot save updated requirements")
         })?;
-        workspace_locked = workspace_materialization(project, registry_config)?.locked;
+        let discovered = Workspace::discover_typed(project)
+            .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+        workspace_locked = workspace_materialization_with_captures(
+            project,
+            registry_config,
+            None,
+            &discovered,
+            captures,
+        )?
+        .locked;
     }
     store.recover_transactions().map_err(|error| {
         OperationalError::from(error).context("cannot prepare shared store for recovery")
@@ -959,6 +1158,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
     let mut trees = BTreeMap::new();
     let mut instances = Vec::new();
     let mut artifact_fetcher = artifact::ArtifactFetcher {
+        offline: update.is_some_and(|request| request.offline),
         store,
         config: registry_config,
         transports: BTreeMap::new(),
@@ -1292,6 +1492,9 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     for dependency in &workspace_registry_dependencies {
+        if dependency.registry.registry().is_none() {
+            continue;
+        }
         let id = graph::workspace_registry_target(dependency, &resolution, &records)?;
         let instance = instance_keys
             .get(&(
@@ -1313,17 +1516,20 @@ pub(crate) fn resolve_and_fetch_with_lock(
             child: instance.clone(),
         });
     }
+    let input = NamedLayoutInput {
+        instances,
+        root_dependencies: root_deps,
+        dependency_edges: edge_list,
+    };
+    let mut workspace = WorkspaceInstallPlan::from(workspace_links);
+    workspace.include_copied_members(project, &lock, &input)?;
     Ok(PreparedInstall {
         candidate_exclusions,
         lock,
         layout: PreparedLayout {
-            input: NamedLayoutInput {
-                instances,
-                root_dependencies: root_deps,
-                dependency_edges: edge_list,
-            },
+            input,
             trees,
-            workspace: workspace_links.into(),
+            workspace,
         },
         transaction: store_transaction,
     })

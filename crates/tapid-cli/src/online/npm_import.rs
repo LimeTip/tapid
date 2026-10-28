@@ -531,7 +531,7 @@ pub(crate) fn imported_workspace_manifests(
 }
 
 /// Each managed directory contains only the registry graph reachable from its entry points.
-fn pinned_layout(
+pub(super) fn pinned_layout(
     roots: Vec<NamedDependency>,
     instances: &[PackageInstance],
     edges: &[NamedDependencyEdge],

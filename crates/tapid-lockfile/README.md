@@ -59,3 +59,10 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+Schema 11 adds `directory-v1` snapshot identities and workspace-member copied
+bindings. Member bindings reuse each workspace package's named dependency edges,
+preserving separate root and member selections for the same local name. Both
+directory entries and member copied bindings require schema 11; inserting later
+file/Git records retains that schema. Root file/Git-only locks retain schema 10.
+This model support does not enable CLI member copied declarations.

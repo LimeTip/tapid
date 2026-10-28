@@ -227,6 +227,14 @@ Lockfile impact describes selecting the shown direct version. An unchanged direc
 
 `update` preserves declared ranges unless a save policy or `--latest` is explicit. Without these flags, it leaves the original `package.json` bytes unchanged. `--save-exact`, `--save-caret`, and `--save-tilde` save the resolved selected version as `19.1.0`, `^19.1.0`, or `~19.1.0`. The flags conflict with one another and also work without `--latest`, within the current range. `update --latest react` allows versions beyond the current range and defaults to saving a caret requirement. For example, `update --latest --save-exact react` saves an exact version. Each selected declaration retains its section and npm alias target. Workspace references and copied-source declarations retain their source syntax. A name declared in multiple sections is updated in every section where it appears. Other declarations stay unchanged.
 
+`update --offline` resolves from previously locked metadata and verified local
+content without HTTP or Git requests. Selected local file snapshots may change;
+unselected snapshots must still match their pins. Registry dependencies must be
+satisfiable using recorded versions and available verified trees, or explicit
+local fixture metadata and archives. Missing metadata or artifacts fail without
+committing project changes. Git references retain their existing accepted pin;
+refresh references online. Offline updates cannot be combined with `--dry-run`.
+
 `install`, `add`, `remove`, and `update` accept `--dry-run`. They report declaration edits and a resolved dependency graph, including source-qualified package identities, versions, integrity metadata, dependency edges, and the direct roots or parent edges that select each changed package. A version, peer-context, or platform-context change appears as removal of the old identity and addition of the new one. Named update previews preserve unrelated valid pins and report the resolved save requirements, including the default caret policy for `--latest`. Omitting package names refreshes the whole graph.
 
 A dry run never writes project files, creates an activation lock, recovers transactions, reads or writes the package store, downloads package artifacts, or runs lifecycle scripts. Pending recovery stops the preview. Live resolution may request registry metadata; `--registry-fixture` resolves entirely from local fixture metadata. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without checking whether its artifacts are cached. Output states the network permission, package metadata lookup count, and cache/artifact effects explicitly. A resolved graph does not attest artifact availability, archive validity, generated lifecycle outputs, or the success of a later install. Copied file/Git sources and imported npm locks currently require an ordinary install rather than a resolved preview.
@@ -421,7 +429,7 @@ Install derives executable shims from verified package `bin` metadata. Unix uses
 - Dependency lifecycle scripts are denied by default. Exact checked-in approvals can build private derived trees using Linux ManagedTree; see [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).
 - Root scripts run only after the explicit `tapid run` command.
 - Root-script execution is wired to fail-closed preflight. macOS 26 has an experimental Restricted backend using deprecated/private native Seatbelt APIs; Linux Restricted uses Landlock/seccomp and has targeted Ubuntu 24.04.5 x86_64 local-VM and hosted CI validation. Linux ManagedTree requires explicit cgroup delegation and private namespaces. macOS ManagedTree, Windows native containment, and the broader platform probe matrix remain unsupported or pending.
-- Full npm CLI/package-specifier compatibility is not implemented. Copied project-root file tarballs and HTTPS Git pins are supported; directory links, SSH Git, preparation hooks, nested/ancestor peer lookup, automatic peer placement, and complete optional-dependency semantics remain unsupported. Tapid supports the documented bounded npm-style workspace subset; see the [compatibility matrix](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#compatibility-matrix). Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
+- Full npm CLI/package-specifier compatibility is not implemented. Copied root/member file tarballs, contained directory snapshots and HTTPS Git pins are supported; directory links, SSH Git, preparation hooks, nested/ancestor peer lookup, automatic peer placement, and complete optional-dependency semantics remain unsupported. Tapid supports the documented bounded npm-style workspace subset; see the [compatibility matrix](https://github.com/LimeTip/tapid/blob/main/docs/compatibility.md#compatibility-matrix). Range satisfaction is differential-tested against pinned node-semver 7.8.5 for the documented grammar in `crates/tapid-resolver/README.md`.
 - `add`, `remove`, `update`, `outdated`, and `prune` are implemented (see [Commands](#commands)); dependency script approval is available through exact checked-in lifecycle policies, while package publishing is outside this slice. Private-registry authentication is available as a development feature, not a production-support claim.
 - JSR installation remains fail-closed unless metadata provides both an HTTPS npm tarball URL and a valid SHA-512 SRI value. Live JSR integrity behavior is unsupported and unverified.
 - CI runs workspace and nested integration tests on Ubuntu, macOS, and Windows. Dedicated consumer validation runs on Ubuntu and Windows. The published v0.0.8 installers were also exercised through public installation and binary-execution smoke tests on all three operating systems. A local run on one platform does not prove behavior on another.
@@ -432,11 +440,16 @@ For retained bindings, `executable_resolution.reserved_node.cleanup_observed` is
 
 Npm dist-tags such as `latest` and `next` resolve to exact versions online, including tagged prereleases. Matching installs and frozen/offline replay retain the locked version after a tag moves; `update` refreshes the tag target. See [dist-tag behavior](../../docs/compatibility.md#registry-dist-tags).
 
-Project-root `file:vendor/tool.tgz` dependencies copy contained regular tarballs;
+Root/member `file:vendor/tool.tgz` dependencies copy contained regular tarballs;
 `git+https://example.test/tool.git#main` dependencies pin a peeled commit and
-archive digest. Copied sources use schema 10 and the existing verified-tree and
+archive digest. `file:vendor/tool` captures a contained directory snapshot.
+Paths resolve from the declaring manifest within the explicit project root.
+Directory and member copies use schema 11 and the existing verified-tree and
 bin materialization paths. Matching and frozen installs retain the accepted pin,
-`update` refreshes Git references, and replay rejects changed file bytes.
+`update` refreshes Git references or selected directory content, and replay rejects
+changed local content even with a warm store. Member updates use
+`update local --workspace NAME`. Offline updates require locally available graph
+metadata and verified artifacts. No implicit prepare/build/install hooks execute.
 See [supported forms and limits](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
 
 Npm aliases are supported in manifest dependencies and package arguments such as `tapid add 'h3-v2@npm:h3@2.0.1-rc.20'`. Scoped targets and supported semver ranges retain their actual registry identity and local import names during install and frozen/offline replay. See [alias behavior and limits](../../docs/compatibility.md#npm-aliases).

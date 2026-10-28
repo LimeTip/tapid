@@ -135,8 +135,8 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         ],
         capabilities: json!({
             "experimental": true,
-            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
-            "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
+            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION, tapid_lockfile::DIRECTORY_SOURCE_LOCKFILE_VERSION],
+            "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "file_directory_snapshot", "git+https"],
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
             "registry_routing": "experimental"
@@ -478,13 +478,12 @@ fn inspect_manifest(
                 path.display(),
                 name.replace('~', "~0").replace('/', "~1")
             );
-            let member_copied = path != workspace.root_path()
-                && crate::online::copied_declaration(raw)
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let valid = if member_copied {
-                false
+            let copied = crate::online::copied_declaration(raw)
+                .ok()
+                .flatten()
+                .is_some();
+            let valid = if copied {
+                kind != tapid_manifest::DependencyKind::PeerDependencies
             } else if let Some(member) = workspace.members().iter().find(|m| m.name() == name) {
                 crate::online::workspace_requirement(raw, &member.manifest().version())
                     .is_ok_and(|r| r.matches(&member.manifest().version()))

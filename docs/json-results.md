@@ -55,6 +55,17 @@ Successful `update` results include `data.graph_changes`, an array of changed pa
 
 `why` data contains `package`, deterministic `paths`, `truncated`, `not_found`, and `graph_warnings`. Each path contains `steps` with package identity, incoming dependency name and kind, and source kind (`registry`, `workspace`, or `copied`). A confirmed missing match is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. If traversal reaches a safety bound before finding a path, the envelope outcome is `partial`, `data.truncated` is true, `data.not_found` is false, and the command exits 0. Operational errors use the standard `failure` envelope and typed `errors` entry.
 
+Directory snapshots retain source kind `copied` and the full
+`directory-v1:<project-relative-path>#<artifact-sha256>` identity in package keys
+and source fields. Human `why` output retains the same identity. Root/member
+aliases can bind one snapshot without conflating it with a registry package.
+Status capabilities include lock schema 11 and `file_directory_snapshot`;
+status still does not capture or verify source bytes. Replay comparisons and
+unsupported graph failures use the existing error and transaction-state fields.
+An unchanged or recovered result does not establish lifecycle execution or
+application readiness. These are additive schema-version-1 capabilities, with
+no new source-kind or transaction-state enum values.
+
 ## Package cache results
 
 `cache`, `cache info`, `cache clean`, and `clean` use the version 1 envelope. The operation is `cache` for its subcommands and `clean` for the shortcut. `project` is null and `changes.files` and `changes.paths` are empty because maintenance does not change project outputs. `data.scope` is `published_package_data`; `data.store` is bounded display text and `data.store_path` uses the existing lossless native-path encoding. `data.action` is `info`, `preview`, or `clean`. The `data.summary` object contains `artifacts` and `trees`, each with `entries` and logical file `bytes`, plus `preserved_entries` for unrecognized entries inside those namespaces. Staging and upgrade-recovery caches are excluded. The version 1 `bytes` field names are unchanged: they count file content lengths, not allocated disk space or predicted reclaimed disk space. Human output labels the same values as logical bytes.
