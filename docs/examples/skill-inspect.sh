@@ -1,0 +1,2 @@
+tapid --version
+tapid --help

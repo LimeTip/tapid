@@ -171,6 +171,7 @@ jobs:
             node --experimental-strip-types tools/release/release.ts checksums release "$VERSION"
             node --experimental-strip-types tools/release/release.ts metadata release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
             node --experimental-strip-types tools/release/bootstrap.ts release "$VERSION" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" "$SOURCE_SHA"
+            node --experimental-strip-types tools/release/skill.ts build-release release "$TAG" "$SOURCE_SHA"
           fi
           node --experimental-strip-types tools/release/candidate.ts unsigned release candidate/notes.md candidate/intent.json "$TAG" "$SOURCE_SHA" "$TAG_OBJECT" > candidate/unsigned-result.json
           jq .candidate candidate/unsigned-result.json > candidate/unsigned.json

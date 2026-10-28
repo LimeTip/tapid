@@ -240,7 +240,7 @@ async function executeExample(
     .split("\n")
     .filter((line) => line.trim() && !line.startsWith("#"));
   const allowed =
-    /^(?:mkdir [a-z][a-z0-9-]*|cd [a-z][a-z0-9-]*|tapid (?:init(?: [a-z][a-z0-9-]*)?|(?:i|install)(?: is-char)?(?: --offline)?(?: --frozen)?|--version|upgrade(?: --dry-run| --help)?))$/;
+    /^(?:mkdir [a-z][a-z0-9-]*|cd [a-z][a-z0-9-]*|tapid (?:init(?: [a-z][a-z0-9-]*)?|(?:i|install)(?: is-char)?(?: --offline)?(?: --frozen)?|--version|--help|upgrade(?: --dry-run| --help)?))$/;
   if (
     !commands.length ||
     commands.length > 16 ||

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "supported_cli_versions": ["0.0.13"],
+  "json_schema_version": 1,
+  "evidence_scope": "source fixtures; not published-binary or runtime-discovery certification",
+  "required_checks": [
+    "node --experimental-strip-types scripts/dev.ts test -p tapid --test agent_workflows --locked -- --show-output",
+    "node --experimental-strip-types scripts/check-doc-examples.ts --lane source --example skill-inspect --report skill-source.json"
+  ]
+}

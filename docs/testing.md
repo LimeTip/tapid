@@ -262,3 +262,16 @@ durable completion records are therefore deferred pending evidence of a required
 workflow needing that attribution, rather than adding cross-agent coordination
 for isolated worktrees. Native locking behavior remains subject to the existing
 Linux, macOS, and Windows CI matrix.
+
+## Portable consumer skill
+
+Run `node --experimental-strip-types --test tools/release/skill_test.ts` for
+format, extracted portability (system unzip on Unix, native tar on Windows),
+deterministic packaging, pinned-source regeneration,
+compatibility review, and candidate tampering checks. The existing `agent_workflows`
+target supplies isolated CLI behavior and metrics; `skill-inspect` in the source
+documentation lane checks the literal read-only probes and retains executable
+identity. Contributor mirror checks remain separate from this consumer skill.
+The [paired evaluation protocol](agent-skill-evaluation.md) defines guide-only and
+skill-assisted trials. Actual-agent discovery and task completion remain unmeasured
+until those trials run; deterministic checks do not establish adoption improvement.
