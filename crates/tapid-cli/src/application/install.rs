@@ -375,29 +375,19 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
-    online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
-    online::validate_directory_store(&project_dir, &preflight_manifest, store.root())?;
+    online::validate_manifest_roots(&project_dir, &preflight_manifest, &project_dir.join("package.json"))?;
+    online::validate_directory_store(&project_dir, &preflight_manifest, &project_dir.join("package.json"), store.root())?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated.updated)?;
-        online::validate_directory_store(&project_dir, updated.updated, store.root())?;
+        online::validate_manifest_roots(&project_dir, updated.updated, &manifest_path)?;
+        online::validate_directory_store(&project_dir, updated.updated, &manifest_path, store.root())?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
-        if manifest_path != project_dir.join("package.json")
-            && online::copied_declaration(requirement)?.is_some()
-        {
-            return Err(OperationalError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
-                ),
-            ));
-        }
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate)?;
-        online::validate_directory_store(&project_dir, &candidate, store.root())?;
+        online::validate_manifest_roots(&project_dir, &candidate, &manifest_path)?;
+        online::validate_directory_store(&project_dir, &candidate, &manifest_path, store.root())?;
     }
     let lock_path = project_dir.join("tapid.lock");
     // Preserve preflight rejection without activating anything. Pending recovery
@@ -510,7 +500,7 @@ fn perform_install(
     } else {
         read_manifest(&root_manifest_path)?
     };
-    online::validate_directory_store(&project_dir, &root_manifest, store.root())?;
+    online::validate_directory_store(&project_dir, &root_manifest, &project_dir.join("package.json"), store.root())?;
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {
@@ -816,7 +806,7 @@ fn perform_install(
     }
     let mut workspace_plan = online::WorkspaceInstallPlan::from(workspace.links);
     workspace_plan
-        .include_owned_members()
+        .include_copied_member_roots(&project_dir, &lock)
         .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
     let journal = session.journal.as_mut().expect("replay journal created");
     journal
@@ -877,6 +867,7 @@ fn perform_install(
             .publish_for_lifecycle(&journal.coordinator_path())
             .map_err(OperationalError::from)?;
         crate::filesystem::activation::test_crash_at("store_published");
+        workspace_plan.include_copied_members(&project_dir, &lock, &input)?;
         let mut layout = online::PreparedLayout {
             input,
             trees,
@@ -944,6 +935,7 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
+    workspace_plan.include_copied_members(&project_dir, &lock, &input)?;
     super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,

@@ -18,7 +18,7 @@ pub(crate) fn declaration(raw: &str) -> Result<Option<CopiedDeclaration>, String
             || path.chars().any(char::is_control)
             || path
                 .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
+                .any(|part| part.is_empty() || part == ".")
         {
             return Err("file dependency must name a contained project-relative directory or tarball; traversal is unsupported".into());
         }
@@ -47,13 +47,51 @@ fn declarations(manifest: &PackageManifest) -> impl Iterator<Item = (&String, &S
         .chain(manifest.optional_dependencies())
 }
 
+/// Interpret a declaration from its manifest, retaining only contained,
+/// project-relative origins before any filesystem access is attempted.
+pub(super) fn normalized_manifest(
+    project: &Path,
+    declaring_directory: &Path,
+    manifest: &PackageManifest,
+) -> Result<PackageManifest, String> {
+    let relative = declaring_directory.strip_prefix(project)
+        .map_err(|_| "declaring manifest is outside the project")?;
+    let mut normalized = manifest.clone();
+    for (kind, map) in [
+        (tapid_manifest::DependencyKind::Dependencies, manifest.dependencies()),
+        (tapid_manifest::DependencyKind::DevDependencies, manifest.dev_dependencies()),
+        (tapid_manifest::DependencyKind::OptionalDependencies, manifest.optional_dependencies()),
+    ] {
+        for (name, raw) in map {
+            let Some(CopiedDeclaration::File(path)) = declaration(raw)? else { continue };
+            let mut parts = relative.iter().map(|part| part.to_str().ok_or("non-UTF-8 declaring path").map(str::to_owned)).collect::<Result<Vec<_>, _>>()?;
+            for part in path.split('/') {
+                if part == ".." {
+                    parts.pop().ok_or("file dependency escapes the project")?;
+                } else {
+                    parts.push(part.to_owned());
+                }
+            }
+            if parts.is_empty() {
+                return Err("file dependency cannot contain its declaring manifest".into());
+            }
+            let path = parts.join("/");
+            if declaring_directory.starts_with(project.join(&path)) {
+                return Err("file dependency cannot contain its declaring manifest".into());
+            }
+            normalized = normalized.update_dependency_kind(kind, name, &format!("file:{path}")).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(normalized)
+}
+
 pub(super) fn validate_declarations(
     project: &Path,
     manifest: &PackageManifest,
 ) -> Result<(), String> {
+    let manifest = normalized_manifest(project, project, manifest)?;
     let mut identities = BTreeMap::new();
-    let mut directories = BTreeMap::<PathBuf, String>::new();
-    for (name, raw) in declarations(manifest) {
+    for (name, raw) in declarations(&manifest) {
         let parsed = declaration(raw).map_err(|reason| format!("dependency '{name}': {reason}"))?;
         let copied = parsed.is_some();
         let mut identity = raw.clone();
@@ -63,24 +101,8 @@ pub(super) fn validate_declarations(
             })?;
             identity = match parsed {
                 CopiedDeclaration::File(path) => {
-                    let (source, _) = local_artifact(project, &path)
+                    let _ = local_artifact(project, &path)
                         .map_err(|reason| format!("dependency '{name}': {reason}"))?;
-                    if source.directory_parts().is_some() {
-                        let resolved = fs::canonicalize(project.join(&path)).map_err(
-                            |_| "cannot resolve directory dependency for overlap validation",
-                        )?;
-                        for (other_root, other) in &directories {
-                            if other_root != &resolved
-                                && (other_root.starts_with(&resolved)
-                                    || resolved.starts_with(other_root))
-                            {
-                                return Err(format!(
-                                    "directory dependencies '{other}' and '{path}' overlap"
-                                ));
-                            }
-                        }
-                        directories.insert(resolved, path.clone());
-                    }
                     format!("file:{path}")
                 }
                 CopiedDeclaration::Git(spec) => {
@@ -95,6 +117,27 @@ pub(super) fn validate_declarations(
             return Err(format!(
                 "conflicting copied dependency declarations for '{name}'"
             ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_directory_overlap<'a>(
+    project: &Path,
+    manifests: impl IntoIterator<Item = &'a PackageManifest>,
+) -> Result<(), String> {
+    let mut directories = BTreeSet::<PathBuf>::new();
+    for manifest in manifests {
+        for (_, raw) in declarations(manifest) {
+            if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
+                let path = project.join(path);
+                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) { continue; }
+                let path = fs::canonicalize(path).map_err(|_| "cannot resolve directory source")?;
+                if directories.iter().any(|other| other != &path && (other.starts_with(&path) || path.starts_with(other))) {
+                    return Err("directory dependencies overlap".into());
+                }
+                directories.insert(path);
+            }
         }
     }
     Ok(())
@@ -144,6 +187,7 @@ fn directory_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
 pub(crate) fn validate_directory_store(
     project: &Path,
     manifest: &PackageManifest,
+    manifest_path: &Path,
     store: &Path,
 ) -> Result<(), OperationalError> {
     let mut resolved = PathBuf::new();
@@ -167,7 +211,13 @@ pub(crate) fn validate_directory_store(
             }
         }
     }
-    for (_, raw) in declarations(manifest) {
+    let workspace = Workspace::discover(project)?;
+    let manifests = std::iter::once((workspace.root_path(), workspace.root()))
+        .chain(workspace.members().iter().map(|member| (member.path(), member.manifest())))
+        .map(|(path, current)| {
+            normalized_manifest(project, path.parent().ok_or("manifest has no parent")?, if path == manifest_path { manifest } else { current })
+        }).collect::<Result<Vec<_>, String>>()?;
+    for (_, raw) in manifests.iter().flat_map(declarations) {
         if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
             let source = project.join(path);
             if !fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir()) {
@@ -323,7 +373,9 @@ pub(super) fn prepare_roots(
     fixture_records: &BTreeMap<PackageRecordKey, PackageRecord>,
     using_fixture: bool,
     update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
+    member: Option<(&str, &Path)>,
 ) -> Result<Vec<(Dependency, PackageRecord)>, OperationalError> {
+    let manifest = normalized_manifest(project, project, manifest)?;
     let current_digest = root_digest(project)?;
     let previous = previous.filter(|lock| {
         lock.root_manifest_digest() == current_digest
@@ -332,7 +384,7 @@ pub(super) fn prepare_roots(
             })
     });
     let mut prepared = BTreeMap::<PackageName, (Dependency, PackageRecord)>::new();
-    for (local, raw) in declarations(manifest) {
+    for (local, raw) in declarations(&manifest) {
         let Some(spec) =
             declaration(raw).map_err(|reason| format!("dependency '{local}': {reason}"))?
         else {
@@ -347,14 +399,17 @@ pub(super) fn prepare_roots(
         let pinned = previous
             .filter(|_| {
                 !update.is_some_and(|request| {
-                    request
+                    request.target == member.map_or_else(|| project.join("package.json"), |(_, path)| path.to_path_buf()) && request
                         .plan
                         .mutations
                         .iter()
                         .any(|mutation| mutation.name == *local)
                 })
             })
-            .and_then(|lock| lock.root_bindings().get(local))
+            .and_then(|lock| match member {
+                Some((key, _)) => lock.workspace_packages().get(key).and_then(|package| package.dependencies().get(local)),
+                None => lock.root_bindings().get(local),
+            })
             .and_then(|key| key.parse::<LockfilePackageKey>().ok())
             .and_then(|key| key.source.package_source());
         let package = match spec {

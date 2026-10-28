@@ -31,7 +31,7 @@ pub(super) fn resolve_package_graph(
         mut roots,
         direct_root_identities: mut root_registry_identities,
         workspace_root_keys,
-        registry_dependencies: workspace_registry_dependencies,
+        registry_dependencies: mut workspace_registry_dependencies,
         overrides,
     } = workspace_root_resolution(manifest, &workspace, registry_config)?;
     let direct_local_names = manifest
@@ -48,6 +48,7 @@ pub(super) fn resolve_package_graph(
         registry_dependencies: _,
         peer_dependencies: workspace_peer_dependencies,
         declarations,
+        copied_members,
     } = workspace;
     let declarations = crate::application::outcome::DiagnosticContext::manifest_requirements(
         manifest,
@@ -118,17 +119,37 @@ pub(super) fn resolve_package_graph(
             );
         }
     }
-    let copied_roots = copied::prepare_roots(
+    let mut copied_roots = copied::prepare_roots(
         project,
         manifest,
         previous_lock,
         &fixture_records,
         fixture.is_some(),
         update,
+        None,
     )?;
+    let root_copied_count = copied_roots.len();
+    for member in &copied_members {
+        let prepared = copied::prepare_roots(
+            project, &member.manifest, previous_lock, &fixture_records,
+            fixture.is_some(), update, Some((&member.key, &member.manifest_path)),
+        )?;
+        for (dependency, record) in prepared {
+            workspace_registry_dependencies.push(WorkspaceRegistryDependency {
+                member_key: member.key.clone(),
+                manifest_name: dependency.name.to_string(),
+                registry: dependency.registry.clone(),
+                package: record.name.clone(),
+                requirement: dependency.requirement.clone(),
+            });
+            copied_roots.push((dependency, record));
+        }
+    }
     let mut copied_records = BTreeMap::new();
-    for (dependency, record) in copied_roots {
-        root_registry_identities.insert((dependency.registry.clone(), record.name.clone()));
+    for (index, (dependency, record)) in copied_roots.into_iter().enumerate() {
+        if index < root_copied_count {
+            root_registry_identities.insert((dependency.registry.clone(), record.name.clone()));
+        }
         roots.push(dependency);
         copied_records.insert(
             (
@@ -140,7 +161,7 @@ pub(super) fn resolve_package_graph(
         );
     }
     let mut local_identities = BTreeMap::new();
-    for root in &roots {
+    for root in roots.iter().filter(|root| root_registry_identities.iter().any(|(source, _)| source == &root.registry) || root.registry.registry().is_some()) {
         register_local_root_identity(
             &mut local_identities,
             root.name.clone(),

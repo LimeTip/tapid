@@ -169,8 +169,9 @@ pub(crate) fn resolve(
             .dependencies
             .insert(edge.dependency.to_string(), keys[&edge.child].clone());
     }
-    for ((_, name), id) in &resolved.resolution.root_bindings {
-        if resolved.direct_local_names.contains(name) {
+    for ((source, name), id) in &resolved.resolution.root_bindings {
+        if resolved.direct_local_names.contains(name)
+            && resolved.root_registry_identities.contains(&(source.clone(), id.name.clone())) {
             snapshot.roots.insert(name.to_string(), keys[id].clone());
         }
     }

@@ -8342,6 +8342,139 @@ fn copied_dependency_rejections_preserve_project_and_store_and_redact_credential
 }
 
 #[test]
+fn copied_directory_members_keep_declaration_relative_sources_distinct() {
+    let project = tapid_test_support::TempProject::new("directory-member-origins").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#).unwrap();
+    for (member, value) in [("first", 41), ("second", 42)] {
+        project.write(format!("members/{member}/package.json"), format!(r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"local":"file:../../vendor/{member}"}}}}"#).as_bytes()).unwrap();
+        project.write(format!("members/{member}/index.js"), b"module.exports = require('local');").unwrap();
+        project.write(format!("vendor/{member}/package.json"), br#"{"name":"tool","version":"1.0.0","main":"index.js","bin":{"local-bin":"bin.js"},"scripts":{"prepare":"exit 99","install":"exit 99"}}"#).unwrap();
+        project.write(format!("vendor/{member}/index.js"), format!("module.exports = {value};").as_bytes()).unwrap();
+        project.write(format!("vendor/{member}/bin.js"), format!("#!/usr/bin/env node\nconsole.log({value});\n").as_bytes()).unwrap();
+    }
+    let dir = project.path();
+    let store = dir.join("store");
+    let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let lock = fs::read(dir.join("tapid.lock")).unwrap();
+    for member in ["first", "second"] {
+        assert!(String::from_utf8_lossy(&lock).contains(&format!("directory-v1:vendor/{member}#")));
+    }
+    let node = node_assertion_output(Command::new("node").args(["-e", "if(require('first') !== 41 || require('second') !== 42) process.exit(1);"]).current_dir(dir), true, "directory-member-origins").unwrap();
+    assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+    let replay = run(dir, &["install", "--offline", "--frozen", "--store-dir", store.to_str().unwrap()]);
+    assert!(replay.status.success(), "{}", String::from_utf8_lossy(&replay.stderr));
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    for member in ["first", "second"] {
+        let node = node_assertion_output(Command::new("node").args(["-e", "const cp = require('child_process'); const out = cp.execSync(process.platform === 'win32' ? 'node_modules\\\\.bin\\\\local-bin.cmd' : './node_modules/.bin/local-bin').toString().trim(); if(out !== (process.cwd().endsWith('first') ? '41' : '42')) process.exit(1);"]).current_dir(dir.join("members").join(member)), true, "directory-member-bin").unwrap();
+        assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+        fs::remove_dir_all(dir.join("members").join(member).join("node_modules")).unwrap();
+    }
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+    fs::remove_dir_all(&store).unwrap();
+    let cold = run(dir, &["install", "--frozen", "--store-dir", store.to_str().unwrap()]);
+    assert!(cold.status.success(), "{}", String::from_utf8_lossy(&cold.stderr));
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    let node = node_assertion_output(Command::new("node").args(["-e", "if(require('first') !== 41 || require('second') !== 42) process.exit(1);"]).current_dir(dir), true, "directory-member-cold").unwrap();
+    assert!(node.status.success(), "{}", String::from_utf8_lossy(&node.stderr));
+}
+
+#[test]
+fn copied_directory_member_update_is_scoped_to_declaring_manifest() {
+    let project = tapid_test_support::TempProject::new("directory-member-update").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["members/*"],"dependencies":{"local":"file:vendor/root"}}"#).unwrap();
+    for member in ["first", "second"] {
+        project.write(format!("members/{member}/package.json"), format!(r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"local":"file:../../vendor/{member}"}}}}"#).as_bytes()).unwrap();
+    }
+    for origin in ["root", "first", "second"] {
+        project.write(format!("vendor/{origin}/package.json"), br#"{"name":"tool","version":"1.0.0","main":"index.js"}"#).unwrap();
+        project.write(format!("vendor/{origin}/index.js"), b"module.exports = 1;").unwrap();
+    }
+    let dir = project.path();
+    let store = dir.join("store");
+    let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let before = fs::read(dir.join("tapid.lock")).unwrap();
+    let before_lock = Lockfile::from_json(std::str::from_utf8(&before).unwrap()).unwrap();
+    project.write("vendor/first/index.js", b"module.exports = 2;").unwrap();
+    let update = run(dir, &["update", "local", "--workspace", "first", "--store-dir", store.to_str().unwrap()]);
+    assert!(update.status.success(), "{}", String::from_utf8_lossy(&update.stderr));
+    let after = fs::read(dir.join("tapid.lock")).unwrap();
+    let after_lock = Lockfile::from_json(std::str::from_utf8(&after).unwrap()).unwrap();
+    assert_eq!(before_lock.root_bindings(), after_lock.root_bindings());
+    for (key, member) in before_lock.workspace_packages() {
+        if key.contains("members/second") {
+            assert_eq!(member.dependencies(), after_lock.workspace_packages()[key].dependencies());
+        }
+    }
+    assert_eq!(fs::read(dir.join("members/first/node_modules/local/index.js")).unwrap(), b"module.exports = 2;");
+    project.write("vendor/second/index.js", b"module.exports = 3;").unwrap();
+    let rejected = run(dir, &["update", "local", "--workspace", "first", "--store-dir", store.to_str().unwrap()]);
+    assert!(!rejected.status.success());
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), after);
+    assert_eq!(fs::read(dir.join("members/second/node_modules/local/index.js")).unwrap(), b"module.exports = 1;");
+}
+
+#[test]
+fn copied_directory_member_unsafe_origins_fail_before_mutation() {
+    for source in ["../../../outside", "../..", "..", "/absolute", "C:/drive", "../../vendor/tool"] {
+        let project = tapid_test_support::TempProject::new("member-unsafe-source").unwrap();
+        let root = br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#;
+        project.write("package.json", root).unwrap();
+        let member = format!(r#"{{"name":"member","version":"1.0.0","dependencies":{{"local":"file:{source}"}}}}"#);
+        project.write("members/member/package.json", member.as_bytes()).unwrap();
+        project.write("vendor/tool/package.json", br#"{"name":"tool","version":"1.0.0"}"#).unwrap();
+        let store = project.path().join("vendor/tool/store");
+        let result = run(project.path(), &["install", "--store-dir", store.to_str().unwrap()]);
+        assert!(!result.status.success(), "{source}");
+        assert_eq!(fs::read(project.path().join("package.json")).unwrap(), root);
+        assert_eq!(fs::read(project.path().join("members/member/package.json")).unwrap(), member.as_bytes());
+        for path in ["tapid.lock", "node_modules", "members/member/node_modules", "vendor/tool/store"] {
+            assert!(!project.path().join(path).exists(), "{source}: {path}");
+        }
+    }
+}
+
+#[test]
+fn copied_directory_member_update_recovers_coordinated_activation() {
+    for (variable, point) in [
+        ("TAPID_TEST_FAIL_ACTIVATION", "1"),
+        ("TAPID_TEST_CRASH_POINT", "store_published"),
+        ("TAPID_TEST_CRASH_POINT", "workspace_member_activated"),
+    ] {
+        let project = tapid_test_support::TempProject::new("member-directory-recovery").unwrap();
+        let root = br#"{"name":"app","version":"1.0.0","workspaces":["members/*"]}"#;
+        let member = br#"{"name":"member","version":"1.0.0","dependencies":{"local":"file:../../vendor/tool"}}"#;
+        project.write("package.json", root).unwrap();
+        project.write("members/member/package.json", member).unwrap();
+        project.write("vendor/tool/package.json", br#"{"name":"tool","version":"1.0.0"}"#).unwrap();
+        project.write("vendor/tool/index.js", b"module.exports = 1;").unwrap();
+        let dir = project.path();
+        let store = dir.join("store");
+        let initial = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+        assert!(initial.status.success(), "{}", String::from_utf8_lossy(&initial.stderr));
+        let lock = fs::read(dir.join("tapid.lock")).unwrap();
+        let trees = fs::read_dir(store.join("trees")).unwrap().map(|entry| entry.unwrap().file_name()).collect::<std::collections::BTreeSet<_>>();
+        project.write("vendor/tool/index.js", b"module.exports = 2;").unwrap();
+        let result = run_with_env(dir, &["update", "local", "--workspace", "member", "--store-dir", store.to_str().unwrap()], variable, point);
+        assert!(!result.status.success(), "{point}");
+        if variable == "TAPID_TEST_CRASH_POINT" {
+            for _ in 0..2 {
+                let recovered = run_with_env(dir, &["install", "--offline", "--store-dir", store.to_str().unwrap()], "TAPID_TEST_RECOVER_ONLY", "1");
+                assert!(recovered.status.success(), "{}", String::from_utf8_lossy(&recovered.stderr));
+            }
+        }
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock, "{point}");
+        assert_eq!(fs::read(dir.join("package.json")).unwrap(), root);
+        assert_eq!(fs::read(dir.join("members/member/package.json")).unwrap(), member);
+        assert_eq!(fs::read(dir.join("members/member/node_modules/local/index.js")).unwrap(), b"module.exports = 1;", "{point}");
+        assert_eq!(fs::read_dir(store.join("trees")).unwrap().map(|entry| entry.unwrap().file_name()).collect::<std::collections::BTreeSet<_>>(), trees, "{point}");
+        assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
+        assert!(dir.join("node_modules/member/package.json").exists());
+    }
+}
+
+#[test]
 fn copied_directory_materializes_imports_bins_and_checks_warm_replay() {
     let project = tapid_test_support::TempProject::new("directory-import-bin").unwrap();
     project
