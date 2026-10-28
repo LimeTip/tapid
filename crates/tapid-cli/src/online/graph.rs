@@ -100,6 +100,7 @@ pub(super) fn resolve_package_graph(
             fixture_records.insert(
                 (p.registry.clone(), p.name.clone(), p.version.clone()),
                 PackageRecord {
+                    complete_dependency_kinds: true,
                     git_reference: p.git_ref.clone(),
                     copied_archive: None,
                     dist_tags: p.dist_tags.clone(),
@@ -111,7 +112,7 @@ pub(super) fn resolve_package_graph(
                     dependencies: p.dependencies.clone(),
                     peer_dependencies: p.peer_dependencies.clone(),
                     optional_peer_dependencies: p.optional_peer_dependencies.clone(),
-                    optional_dependencies: BTreeMap::new(),
+                    optional_dependencies: p.optional_dependencies.clone(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
                 },
@@ -383,6 +384,170 @@ pub(super) fn workspace_registry_target<'a>(
 mod tests {
     use super::*;
     use crate::application::lifecycle::{SavePolicy, plan_update};
+
+    #[test]
+    fn native_selection_rejects_legacy_seeded_dependency_kinds() {
+        let project = tapid_test_support::TempProject::new("graph-profile-legacy-kinds").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let mut previous = Lockfile::new(&root_digest(project.path()).unwrap()).unwrap();
+        let package = LockedPackage::new_with_provenance(
+            NPM,
+            "plugin",
+            "1.0.0",
+            &integrity(b"plugin").to_string(),
+            &digest(b"tree").to_string(),
+            RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        previous.insert_package(package).unwrap();
+        previous.set_roots([key]).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            None,
+            false,
+            &config,
+            Some(&previous),
+            None,
+            |_| {},
+        )
+        .unwrap();
+        let error = resolved
+            .native_selection(project.path(), &manifest, &config)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("dependency kind evidence"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn native_selection_keeps_peer_provider_on_its_configured_origin() {
+        let project = tapid_test_support::TempProject::new("graph-profile-peer-origin").unwrap();
+        let text =
+            r#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1","@private/host":"1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        let fixture = serde_json::json!({"packages":[
+            {"registry":NPM,"name":"plugin","version":"1.0.0","peerDependencies":{"@private/host":"1"},"integrity":integrity(b"plugin").to_string(),"artifact":"https://registry.npmjs.org/plugin.tgz"},
+            {"registry":"https://private.example.test","name":"@private/host","version":"1.0.0","integrity":integrity(b"host").to_string(),"artifact":"https://private.example.test/host.tgz"}
+        ]});
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let config = crate::registry::RegistryConfig::parse_toml_bytes(
+            br#"[registries."@private"]
+url = "https://private.example.test"
+"#,
+        )
+        .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        let selection = resolved
+            .native_selection(project.path(), &manifest, &config)
+            .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&selection.to_json().unwrap()).unwrap();
+        let packages = wire["packages"].as_object().unwrap();
+        let plugin = packages
+            .iter()
+            .find(|(key, _)| key.parse::<LockfilePackageKey>().unwrap().name.as_str() == "plugin")
+            .unwrap()
+            .1;
+        let provider = plugin["peerProviders"]["@private/host"].as_str().unwrap();
+        assert_eq!(
+            provider
+                .parse::<LockfilePackageKey>()
+                .unwrap()
+                .source
+                .registry()
+                .unwrap()
+                .to_string(),
+            "https://private.example.test"
+        );
+    }
+
+    #[test]
+    fn native_selection_preserves_optional_edges_and_exact_peer_providers_before_fetch() {
+        let project = tapid_test_support::TempProject::new("graph-profile-evidence").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"^1"},"devDependencies":{"host":"^1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        let fixture = serde_json::json!({"packages":[
+            {"registry":NPM,"name":"plugin","version":"1.0.0","peerDependencies":{"host":"^1"},"optionalDependencies":{"extra":"^1"},"integrity":integrity(b"plugin").to_string(),"artifact":"https://registry.npmjs.org/plugin.tgz"},
+            {"registry":NPM,"name":"host","version":"1.0.0","dependencies":{"shared":"^1"},"integrity":integrity(b"host").to_string(),"artifact":"https://registry.npmjs.org/host.tgz"},
+            {"registry":NPM,"name":"shared","version":"1.0.0","integrity":integrity(b"shared").to_string(),"artifact":"https://registry.npmjs.org/shared.tgz"},
+            {"registry":NPM,"name":"extra","version":"1.0.0","integrity":integrity(b"extra").to_string(),"artifact":"https://registry.npmjs.org/extra.tgz"}
+        ]});
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        let selection = resolved
+            .native_selection(project.path(), &manifest, &config)
+            .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&selection.to_json().unwrap()).unwrap();
+        let packages = wire["packages"].as_object().unwrap();
+        assert_eq!(packages.len(), 4);
+        let find = |name: &str| {
+            packages
+                .keys()
+                .find(|key| key.parse::<LockfilePackageKey>().unwrap().name.as_str() == name)
+                .unwrap()
+                .clone()
+        };
+        let (plugin, host, shared, extra) =
+            (find("plugin"), find("host"), find("shared"), find("extra"));
+        assert_eq!(
+            wire["packages"][&plugin]["dependencies"]["extra"]["kind"],
+            "optional"
+        );
+        assert_eq!(wire["packages"][&plugin]["peerProviders"]["host"], host);
+        assert_eq!(
+            selection
+                .materialized_keys(tapid_lockfile::InstallProfile {
+                    include_dev: false,
+                    include_optional: false
+                })
+                .unwrap(),
+            [plugin, host, shared].into_iter().collect()
+        );
+        assert!(
+            selection
+                .materialized_keys(tapid_lockfile::InstallProfile::default())
+                .unwrap()
+                .contains(&extra)
+        );
+        for path in ["tapid.lock", "node_modules", ".tapid-activation.lock"] {
+            assert!(!project.path().join(path).exists(), "{path}");
+        }
+    }
 
     #[test]
     fn peer_only_save_reuses_metadata_retrieved_for_a_transitive_dependency() {

@@ -721,6 +721,7 @@ fn record(version: &str, dependency_requirement: Option<&str>) -> PackageRecord 
 
 fn named_record(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageRecord {
     PackageRecord {
+        complete_dependency_kinds: true,
         git_reference: None,
         copied_archive: None,
         dist_tags: BTreeSet::new(),

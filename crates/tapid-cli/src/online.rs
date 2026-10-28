@@ -16,6 +16,7 @@ pub(crate) use locked::{
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
+mod selection;
 mod update;
 #[cfg(test)]
 use resolution::{
@@ -168,6 +169,8 @@ struct FixturePackage {
     artifact: String,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependencies")]
     peer_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "optionalPeerDependencies")]
@@ -180,6 +183,8 @@ struct Fixture {
 
 #[derive(Clone)]
 struct PackageRecord {
+    // Legacy locked records retain exact targets but cannot establish edge kinds.
+    complete_dependency_kinds: bool,
     git_reference: Option<String>,
     copied_archive: Option<std::sync::Arc<Vec<u8>>>,
     dist_tags: BTreeSet<String>,
@@ -632,6 +637,7 @@ fn remote_records(
     Ok(artifacts
         .into_iter()
         .map(|a| PackageRecord {
+            complete_dependency_kinds: true,
             git_reference: None,
             copied_archive: None,
             dist_tags: a.dist_tags,

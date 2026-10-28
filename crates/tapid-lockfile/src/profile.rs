@@ -43,7 +43,7 @@ impl InstallProfile {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum DeclarationKind {
+pub enum DeclarationKind {
     Required,
     Dev,
     Optional,
@@ -51,30 +51,30 @@ enum DeclarationKind {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum DependencyKind {
+pub enum DependencyKind {
     Required,
     Optional,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Declaration {
-    workspace: Option<String>,
-    name: String,
-    kind: DeclarationKind,
-    target: String,
+pub struct Declaration {
+    pub workspace: Option<String>,
+    pub name: String,
+    pub kind: DeclarationKind,
+    pub target: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Dependency {
-    kind: DependencyKind,
-    target: String,
+pub struct Dependency {
+    pub kind: DependencyKind,
+    pub target: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
-enum SourceEvidence {
+pub enum SourceEvidence {
     #[serde(rename_all = "camelCase")]
     Pending {
         artifact_url: String,
@@ -90,10 +90,10 @@ enum SourceEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SelectedPackage {
-    source_evidence: SourceEvidence,
-    dependencies: BTreeMap<String, Dependency>,
-    peer_providers: BTreeMap<String, String>,
+pub struct SelectedPackage {
+    pub source_evidence: SourceEvidence,
+    pub dependencies: BTreeMap<String, Dependency>,
+    pub peer_providers: BTreeMap<String, String>,
 }
 
 /// Validated schema-11 native selection, including packages omitted from a profile.
@@ -113,6 +113,28 @@ pub struct NativeSelection {
 }
 
 impl NativeSelection {
+    /// Construct a complete selection from typed producer evidence, validating all records.
+    pub fn new(
+        resolver_version: String,
+        linker_version: String,
+        root_manifest_digest: String,
+        workspace_manifest_digests: BTreeMap<String, String>,
+        declarations: Vec<Declaration>,
+        packages: BTreeMap<String, SelectedPackage>,
+    ) -> Result<Self, LockfileError> {
+        let selection = Self {
+            lockfile_version: PROFILE_LOCKFILE_VERSION,
+            resolver_version,
+            linker_version,
+            root_manifest_digest,
+            workspace_manifest_digests,
+            declarations,
+            packages,
+        };
+        selection.validate()?;
+        Ok(selection)
+    }
+
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]

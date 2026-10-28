@@ -256,6 +256,7 @@ pub(super) fn locked_records(
                 key.version.to_string(),
             );
             Ok(PackageRecord {
+            complete_dependency_kinds: false,
                 git_reference: None,
                 copied_archive: None,
         dist_tags: BTreeSet::new(),

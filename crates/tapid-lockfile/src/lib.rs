@@ -36,4 +36,9 @@ pub use npm_import::{
     ImportedNpmPackage, NpmImportError,
 };
 
-pub use profile::{InstallProfile, NativeSelection, PROFILE_LOCKFILE_VERSION};
+pub use profile::{
+    Declaration as NativeDeclaration, DeclarationKind as NativeDeclarationKind,
+    Dependency as NativeDependency, DependencyKind as NativeDependencyKind, InstallProfile,
+    NativeSelection, PROFILE_LOCKFILE_VERSION, SelectedPackage as NativeSelectedPackage,
+    SourceEvidence as NativeSourceEvidence,
+};

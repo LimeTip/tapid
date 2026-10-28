@@ -64,7 +64,8 @@ Older schemas reject copied entries. See [copied dependency behavior](../../docs
 profiles. Installation does not yet emit or replay it. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.
-`from_json` validates the complete selection, including omitted packages;
+`new` accepts typed declaration, package, edge and source-evidence inputs;
+both it and `from_json` validate the complete selection, including omitted packages;
 `materialized_keys(InstallProfile)` returns exact retained keys without altering
 that selection. Optional declarations must already override regular declarations;
 dev declarations remain independent. Workspace declarations share the same
