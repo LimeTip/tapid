@@ -1,3 +1,5 @@
+#[path = "dependency_inputs.rs"]
+mod inputs;
 #[path = "dependency_node_gyp.rs"]
 mod node_gyp;
 
@@ -12,6 +14,10 @@ use std::{
 use tapid_linker::NamedLayoutInput;
 use tapid_lockfile::{DerivedHookOutput, Lockfile};
 use tapid_runner::{DependencyLifecycleApproval, DependencyLifecyclePolicy};
+
+#[path = "dependency_rebuild.rs"]
+mod rebuild;
+pub(crate) use rebuild::RebuildRequest;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ExecutionOverrides {
@@ -78,6 +84,7 @@ pub(super) fn apply(
     project: &Path,
     policy: &DependencyLifecyclePolicy,
     overrides: ExecutionOverrides,
+    rebuild: Option<RebuildRequest<'_>>,
     retained_stages: &mut Vec<BuildStage>,
     lock: &mut Lockfile,
     input: &mut NamedLayoutInput,
@@ -111,29 +118,67 @@ pub(super) fn apply(
         }
     }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
-    let order = if policy.approvals().is_empty() && !overrides.allow_unapproved {
-        lock.packages().keys().cloned().collect()
-    } else {
-        dependency_order(lock)?
-    };
+    let dependency_inputs =
+        if rebuild.is_none() && policy.approvals().is_empty() && !overrides.allow_unapproved {
+            None
+        } else {
+            Some(inputs::DependencyInputs::new(lock)?)
+        };
+    let order = dependency_inputs.as_ref().map_or_else(
+        || lock.packages().keys().cloned().collect(),
+        |graph| graph.order.clone(),
+    );
+    let explicit_selection = rebuild.map(|request| request.select(lock)).transpose()?;
+    let impact = explicit_selection.as_ref().map(|selected| {
+        let graph = dependency_inputs.as_ref().expect("rebuild graph required");
+        graph
+            .order
+            .iter()
+            .filter(|key| {
+                if selected.contains(*key) {
+                    return true;
+                }
+                let package = &lock.packages()[*key];
+                // Only potential dependency readers can be invalidated by a
+                // selected output. Preflight still validates every exact hook
+                // approval; this planning filter grants no execution authority.
+                policy.approvals().iter().any(|approval| {
+                    approval.dependencies()
+                        && approval.package() == package.name()
+                        && approval.version() == package.version()
+                        && approval.archive_digest() == package.artifact_integrity()
+                }) && !graph.closure(key).is_disjoint(selected)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    });
+    if let Some(selected) = &explicit_selection {
+        let report = outcome.lifecycle.as_mut().unwrap();
+        report.explicitly_selected_packages = Some(selected.len());
+        report.impacted_packages = Some(impact.as_ref().unwrap().len());
+        report.reason = Some("rebuild_preflight_failed");
+    }
     let mut system_identity = None;
+
+    if let Some(selected) = explicit_selection.as_ref() {
+        rebuild::preflight(
+            selected,
+            impact.as_ref().unwrap(),
+            dependency_inputs.as_ref().unwrap(),
+            lock,
+            policy,
+            trees,
+            input,
+            store,
+            snapshots,
+            &mut system_identity,
+            &source_graph,
+            outcome,
+        )?;
+    }
     for key in order {
         let package = lock.packages()[&key].clone();
-        let typed: tapid_lockfile::LockfilePackageKey = key.parse().map_err(error)?;
-        let peer_context = typed.peer_context().map_err(error)?;
-        let platform_context = typed.platform_context().map_err(error)?;
-        let identity = tapid_linker::InstanceKey {
-            id: tapid_core::PackageInstanceId::from_source(
-                typed
-                    .source
-                    .package_source()
-                    .ok_or_else(|| error("lifecycle package has no artifact source"))?,
-                typed.name,
-                typed.version,
-            ),
-            peer_context,
-            platform_context,
-        };
+        let identity = inputs::identity(&key)?;
         let index = *instance_indices
             .get(&identity)
             .filter(|&&index| trees.get(&key) == Some(&input.instances[index].tree.root))
@@ -144,6 +189,19 @@ pub(super) fn apply(
             .as_mut()
             .unwrap()
             .package(super::outcome::LifecycleIdentity::new(&key, &package));
+        if let Some(selected) = &explicit_selection
+            && let Some(index) = observation
+        {
+            let package_report = &mut outcome.lifecycle.as_mut().unwrap().packages[index];
+            package_report.rebuild_role = Some(if selected.contains(&key) {
+                "selected"
+            } else if impact.as_ref().unwrap().contains(&key) {
+                "dependant"
+            } else {
+                "prerequisite"
+            });
+            package_report.force_requested = selected.contains(&key) && rebuild.unwrap().force;
+        }
         let hooks = match commands(&source) {
             Ok(hooks) => {
                 outcome
@@ -269,6 +327,15 @@ pub(super) fn apply(
                     "approved dependency scripts require registry-declared archive integrity",
                 ));
             }
+            let projected = if approval.dependencies() {
+                dependency_inputs.as_ref().unwrap().layout(&key, input)?
+            } else {
+                NamedLayoutInput {
+                    instances: vec![],
+                    root_dependencies: vec![],
+                    dependency_edges: vec![],
+                }
+            };
             if overrides.enabled() {
                 if !online {
                     return Err(error(
@@ -292,9 +359,8 @@ pub(super) fn apply(
                     stage,
                     approval,
                     &script,
-                    input,
+                    &projected,
                     trees,
-                    lock,
                     overrides.without_containment,
                     selected.is_none() && requires_install && hook == "install",
                     &mut failure_reason,
@@ -343,8 +409,13 @@ pub(super) fn apply(
                         Some("tool_verification_failed"),
                     );
                 })?;
-            let graph =
-                serde_json::to_string(&(&source_graph, &completed, &outputs)).map_err(error)?;
+            let graph = dependency_inputs.as_ref().unwrap().evidence(
+                &key,
+                approval.dependencies(),
+                &source_graph,
+                &completed,
+                &outputs,
+            )?;
             let recipe = policy.derived_key(approval, &toolchain, &graph);
             let previous = cached
                 .as_ref()
@@ -354,7 +425,11 @@ pub(super) fn apply(
                         .iter()
                         .find(|o| o.hook() == hook && o.key() == recipe)
                 });
-            if let Some(previous) = previous
+            let forced = rebuild.is_some_and(|request| request.force)
+                && explicit_selection
+                    .as_ref()
+                    .is_some_and(|selected| selected.contains(&key));
+            if let Some(previous) = previous.filter(|_| !forced)
                 && let Ok(snapshot) = store.verified_lifecycle_snapshot(
                     &recipe.parse().map_err(error)?,
                     &previous.tree_digest().parse().map_err(error)?,
@@ -379,6 +454,11 @@ pub(super) fn apply(
                     .unwrap()
                     .disposition(observed_hook, "reused", None);
                 continue;
+            }
+            if impact.as_ref().is_some_and(|impact| !impact.contains(&key)) {
+                return Err(error(format!(
+                    "rebuild prerequisite {key} {hook} changed; run an approved online install first"
+                )));
             }
             if !online {
                 outcome.lifecycle.as_mut().unwrap().disposition(
@@ -408,9 +488,8 @@ pub(super) fn apply(
                 stage,
                 approval,
                 &script,
-                input,
+                &projected,
                 trees,
-                lock,
                 false,
                 false,
                 &mut failure_reason,
@@ -470,40 +549,6 @@ pub(super) fn apply(
     Ok(())
 }
 
-fn dependency_order(lock: &Lockfile) -> Result<Vec<String>, OperationalError> {
-    fn visit(
-        key: &str,
-        lock: &Lockfile,
-        active: &mut BTreeSet<String>,
-        done: &mut BTreeSet<String>,
-        order: &mut Vec<String>,
-    ) -> Result<(), OperationalError> {
-        if done.contains(key) {
-            return Ok(());
-        }
-        if active.len() >= 1024 || !active.insert(key.into()) {
-            return Err(error(
-                "approved dependency lifecycle graphs must be acyclic and no deeper than 1024 packages",
-            ));
-        }
-        for child in lock.packages()[key].dependencies().values() {
-            if lock.packages().contains_key(child) {
-                visit(child, lock, active, done, order)?;
-            }
-        }
-        active.remove(key);
-        done.insert(key.into());
-        order.push(key.into());
-        Ok(())
-    }
-    let mut order = Vec::new();
-    let mut done = BTreeSet::new();
-    let mut active = BTreeSet::new();
-    for key in lock.packages().keys() {
-        visit(key, lock, &mut active, &mut done, &mut order)?;
-    }
-    Ok(order)
-}
 pub(super) struct BuildStage(PathBuf);
 impl BuildStage {
     fn new(
@@ -630,7 +675,6 @@ fn run_hook(
     script: &str,
     input: &NamedLayoutInput,
     trees: &BTreeMap<String, PathBuf>,
-    lock: &Lockfile,
     without_containment: bool,
     implicit_node_gyp: bool,
     failure_reason: &mut &'static str,
@@ -688,11 +732,6 @@ fn run_hook(
         }
     }
     if approval.dependencies() {
-        if !lock.workspace_packages().is_empty() {
-            return Err(error(
-                "dependency lifecycle scripts cannot read live workspace packages; use published verified dependencies",
-            ));
-        }
         let plan = tapid_linker::plan_named_layout(
             tapid_linker::ManagedRoot::new(&stage.0).map_err(error)?,
             input.clone(),
@@ -1002,6 +1041,7 @@ mod tests {
                 project.path(),
                 &DependencyLifecyclePolicy::denied(),
                 ExecutionOverrides::default(),
+                None,
                 &mut Vec::new(),
                 &mut case_lock,
                 &mut input,

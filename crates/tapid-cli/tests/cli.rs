@@ -7544,6 +7544,9 @@ fn frozen_cold_cache_recovery_preserves_lock_bytes_and_publication_decision() {
 }
 
 #[cfg(target_os = "linux")]
+const NATIVE_BUILD_ARCHIVE: &str = "H4sIAAAAAAAA/+3UXUvDMBQGYK/9FSGCbcGlqZsTVATRCd6J26UgNT3OaJfUJJ3K2H+3+0BhCN7MD/B9bk57QjlJ4G2Vq8d8SGm1qOLBW7OxZrLR7XTmtbFaZbu9//4872dZt51tMLnujXym9iF3zfifmPUHTbjJR8QPWFODHlOroJHlO4yPyXltzWwlE1LIWc8rp6vgm96Ea9NcXFnOv7QFsRaxa67v4spZRd4LMmMxOLm8OLsZ9PqDm37v9Ko3SN5XX3SIO7vJoaOnWjuKozsfJeLZ6UDnuqT+q1FxNCRDLg9UiPASop2P9yi55mx7m6W1d+mtNulQKXZPZWmFYi3LFmfh0+lvX++ft8x9ury8b5nxVf4zubeSf9mVbeT/J2xpo8q6ye+RD4W24v54U5vARrk28djqIplUdfDx8u/AlB1VTTwLPktuqJ1h8nC6+duHAAAAAAAAAAAAAAAAAAAAAPjH3gAN/fj4ACgAAA==";
+
+#[cfg(target_os = "linux")]
 #[test]
 fn approved_dependency_lifecycle_builds_native_output_and_replays_exactly() {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
@@ -7557,7 +7560,7 @@ fn approved_dependency_lifecycle_builds_native_output_and_replays_exactly() {
             br#"{"name":"demo","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#,
         )
         .unwrap();
-    let archive = "H4sIAAAAAAAA/+3UXUvDMBQGYK/9FSGCbcGlqZsTVATRCd6J26UgNT3OaJfUJJ3K2H+3+0BhCN7MD/B9bk57QjlJ4G2Vq8d8SGm1qOLBW7OxZrLR7XTmtbFaZbu9//4872dZt51tMLnujXym9iF3zfifmPUHTbjJR8QPWFODHlOroJHlO4yPyXltzWwlE1LIWc8rp6vgm96Ea9NcXFnOv7QFsRaxa67v4spZRd4LMmMxOLm8OLsZ9PqDm37v9Ko3SN5XX3SIO7vJoaOnWjuKozsfJeLZ6UDnuqT+q1FxNCRDLg9UiPASop2P9yi55mx7m6W1d+mtNulQKXZPZWmFYi3LFmfh0+lvX++ft8x9ury8b5nxVf4zubeSf9mVbeT/J2xpo8q6ye+RD4W24v54U5vARrk28djqIplUdfDx8u/AlB1VTTwLPktuqJ1h8nC6+duHAAAAAAAAAAAAAAAAAAAAAPjH3gAN/fj4ACgAAA==";
+    let archive = NATIVE_BUILD_ARCHIVE;
     // Exact fixture archive and script hashes are approvals, not package-name trust.
     let bytes = STANDARD.decode(archive).unwrap();
     let script = r#"node -e "if(process.env.TAPID_TEST_SECRET)process.exit(42);require('fs').writeFileSync('generated.txt','generated')" && /usr/bin/gcc hello.c -o native"#;
@@ -7619,6 +7622,10 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             .join("node_modules/native-demo/generated.txt")
             .exists()
     );
+    let original_manifest = fs::read(project.path().join("package.json")).unwrap();
+    let source_only_lock =
+        Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+            .unwrap();
     project
         .write("tapid.lifecycle.toml", policy.as_bytes())
         .unwrap();
@@ -7644,10 +7651,85 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     assert!(native.status.success());
     assert_eq!(native.stdout, b"native compiled\n");
     let lock_bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let built_lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    assert_eq!(built_lock.source_graph(), source_only_lock.source_graph());
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        original_manifest
+    );
+    // Ordinary online install reuses authenticated outputs even though the
+    // dependency hook was approved after a source-only installation.
+    let reused = install(&["--registry-fixture", "registry.json", "--json"]);
+    assert!(reused.status.success(), "{reused:?}");
+    let result: serde_json::Value = serde_json::from_slice(&reused.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(result["lifecycle"]["generated_outputs_reused"], 1);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&lock_bytes).unwrap()["lockfileVersion"],
         9
     );
+    let rebuild = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .arg("rebuild")
+            .args(flags)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .output()
+            .unwrap()
+    };
+    let exact = built_lock.packages().keys().next().unwrap();
+    for force in [false, true] {
+        let mut flags = vec!["native-demo", "--instance", exact.as_str(), "--json"];
+        if force {
+            flags.push("--force");
+        }
+        let result = rebuild(&flags);
+        assert!(result.status.success(), "{result:?}");
+        let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(result["lifecycle"]["explicitly_selected_packages"], 1);
+        assert_eq!(result["lifecycle"]["impacted_packages"], 1);
+        assert_eq!(result["lifecycle"]["hooks_executed"], usize::from(force));
+        assert_eq!(
+            result["lifecycle"]["generated_outputs_reused"],
+            usize::from(!force)
+        );
+        assert_eq!(
+            result["lifecycle"]["packages"][0]["rebuild_role"],
+            "selected"
+        );
+        assert_eq!(result["lifecycle"]["packages"][0]["force_requested"], force);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            original_manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+    }
+    // A missing exact approval must never be treated as successful default denial.
+    fs::remove_file(project.path().join("tapid.lifecycle.toml")).unwrap();
+    let rejected = rebuild(&["native-demo", "--force", "--json"]);
+    assert!(!rejected.status.success(), "{rejected:?}");
+    let result: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
+    );
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+
     let verified = Command::new(env!("CARGO_BIN_EXE_tapid"))
         .current_dir(project.path())
         .args(["lock", "verify"])
@@ -7797,7 +7879,7 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             policy.replace("write = [\".\"]", "write = []").as_bytes(),
         )
         .unwrap();
-    let failed = install(&["--registry-fixture", "registry.json"]);
+    let failed = rebuild(&["native-demo", "--force"]);
     assert!(
         !failed.status.success(),
         "{}",
@@ -7820,6 +7902,152 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             .status()
             .unwrap()
             .success()
+    );
+    // Interrupted rebuilds use the same coordinated activation journal as install.
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    for (checkpoint, cancelled) in [
+        ("store_published", false),
+        ("lockfile_replaced", false),
+        ("activation_complete", false),
+        ("commit_decision", false),
+        ("activation_complete", true),
+        ("commit_decision", true),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        command
+            .current_dir(project.path())
+            .args(["rebuild", "native-demo", "--force", "--store-dir"])
+            .arg(home.path().join("store"));
+        let crashed = if cancelled {
+            let ready = home.path().join(format!("rebuild-{checkpoint}-ready"));
+            let mut child = command
+                .env("TAPID_TEST_PAUSE_POINT", checkpoint)
+                .env("TAPID_TEST_PAUSE_READY", &ready)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !ready.exists() {
+                if child.try_wait().unwrap().is_some() {
+                    panic!(
+                        "rebuild exited before cancellation: {:?}",
+                        child.wait_with_output().unwrap()
+                    );
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("rebuild cancellation checkpoint watchdog expired");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Kill only the CLI parent after hooks finish at a durable boundary.
+            child.kill().unwrap();
+            child.wait_with_output().unwrap()
+        } else {
+            command
+                .env("TAPID_TEST_CRASH_POINT", checkpoint)
+                .output()
+                .unwrap()
+        };
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            crashed.status.signal(),
+            Some(if cancelled { 9 } else { 6 }),
+            "{checkpoint}: {crashed:?}"
+        );
+        assert!(
+            project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        let recovered = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project.path())
+            .args(["install", "--offline", "--store-dir"])
+            .arg(home.path().join("store"))
+            .env("TAPID_TEST_RECOVER_ONLY", "1")
+            .output()
+            .unwrap();
+        assert!(recovered.status.success(), "{checkpoint}: {recovered:?}");
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            original_manifest
+        );
+        assert_eq!(
+            fs::read(package.join("generated.txt")).unwrap(),
+            b"generated"
+        );
+    }
+    // Changed pinned tools require a deliberate valid policy update. The package
+    // version, requirements and source graph stay fixed throughout this change.
+    let local_node = project.path().join("pinned-node");
+    let mut node_bytes = fs::read(&node).unwrap();
+    node_bytes.extend_from_slice(b"tapid-rebuild-toolchain-fixture");
+    fs::write(&local_node, &node_bytes).unwrap();
+    fs::set_permissions(&local_node, fs::metadata(&node).unwrap().permissions()).unwrap();
+    let stale_policy = policy.replace(
+        &node.display().to_string(),
+        &local_node.display().to_string(),
+    );
+    project
+        .write("tapid.lifecycle.toml", stale_policy.as_bytes())
+        .unwrap();
+    let rejected = rebuild(&["native-demo", "--force", "--json"]);
+    assert!(!rejected.status.success(), "{rejected:?}");
+    let result: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock_bytes
+    );
+    let updated_policy = stale_policy.replace(
+        &format!("sha256-{:x}", Sha256::digest(fs::read(&node).unwrap())),
+        &format!("sha256-{:x}", Sha256::digest(&node_bytes)),
+    );
+    project
+        .write("tapid.lifecycle.toml", updated_policy.as_bytes())
+        .unwrap();
+    let changed = rebuild(&["native-demo", "--json"]);
+    assert!(changed.status.success(), "{changed:?}");
+    let result: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 1);
+    let changed_lock =
+        Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+            .unwrap();
+    assert_eq!(changed_lock.source_graph(), built_lock.source_graph());
+    assert_ne!(
+        changed_lock.packages()[exact].derived_hooks()[0].key(),
+        built_lock.packages()[exact].derived_hooks()[0].key()
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        original_manifest
+    );
+    // Cold authentication cannot adopt copied output records. Selected approved
+    // hooks regenerate from source and issue fresh store-local attestations.
+    fs::remove_file(store.root().join(".tapid-lifecycle-key")).unwrap();
+    let cold = rebuild(&["native-demo", "--json"]);
+    assert!(cold.status.success(), "{cold:?}");
+    let result: serde_json::Value = serde_json::from_slice(&cold.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 1);
+    assert_eq!(result["lifecycle"]["generated_outputs_reused"], 0);
+    assert_eq!(
+        fs::read(package.join("generated.txt")).unwrap(),
+        b"generated"
     );
 }
 

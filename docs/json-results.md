@@ -424,10 +424,18 @@ Schema version 1 adds envelope fields on success and failure:
 
 `lifecycle.coverage` is `not_performed`, `incomplete`, or `complete`. Its optional
 `reason` explains `before_discovery`, `imported_lock`, `processing_stopped`, or
-`discovery_failed`. `selected_packages` is null until a validated selection is
+`discovery_failed`, or `rebuild_preflight_failed`. `selected_packages` is null until a validated selection is
 available. `inspected_packages` counts attempted discovery, including failures.
 Complete coverage means all selected packages were inspected; it says nothing
 about hook success or application readiness.
+
+For rebuild, `explicitly_selected_packages` counts deduplicated explicit instances and
+`impacted_packages` counts their reverse dependency-input closure, including the
+selection. Both are null for other operations. `selected_packages` retains its
+existing discovery-domain meaning. Package details add `rebuild_role` (`selected`,
+`dependant`, or `prerequisite`, null outside rebuild) and `force_requested`.
+Prerequisites outside the impact set can only reuse outputs. Observations remain
+separate from the envelope transaction state; an executed hook can be rolled back.
 
 `packages` is sorted by the original lock instance key. Each entry has `identity`,
 `discovery` (`succeeded`, `failed`, or `not_performed`), `hooks`, and

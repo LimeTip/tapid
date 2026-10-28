@@ -42,6 +42,7 @@ tapid ci [OPTIONS]
 tapid add <PACKAGE>... [OPTIONS]
 tapid remove <PACKAGE>... [OPTIONS]
 tapid update [OPTIONS]
+tapid rebuild <PACKAGE>... [--instance <LOCK_KEY>] [--force]
 tapid outdated [OPTIONS]
 tapid prune [OPTIONS]
 tapid why <PACKAGE> [OPTIONS]
@@ -88,6 +89,8 @@ intended content. `--json` emits the versioned evidence summary, including on a
 byte mismatch; see the [JSON protocol](../../docs/json-results.md).
 
 `tapid i` is an alias for `tapid install`, including when adding a package. Use `tapid install --help` or `tapid help install` for installation help. Bare `help` and `install` package arguments are rejected before accessing the project to avoid accidental installs. To intentionally install a package with either name, use an explicit spec such as `help@1.0.0` or `npm:install`.
+
+`tapid rebuild` selects unchanged native locked instances by unique name or repeatable exact `--instance` keys, reuses authenticated outputs by default, and accepts `--force` for selected hooks only. It rejects missing selectors, unsupported or unapproved hooks, imported locks, offline/frozen flags, and unsafe execution overrides. It preserves requirements and source graph identities and reuses the recoverable install activation transaction.
 
 Dependency hooks remain denied without exact checked-in approval. Online installs offer separate invocation-only `--allow-unapproved-dependency-scripts` and `--unsafe-no-dependency-sandbox` overrides. The first retains required containment; the second explicitly permits host access but does not authorize unapproved hooks by itself. Override outputs never enter the authenticated build cache. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) for limits, warnings, and platform requirements. These flags do not change `tapid run`.
 
@@ -260,7 +263,7 @@ Lifecycle edits validate the manifest they were planned against after acquiring 
 
 Install reads lifecycle policy and classifies the current lockfile after acquiring the project lock and completing recovery. If recovery restores a different lock format, replay and CI restrictions apply to that recovered lock.
 
-`install`, `ci`, `add`, `remove`, `update`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
+`install`, `ci`, `add`, `remove`, `update`, `rebuild`, `prune`, and `outdated` use typed application results. Failures retain an error category and print a `diagnostic:` code on stderr, such as `LOCKFILE_MISSING`, `LOCK_MANIFEST_MISMATCH`, `REGISTRY_AUTH_MISSING`, `RESOLUTION_FAILED`, or `INTEGRITY_MISMATCH`. Operational failures still exit with code `1`.
 
 Results carry the effective project directory, affected project outputs, policy and recovery warnings, and retry advice. Dependency mutations distinguish unchanged state, successful rollback, committed changes, committed changes with cleanup pending, and recovery required. Output paths describe `package.json`, `tapid.lock`, and `node_modules`; shared-store effects are covered by the transaction state. A rollback clears those paths. Failed recovery retains the paths that need inspection. An `outdated` result is unchanged unless a pending transaction requires recovery. In that case it reports `recovery_required` and the paths to inspect without attempting recovery.
 
