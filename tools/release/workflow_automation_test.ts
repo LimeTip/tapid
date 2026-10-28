@@ -656,6 +656,7 @@ const assertManagedDelegation = (ci: string) => {
   const owner = job(ci, 'linux-managed-tree');
   const setup = step(owner, 'Require native ManagedTree execution in a delegated host context');
   for (const required of [
+    '--expand-environment=no',
     '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
     '--property=KillMode=control-group', '--property=RuntimeMaxSec=25min',
     '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
@@ -679,6 +680,43 @@ const assertManagedDelegation = (ci: string) => {
 
 test('ManagedTree delegation uses a systemd-owned driver leaf and an empty parent', async () => {
   assertManagedDelegation(await workflow('ci'));
+});
+
+test('ManagedTree launch leaves shell expressions for Bash expansion', { skip: process.platform === 'win32' ? 'Linux harness requires POSIX Bash' : false }, async () => {
+  const ci = await workflow('ci');
+  assertManagedDelegation(ci);
+  for (const replacement of ['', '--expand-environment=yes']) {
+    const broken = ci.replace('--expand-environment=no', replacement);
+    assert.notEqual(broken, ci);
+    assert.throws(() => assertManagedDelegation(broken));
+  }
+  const setup = step(job(ci, 'linux-managed-tree'), 'Require native ManagedTree execution in a delegated host context');
+  const start = setup.indexOf('sudo -n systemd-run');
+  const end = setup.indexOf("' 2>&1", start);
+  assert(start >= 0 && end > start);
+  const launch = setup.slice(start, end + 1);
+  // Controlled argument transport, not native systemd evidence. Inspect the
+  // actual command argument before Bash evaluates the trusted probe.
+  const stub = `sudo() {
+    test "$1" = -n; shift
+    test "$1" = systemd-run; shift
+    expansion=false
+    while test "$1" != /bin/bash; do
+      if test "$1" = --expand-environment=no; then expansion=true; fi
+      shift
+    done
+    "$expansion"
+    program="\${5}"
+    [[ "$program" = *'$$'* && "$program" = *'$BASHPID'* && "$program" = *'\${probe_path##*/}'* && "$program" = *'$(systemctl '* ]]
+    "$@"
+  }\n`;
+  // macOS ships Bash 3 without BASHPID; its literal in the native program is
+  // checked above, while the controlled probe can execute on either version.
+  const probe = 'printf "pid=%s bashpid=%s leaf=%s substitution=%s\\n" "$$" "${BASHPID:-$$}" "${probe_path##*/}" "$(printf intact)"; exit 0';
+  const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', stub + launch.replace('uname -a', () => probe)], {
+    env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: tmpdir(), RUSTFLAGS: '', node_bin: process.execPath, target_dir: tmpdir(), probe_path: '/owned/driver' },
+  });
+  assert.match(result.stdout, /^pid=(\d+) bashpid=\1 leaf=driver substitution=intact\n$/);
 });
 
 test('ManagedTree delegation rejects missing prerequisites and driver-parent confusion', async () => {

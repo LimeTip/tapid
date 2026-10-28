@@ -55,7 +55,7 @@ jobs:
           fi
           # systemd places the driver in a leaf before exec. The delegation
           # parent remains empty so memory/pids can serve execution siblings.
-          sudo -n systemd-run --wait --pipe --collect \
+          sudo -n systemd-run --wait --pipe --collect --expand-environment=no \
             --unit="tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --property=Delegate=yes --property=DelegateSubgroup=driver \
             --property=KillMode=control-group --property=RuntimeMaxSec=25min \

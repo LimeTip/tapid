@@ -130,6 +130,9 @@ supplied Node 22. It requires `TAPID_REQUIRE_MANAGED_ASSERTIONS=1` and
 `TAPID_REQUIRE_NODE_ASSERTIONS=1`; unavailable prerequisites fail the job.
 A transient systemd unit owns the delegation and uses systemd 254 or newer's
 `DelegateSubgroup=driver` to place its trusted driver in a leaf before execution.
+The launch disables systemd argument environment expansion with
+`--expand-environment=no`, leaving the complete program's PID, parameter and
+command substitutions for Bash to evaluate in the driver.
 The harness logs raw unified membership and unit identity before validation,
 corroborates the systemd-reported delegation parent with the driver path, and
 rejects malformed paths or membership mismatches before controller writes. It
