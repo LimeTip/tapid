@@ -3,12 +3,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { mkdtemp, writeFile, rm, copyFile, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, copyFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checksumLines, releaseRecord } from './release.ts';
-import { renderInstallers, templatesForCommit } from './bootstrap.ts';
-import { candidateFingerprint, selectCandidate, attestCandidate, attestUnsignedCandidate, validateUnsignedCandidate, unwrapCandidate, createDraftCandidate, downloadCandidate, publishCandidate, validateReleaseIntent, type ReleaseAdapter, type ReleaseState } from './candidate.ts';
+import { renderInstallers, templatesForCommit, type InstallerTemplates } from './bootstrap.ts';
+import { candidateFingerprint, selectCandidate, attestCandidate, attestUnsignedCandidate, validateUnsignedCandidate, validateCandidate, unwrapCandidate, createDraftCandidate, downloadCandidate, publishCandidate, validateReleaseIntent, type ReleaseAdapter, type ReleaseState } from './candidate.ts';
 
 const commit = 'a'.repeat(40), object = 'b'.repeat(40);
 const tag = 'v0.0.12', repository = 'LimeTip/tapid';
@@ -26,13 +26,13 @@ function adapter(release: ReleaseState | null = null) {
   };
   return {api,patches,setRelease(value: ReleaseState) {release=value;}};
 }
-async function fixture() {
+async function fixture(templates?:InstallerTemplates) {
   const directory = await mkdtemp(join(tmpdir(),'tapid-candidate-'));
   for (const target of targets) await writeFile(join(directory,`tapid-0.0.12-${target}.tar.gz`),target);
   await writeFile(join(directory,'SHA256SUMS'), await checksumLines(directory,'0.0.12'));
   await writeFile(join(directory,'tapid-release-v1.tsv'), await releaseRecord(directory,'0.0.12',`https://github.com/${repository}/releases/download/${tag}`));
   await writeFile(join(directory,'tapid-release-v1.tsv.sig'),'signed metadata checked by native verification');
-  await renderInstallers(directory,'0.0.12',`https://github.com/${repository}/releases/download/${tag}`);
+  await renderInstallers(directory,'0.0.12',`https://github.com/${repository}/releases/download/${tag}`,templates);
   const names = [...targets.map(t=>`tapid-0.0.12-${t}.tar.gz`),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1'].sort();
   const assets = await Promise.all(names.map(async(name,index)=>({id:index+1,name,size:(await readFile(join(directory,name))).length})));
   const release: ReleaseState = {id:123,tag_name:tag,name:tag,body:'Reviewed notes\n',draft:true,prerelease:false,immutable:false,assets};
@@ -199,3 +199,72 @@ test('CLI unsigned output roundtrips as verified envelope and refuses forged fin
     await assert.rejects(()=>execFileAsync(process.execPath,['--experimental-strip-types',cli,'validate-unsigned',f.directory,f.notes,f.plan,manifest],{env:{...process.env,GITHUB_REPOSITORY:repository}}));
   }finally{await f.cleanup();await rm(manifest,{force:true});}
 });
+
+const stableTemplates:InstallerTemplates={
+  'install.sh':'# shell\n@TAPID_BOOTSTRAP_VERSION@\n@TAPID_BOOTSTRAP_BASE_URL@\n# @TAPID_BOOTSTRAP_PINS@\n',
+  'install.ps1':'# powershell\n@TAPID_BOOTSTRAP_VERSION@\n@TAPID_BOOTSTRAP_BASE_URL@\n# @TAPID_BOOTSTRAP_PINS@\n',
+};
+const baseUrl=`https://github.com/${repository}/releases/download/${tag}`;
+async function attestFixture(f:Awaited<ReturnType<typeof fixture>>,signed:boolean,templates?:InstallerTemplates) {
+  return signed
+    ? attestCandidate(adapter(f.release).api,f.directory,f.notes,f.plan,tag,commit,123,templates)
+    : attestUnsignedCandidate(f.directory,f.notes,f.plan,repository,tag,commit,object,templates);
+}
+test('stable candidate evidence preserves schemas, fingerprints and signature binding',async()=>{
+  const f=await fixture(stableTemplates);try{
+    const unsigned=await attestFixture(f,false,stableTemplates),signed=await attestFixture(f,true,stableTemplates);
+    assert.equal(candidateFingerprint(unsigned),'8c6282c9210c970e0ce68d1ab54b4cac1d52835920dd7a9ee426d5de05ef3fe0');
+    assert.equal(candidateFingerprint(signed),'6ba7ef2543eba7ae29e8d2c0f859d10e5fb85372139334aa17209d6583bd3517');
+    assert.deepEqual(unsigned.assets,signed.assets.filter(a=>!a.name.endsWith('.sig')).map(({id,...a})=>a));
+    assert.deepEqual({...signed,schema:unsigned.schema,assets:unsigned.assets,release_id:undefined},{...unsigned,release_id:undefined});
+    assert.equal(unsigned.assets.length,10);assert.equal(signed.assets.length,11);
+    assert.throws(()=>validateCandidate({...signed,release_id:0}),/invalid numeric/);
+    assert.throws(()=>validateCandidate({...signed,assets:signed.assets.map(a=>({...a,id:0}))}),/invalid numeric/);
+    assert.throws(()=>validateCandidate({...signed,assets:signed.assets.filter(a=>!a.name.endsWith('.sig'))}),/asset set/);
+    assert.throws(()=>validateUnsignedCandidate({...unsigned,release_id:123}),/unexpected release fields/);
+    assert.throws(()=>validateUnsignedCandidate({...unsigned,assets:unsigned.assets.map(a=>({...a,id:1}))}),/unexpected release fields/);
+    assert.throws(()=>validateUnsignedCandidate({...unsigned,assets:[...unsigned.assets,{name:'tapid-release-v1.tsv.sig',size:1,sha256:'0'.repeat(64)}]}),/asset set/);
+    const signature=join(f.directory,'tapid-release-v1.tsv.sig');
+    const bytes=await readFile(signature);bytes[0]^=1;await writeFile(signature,bytes);
+    assert.deepEqual(await attestFixture(f,false,stableTemplates),unsigned);
+    const changed=await attestFixture(f,true,stableTemplates);
+    assert.notEqual(candidateFingerprint(changed),candidateFingerprint(signed));
+    assert.notDeepEqual(changed.assets.find(a=>a.name.endsWith('.sig')),signed.assets.find(a=>a.name.endsWith('.sig')));
+  }finally{await f.cleanup();}
+});
+for(const signed of [false,true]) for(const mutation of ['archive','checksum','record','install.sh','install.ps1','archive-checksums','archive-record'] as const) {
+  test(`${signed?'signed':'unsigned'} consistency rejects ${mutation}`,async()=>{
+    const f=await fixture(stableTemplates);try{
+      const name=mutation.startsWith('archive') ? `tapid-0.0.12-${targets[0]}.tar.gz` : mutation==='checksum' ? 'SHA256SUMS' : mutation==='record' ? 'tapid-release-v1.tsv' : mutation;
+      const path=join(f.directory,name),bytes=await readFile(path);bytes[0]^=1;await writeFile(path,bytes);
+      if(mutation==='archive-checksums'||mutation==='archive-record') await writeFile(join(f.directory,'SHA256SUMS'),await checksumLines(f.directory,'0.0.12'));
+      if(mutation==='archive-record') await writeFile(join(f.directory,'tapid-release-v1.tsv'),await releaseRecord(f.directory,'0.0.12',baseUrl));
+      // Regenerated metadata must not be masked by provider size checks.
+      f.release.assets=await Promise.all(f.release.assets.map(async a=>({...a,size:(await readFile(join(f.directory,a.name))).length})));
+      const expected=mutation==='archive'||mutation==='checksum' ? /archive checksum mismatch/ : mutation==='record'||mutation==='archive-checksums' ? /release record mismatch/ : /generated installer mismatch/;
+      await assert.rejects(()=>attestFixture(f,signed,stableTemplates),expected);
+    }finally{await f.cleanup();}
+  });
+}
+for(const signed of [false,true]) for(const outcome of ['success','mismatch','render-failure']) {
+  test(`${signed?'signed':'unsigned'} installer cleanup after ${outcome}`,async()=>{
+    const f=await fixture(stableTemplates),root=await mkdtemp(join(tmpdir(),'tapid-cleanup-'));try{
+      if(outcome==='mismatch') {
+        const path=join(f.directory,'install.sh'),bytes=await readFile(path);bytes[0]^=1;await writeFile(path,bytes);
+      }
+      const templates=outcome==='render-failure' ? {...stableTemplates,'install.sh':'missing bootstrap markers'} : stableTemplates;
+      const candidateUrl=new URL('./candidate.ts',import.meta.url).href;
+      const args=JSON.stringify([f.directory,f.notes,f.plan,...(signed ? [tag,commit,123] : [repository,tag,commit,object]),templates]);
+      const script=`
+        import {strict as assert} from 'node:assert';
+        import {attestCandidate,attestUnsignedCandidate} from ${JSON.stringify(candidateUrl)};
+        const release=${JSON.stringify(f.release)},object=${JSON.stringify(object)},commit=${JSON.stringify(commit)},repository=${JSON.stringify(repository)};
+        const api={repository,tag:async()=>({object,commit}),isOnMain:async()=>true,releases:async()=>[release],release:async()=>release};
+        const run=()=>${signed ? 'attestCandidate(api,...' : 'attestUnsignedCandidate(...'}${args});
+        ${outcome==='success' ? 'await run();' : 'await assert.rejects(run,/'+(outcome==='mismatch' ? 'generated installer mismatch' : 'installer must contain exactly one bootstrap marker')+'/);'}
+      `;
+      await execFileAsync(process.execPath,['--experimental-strip-types','--input-type=module','-e',script],{env:{...process.env,TMPDIR:root,TMP:root,TEMP:root}});
+      assert.deepEqual(await readdir(root),[],'regeneration directory must be removed');
+    }finally{await f.cleanup();await rm(root,{recursive:true,force:true});}
+  });
+}
