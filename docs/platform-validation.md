@@ -293,6 +293,15 @@ isolated Rust local-server fixture with host-positive activation, native paired
 observations, and response/input binding remains required before identity work
 can claim closure. No native results for this additional probe exist yet.
 
+The capability comparison's host-positive helper has a ten-second native process
+wait. Timeout terminates the helper and requires termination observation within
+five seconds before returning failure. File-backed stdout/stderr avoid waiting
+for EOF on handles retained by an activated server; each returned stream is
+limited to 16 KiB. This is test supervision of a trusted Rust fixture, not a
+tree-containment guarantee or a live output/disk quota. The nonignored
+`host_authority_probe_timeout_terminates_and_reaps_helper` control exercises the
+stalled-helper path. Native Windows execution of that control remains required.
+
 ## Private Windows dependency write and key validation
 
 The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).

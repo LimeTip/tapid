@@ -2,8 +2,85 @@ use super::*;
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Security::TokenCapabilities;
 
+// File-backed capture avoids waiting for pipe EOF if a COM server retains a
+// standard handle. This host control launches only the isolated Rust helper;
+// it is not an execution boundary for untrusted code.
+fn bounded_host_output(
+    command: &mut std::process::Command,
+    timeout_ms: u32,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::os::windows::io::AsRawHandle;
+    let capture = tapid_test_support::TempProject::new("host-authority-capture")?;
+    let stdout_path = capture.path().join("stdout");
+    let stderr_path = capture.path().join("stderr");
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&stdout_path)?)
+        .stderr(std::fs::File::create(&stderr_path)?);
+    let mut child = command.spawn()?;
+    // SAFETY: Child owns the live process handle throughout both waits.
+    let waited = unsafe { WaitForSingleObject(child.as_raw_handle() as _, timeout_ms) };
+    if waited != WAIT_OBJECT_0 {
+        child.kill()?;
+        let reaped = unsafe { WaitForSingleObject(child.as_raw_handle() as _, 5_000) };
+        if reaped != WAIT_OBJECT_0 {
+            return Err(std::io::Error::other(
+                "host probe termination was not observed",
+            ));
+        }
+        child.wait()?;
+        return Err(std::io::Error::new(
+            if waited == WAIT_TIMEOUT {
+                std::io::ErrorKind::TimedOut
+            } else {
+                std::io::ErrorKind::Other
+            },
+            "host authority probe did not complete within its bounded wait",
+        ));
+    }
+    let status = child.wait()?;
+    let read = |path: &std::path::Path| -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(16_385)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 16_384 {
+            return Err(std::io::Error::other(
+                "host authority probe output exceeded limit",
+            ));
+        }
+        Ok(bytes)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: read(&stdout_path)?,
+        stderr: read(&stderr_path)?,
+    })
+}
+
+#[test]
+fn host_authority_probe_timeout_terminates_and_reaps_helper() {
+    let helper = format!(
+        "{}::provider_helper",
+        module_path!().split_once("::").unwrap().1
+    );
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", &helper])
+        .env("TAPID_TEST_MARKER", "provider-stalled");
+    let started = std::time::Instant::now();
+    let error = bounded_host_output(&mut command, 50).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
 #[test]
 fn provider_helper() {
+    if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("provider-stalled") {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        panic!("stalled helper must be terminated");
+    }
     super::registry_probe::probe();
     super::provider_probe::probe(&std::env::var("TAPID_TEST_MARKER").unwrap_or_default());
     if let Ok(marker) = std::env::var("TAPID_TEST_MARKER") {
@@ -25,14 +102,14 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     let mut registry =
         super::registry_probe::RegistryInput::new(root.file_name().unwrap().to_str().unwrap());
     let system_root = std::env::var_os("SystemRoot").unwrap();
-    let host = std::process::Command::new(&program)
+    let mut host_command = std::process::Command::new(&program);
+    host_command
         .args(arguments)
         .env_clear()
         .env("SystemRoot", &system_root)
         .env("TAPID_TEST_REGISTRY", &registry.path)
-        .env("TAPID_TEST_MARKER", "provider-host")
-        .output()
-        .unwrap();
+        .env("TAPID_TEST_MARKER", "provider-host");
+    let host = bounded_host_output(&mut host_command, 10_000).unwrap();
     assert!(
         host.status.success(),
         "{}",
