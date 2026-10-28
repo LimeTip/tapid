@@ -51,7 +51,7 @@ pub(crate) fn hydrate_locked(
     config: &crate::registry::RegistryConfig,
     fixture_path: Option<&Path>,
     project: &Path,
-) -> Result<Option<StoreTransaction>, OperationalError> {
+) -> Result<(Option<StoreTransaction>, ArtifactEvidence), OperationalError> {
     let mut transports = BTreeMap::new();
     let allowed_origins = config.configured_origins();
     // Load fixtures only if an archive is actually missing.
@@ -61,7 +61,7 @@ pub(crate) fn hydrate_locked(
             return copied::fetch_pinned(project, source, fixture_path);
         }
         let registry = key.source.registry().ok_or("expected registry identity")?;
-        if let Some(path) = fixture_path {
+        let bytes = if let Some(path) = fixture_path {
             if fixture_packages.is_none() {
                 fixture_packages = Some(fixture(path)?.packages);
             }
@@ -102,17 +102,26 @@ pub(crate) fn hydrate_locked(
                     OperationalError::from_source(ErrorKind::RegistryTransport, error)
                 })?;
             Ok(response.body)
-        }
+        }?;
+        Ok(AcquiredArchive {
+            bytes,
+            source: if fixture_path.is_some() {
+                AcquisitionSource::Local
+            } else {
+                AcquisitionSource::Network
+            },
+        })
     })
 }
 
 fn hydrate_with_fetch(
     lock: &Lockfile,
     store: &Store,
-    mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
-) -> Result<Option<StoreTransaction>, OperationalError> {
+    mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<AcquiredArchive, OperationalError>,
+) -> Result<(Option<StoreTransaction>, ArtifactEvidence), OperationalError> {
     let mut transaction = store.transaction();
     let mut staged = BTreeSet::new();
+    let mut evidence = ArtifactEvidence::default();
     for (key, package) in lock.packages_typed()? {
         let digest: ArtifactDigest = package
             .tree_digest()
@@ -151,7 +160,8 @@ fn hydrate_with_fetch(
                 "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
             )
         })?;
-        let bytes = fetch(&key, url)?;
+        let archive = fetch(&key, url)?;
+        let bytes = archive.bytes;
         let expected: PackageIntegrity = package
             .artifact_integrity()
             .parse()
@@ -209,8 +219,9 @@ fn hydrate_with_fetch(
                 .stage_verified_tree(&digest, &temp)
                 .map_err(OperationalError::from)?;
         }
+        evidence.acquired(&super::digest(&bytes), &digest, archive.source);
     }
-    Ok((!staged.is_empty()).then_some(transaction))
+    Ok(((!staged.is_empty()).then_some(transaction), evidence))
 }
 
 pub(super) fn locked_records(
@@ -297,66 +308,82 @@ mod tests {
 
     #[test]
     fn hydration_fetches_a_shared_tree_once_across_locked_contexts() {
-        let project = tapid_test_support::TempProject::new("hydrate-shared-contexts").unwrap();
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/npm-import/registry.json"
-        ))
-        .unwrap();
-        let artifact = fixture["packages"][0]["artifact"].as_str().unwrap();
-        let bytes = STANDARD
-            .decode(artifact.strip_prefix("base64:").unwrap())
+        for acquisition_source in [AcquisitionSource::Local, AcquisitionSource::Network] {
+            let project = tapid_test_support::TempProject::new("hydrate-shared-contexts").unwrap();
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../tests/fixtures/npm-import/registry.json"
+            ))
             .unwrap();
-        let source = project.path().join("source");
-        extract_to(
-            &bytes,
-            ArchiveFormat::TarGz,
-            &source,
-            ArchiveLimits::default(),
-        )
-        .unwrap();
-        let digest: ArtifactDigest = canonical_tree_digest(&source).unwrap().parse().unwrap();
-        let store = Store::new(project.path().join("store"));
-        let mut lock = Lockfile::new(digest.as_str()).unwrap();
-        let empty = tapid_core::PeerContext::default();
-        let bound = empty
-            .clone()
-            .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
-        for peer in [&empty, &bound] {
-            let mut package = LockedPackage::new_with_context_and_provenance(
-                NPM,
-                "parent",
-                "1.0.0",
-                &integrity(&bytes).to_string(),
-                digest.as_str(),
-                (
-                    peer,
-                    &tapid_core::PlatformContext::new(None, None, None).unwrap(),
-                ),
-                RegistryIntegrityProvenance::RegistryDeclared,
+            let artifact = fixture["packages"][0]["artifact"].as_str().unwrap();
+            let bytes = STANDARD
+                .decode(artifact.strip_prefix("base64:").unwrap())
+                .unwrap();
+            let source = project.path().join("source");
+            extract_to(
+                &bytes,
+                ArchiveFormat::TarGz,
+                &source,
+                ArchiveLimits::default(),
             )
             .unwrap();
-            package
-                .set_artifact_url("https://registry.npmjs.org/parent/-/parent-1.0.0.tgz")
+            let digest: ArtifactDigest = canonical_tree_digest(&source).unwrap().parse().unwrap();
+            let store = Store::new(project.path().join("store"));
+            let mut lock = Lockfile::new(digest.as_str()).unwrap();
+            let empty = tapid_core::PeerContext::default();
+            let bound = empty
+                .clone()
+                .with("react".parse().unwrap(), "18.2.0".parse().unwrap());
+            for peer in [&empty, &bound] {
+                let mut package = LockedPackage::new_with_context_and_provenance(
+                    NPM,
+                    "parent",
+                    "1.0.0",
+                    &integrity(&bytes).to_string(),
+                    digest.as_str(),
+                    (
+                        peer,
+                        &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+                    ),
+                    RegistryIntegrityProvenance::RegistryDeclared,
+                )
                 .unwrap();
-            lock.insert_package(package).unwrap();
-        }
-        let mut fetches = 0;
-        let transaction = hydrate_with_fetch(&lock, &store, |_, _| {
-            fetches += 1;
-            if fetches > 1 {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryTransport,
-                    "redundant request rate limited",
-                ));
+                package
+                    .set_artifact_url("https://registry.npmjs.org/parent/-/parent-1.0.0.tgz")
+                    .unwrap();
+                lock.insert_package(package).unwrap();
             }
-            Ok(bytes.clone())
-        })
-        .unwrap()
-        .expect("the missing tree must be staged");
-        assert_eq!(fetches, 1);
-        assert!(store.verified_tree_path(&digest).is_err());
-        transaction.publish().unwrap().commit().unwrap();
-        assert!(store.verified_tree_path(&digest).is_ok());
+            let mut fetches = 0;
+            let transaction = hydrate_with_fetch(&lock, &store, |_, _| {
+                fetches += 1;
+                if fetches > 1 {
+                    return Err(OperationalError::new(
+                        ErrorKind::RegistryTransport,
+                        "redundant request rate limited",
+                    ));
+                }
+                Ok(AcquiredArchive {
+                    bytes: bytes.clone(),
+                    source: acquisition_source,
+                })
+            })
+            .unwrap();
+            let (transaction, evidence) = transaction;
+            let counts = serde_json::to_value(evidence.finish(Some(Default::default()))).unwrap();
+            let (local, network) = match acquisition_source {
+                AcquisitionSource::Local => (1, 0),
+                AcquisitionSource::Network => (0, 1),
+            };
+            assert_eq!(
+                counts,
+                serde_json::json!({"availability":"available", "cached_trees_reused":0, "local_artifacts_verified":local, "downloaded_artifacts_verified":network})
+            );
+            let transaction = transaction.expect("the missing tree must be staged");
+
+            assert_eq!(fetches, 1);
+            assert!(store.verified_tree_path(&digest).is_err());
+            transaction.publish().unwrap().commit().unwrap();
+            assert!(store.verified_tree_path(&digest).is_ok());
+        }
     }
 
     #[test]
@@ -438,6 +465,7 @@ pub(crate) fn validate_locked_artifact_sources(
 
 type LockedInstallOutput = Result<PreparedLockedInstall, OperationalError>;
 pub(crate) struct PreparedLockedInstall {
+    pub artifact_evidence: ArtifactEvidence,
     pub layout: PreparedLayout,
     pub transaction: StoreTransaction,
     pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
@@ -455,6 +483,7 @@ pub(crate) fn prepare_locked_install(
     store.cleanup_stale_replay_snapshots().map_err(|error| {
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
+    let mut artifact_evidence = ArtifactEvidence::default();
     let mut transaction = store.transaction();
     let mut snapshots = Vec::new();
     let mut fixtures = None;
@@ -475,6 +504,7 @@ pub(crate) fn prepare_locked_install(
                     })?;
             match store.verified_tree_snapshot(&tree_digest) {
                 Ok(snapshot) => {
+                    artifact_evidence.cached(&tree_digest);
                     let path = snapshot.path().to_owned();
                     snapshots.push(snapshot);
                     return Ok(path);
@@ -488,8 +518,16 @@ pub(crate) fn prepare_locked_install(
                 .copied()
                 .map(|source| copied::fetch_pinned(project, source, registry_fixture))
                 .transpose()?;
-            let bytes = if let Some(bytes) = copied_bytes {
-                bytes
+            let source = copied_bytes.as_ref().map_or(
+                if registry_fixture.is_some() {
+                    AcquisitionSource::Local
+                } else {
+                    AcquisitionSource::Network
+                },
+                |archive| archive.source,
+            );
+            let bytes = if let Some(archive) = copied_bytes {
+                archive.bytes
             } else {
                 let registry = registry.ok_or_else(|| {
                     OperationalError::new(
@@ -591,12 +629,15 @@ pub(crate) fn prepare_locked_install(
                 ArchiveLimits::default(),
             )
             .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
-            transaction
+            let path = transaction
                 .stage_verified_tree(&tree_digest, &temporary.0)
-                .map_err(OperationalError::from)
+                .map_err(OperationalError::from)?;
+            artifact_evidence.acquired(&digest(&bytes), &tree_digest, source);
+            Ok(path)
         },
     )?;
     Ok(PreparedLockedInstall {
+        artifact_evidence,
         layout: PreparedLayout {
             input,
             trees,
@@ -645,6 +686,7 @@ mod ci_tests {
             lock.insert_package(package).unwrap();
             lock.set_roots([package_key]).unwrap();
             let PreparedLockedInstall {
+                artifact_evidence: _,
                 layout: PreparedLayout { input, trees, .. },
                 transaction,
                 snapshots,

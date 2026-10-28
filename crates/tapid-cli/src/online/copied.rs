@@ -137,23 +137,27 @@ pub(super) fn archive_format(source: &PackageSource, bytes: &[u8]) -> ArchiveFor
     }
 }
 
-fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, OperationalError> {
-    if source.artifact_digest() != Some(digest(&bytes).as_str()) {
+fn record(
+    source: PackageSource,
+    archive: AcquiredArchive,
+) -> Result<PackageRecord, OperationalError> {
+    let bytes = &archive.bytes;
+    if source.artifact_digest() != Some(digest(bytes).as_str()) {
         return Err(
             OperationalError::new(ErrorKind::Integrity, "copied artifact digest mismatch")
                 .with_diagnostic(DiagnosticContext::comparison(
                     "artifact_digest",
                     Some("sha256"),
                     source.artifact_digest().unwrap_or("missing"),
-                    digest(&bytes),
+                    digest(bytes),
                 )),
         );
     }
     let staging = scratch()?;
     let tree = staging.0.join("tree");
     extract_to(
-        &bytes,
-        archive_format(&source, &bytes),
+        bytes,
+        archive_format(&source, bytes),
         &tree,
         ArchiveLimits::default(),
     )
@@ -203,7 +207,7 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
         name: manifest.name().clone(),
         version: manifest.version().clone(),
         dist_tags: BTreeSet::new(),
-        integrity: Some(integrity(&bytes)),
+        integrity: Some(integrity(bytes)),
         artifact: String::new(),
         dependencies: manifest.dependencies().clone(),
         peer_dependencies: manifest.peer_dependencies().clone(),
@@ -215,7 +219,7 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
             libc: platform_list("libc")?,
         },
         fixture: false,
-        copied_archive: Some(std::sync::Arc::new(bytes)),
+        copied_archive: Some(std::sync::Arc::new(archive)),
     })
 }
 
@@ -265,7 +269,13 @@ pub(super) fn prepare_roots(
                 let bytes = file_bytes(project, &path)?;
                 let source = PackageSource::file(&path, digest(&bytes))
                     .map_err(|error| error.to_string())?;
-                record(source, bytes)?
+                record(
+                    source,
+                    AcquiredArchive {
+                        bytes,
+                        source: AcquisitionSource::Local,
+                    },
+                )?
             }
             CopiedDeclaration::Git(spec) => {
                 let pinned = pinned.filter(|source| matches_source(raw, source).unwrap_or(false));
@@ -296,7 +306,13 @@ pub(super) fn prepare_roots(
                     let bytes = STANDARD
                         .decode(encoded)
                         .map_err(|_| "invalid Git fixture archive encoding")?;
-                    record(fixture.registry.clone(), bytes)?
+                    record(
+                        fixture.registry.clone(),
+                        AcquiredArchive {
+                            bytes,
+                            source: AcquisitionSource::Local,
+                        },
+                    )?
                 } else {
                     if using_fixture {
                         return Err("Git fixture has no matching pinned artifact".into());
@@ -316,7 +332,13 @@ pub(super) fn prepare_roots(
                     if pinned.as_ref().is_some_and(|pin| pin != &source) {
                         return Err("pinned Git artifact digest mismatch".into());
                     }
-                    record(source, bytes)?
+                    record(
+                        source,
+                        AcquiredArchive {
+                            bytes,
+                            source: AcquisitionSource::Network,
+                        },
+                    )?
                 }
             }
         };
@@ -385,7 +407,7 @@ pub(super) fn fetch_pinned(
     project: &Path,
     source: &PackageSource,
     fixture_path: Option<&Path>,
-) -> Result<Vec<u8>, OperationalError> {
+) -> Result<AcquiredArchive, OperationalError> {
     let bytes = if let Some((path, _)) = source.file_parts() {
         file_bytes(project, path)?
     } else if let Some((repository, commit, _)) = source.git_parts() {
@@ -415,7 +437,10 @@ pub(super) fn fetch_pinned(
                     digest(&bytes),
                 )));
             }
-            return Ok(bytes);
+            return Ok(AcquiredArchive {
+                bytes,
+                source: AcquisitionSource::Local,
+            });
         }
         let staging = scratch()?;
         let spec = GitDependency::parse(&format!("git+{repository}#{commit}"))?;
@@ -438,7 +463,14 @@ pub(super) fn fetch_pinned(
                 )),
         );
     }
-    Ok(bytes)
+    Ok(AcquiredArchive {
+        bytes,
+        source: if source.file_parts().is_some() {
+            AcquisitionSource::Local
+        } else {
+            AcquisitionSource::Network
+        },
+    })
 }
 
 pub(crate) fn validate_copied_root_binding(

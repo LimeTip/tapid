@@ -6,6 +6,8 @@ use std::process::ExitCode;
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
+    result["data"]["artifact_statistics"] =
+        serde_json::to_value(&report.artifact_statistics).expect("artifact statistics");
     if !report.candidate_exclusions.is_empty() {
         result["data"]["candidate_exclusions"] =
             serde_json::to_value(&report.candidate_exclusions).expect("bounded exclusions");

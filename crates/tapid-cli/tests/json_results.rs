@@ -538,6 +538,14 @@ fn json_install_success_and_handled_failure() {
     assert_eq!(result["operation"], "install");
     assert_eq!(result["outcome"], "success");
     assert_eq!(result["data"]["package_count"], 0);
+    assert_eq!(
+        result["data"]["artifact_statistics"],
+        serde_json::json!({
+            "availability":"available", "cached_trees_reused":0,
+            "downloaded_artifacts_verified":0, "local_artifacts_verified":0
+        })
+    );
+
     assert_eq!(result["changes"]["state"], "committed");
     assert_eq!(result["project_path"]["encoding"], "utf8");
     assert_eq!(
@@ -1321,6 +1329,17 @@ fn candidate_exclusions_survive_install_preview_and_replay() {
         }
         let (output, result) = invoke(&project, &args);
         assert!(output.status.success(), "{result}");
+        if preview {
+            assert!(
+                result["data"].get("artifact_statistics").is_none(),
+                "{result}"
+            );
+        } else {
+            assert_eq!(
+                result["data"]["artifact_statistics"]["local_artifacts_verified"],
+                1
+            );
+        }
         let evidence = &result["data"]["candidate_exclusions"];
         assert_eq!(evidence["total_candidates"], 12, "{result}");
         assert_eq!(evidence["omitted_candidates"], 4);

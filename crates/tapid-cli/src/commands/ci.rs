@@ -19,6 +19,7 @@ pub(crate) struct Args {
 
 /// Replay native locked selections and suppress all progress when returning JSON.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+    let mut reporter = crate::output::install::Reporter::new(json);
     let result = crate::application::install::run(
         crate::application::install::InstallRequest {
             project_dir: &args.project_dir,
@@ -33,12 +34,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             registry_fixture: args.registry_fixture.as_deref(),
             allow_unverified_registry_artifacts: false,
         },
-        |event| match event {
-            crate::application::install::Progress::Replay(completed, total) if !json => {
-                eprintln!("Locked install progress: {completed}/{total}")
-            }
-            event => crate::output::report_progress(event, json),
-        },
+        |event| reporter.progress(event),
     );
     match result {
         Ok(report) => {
@@ -50,6 +46,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 "Installed from lockfile: {} package(s)",
                 report.package_count
             );
+            println!("{}", report.artifact_statistics);
             ExitCode::SUCCESS
         }
         Err(error) => crate::output::json::failure_or_human(&error, "ci", json),

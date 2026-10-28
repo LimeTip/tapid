@@ -1,3 +1,6 @@
+use crate::application::artifact_statistics::{
+    AcquiredArchive, AcquisitionSource, ArtifactEvidence,
+};
 mod artifact;
 mod copied;
 mod graph;
@@ -76,6 +79,7 @@ static NEXT_TEMP_TREE_ID: AtomicU64 = AtomicU64::new(0);
 type ResolveAndFetchOutput = Result<PreparedInstall, OperationalError>;
 
 pub(crate) struct PreparedInstall {
+    pub artifact_evidence: crate::application::artifact_statistics::ArtifactEvidence,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub lock: Lockfile,
     pub layout: PreparedLayout,
@@ -181,7 +185,7 @@ struct Fixture {
 #[derive(Clone)]
 struct PackageRecord {
     git_reference: Option<String>,
-    copied_archive: Option<std::sync::Arc<Vec<u8>>>,
+    copied_archive: Option<std::sync::Arc<AcquiredArchive>>,
     dist_tags: BTreeSet<String>,
     registry: PackageSource,
     name: PackageName,
@@ -963,6 +967,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         config: registry_config,
         transports: BTreeMap::new(),
         allowed_origins: configured_origins,
+        evidence: Default::default(),
     };
     let pinned_packages = previous_lock
         .map(locked::reusable_locked_packages)
@@ -1314,6 +1319,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
         });
     }
     Ok(PreparedInstall {
+        artifact_evidence: artifact_fetcher.evidence,
         candidate_exclusions,
         lock,
         layout: PreparedLayout {

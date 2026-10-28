@@ -228,6 +228,228 @@ fn install_output_summarizes_changes_and_replay() {
 }
 
 #[test]
+fn install_output_reports_artifact_statistics() {
+    let project = tapid_test_support::TempProject::new("install-artifacts").unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"output","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    for (selections, artifacts) in [
+        (
+            "1 added, 0 changed, 0 reused, 0 removed",
+            "0 cached trees reused; 0 downloaded archives verified; 1 local archive verified",
+        ),
+        (
+            "0 added, 0 changed, 1 reused, 0 removed",
+            "1 cached tree reused; 0 downloaded archives verified; 0 local archives verified",
+        ),
+    ] {
+        let output = run(
+            project.path(),
+            &["install", "--registry-fixture", "registry.json"],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("Lock selections: {selections}")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("Artifacts: {artifacts}.")),
+            "{stdout}"
+        );
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+}
+
+#[test]
+fn install_artifact_statistics_frozen_hydration_and_offline_replay() {
+    let project = tapid_test_support::TempProject::new("artifact-hydration").unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"output","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    assert!(
+        run(
+            project.path(),
+            &["install", "--registry-fixture", "registry.json"]
+        )
+        .status
+        .success()
+    );
+    let mut lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package["artifactUrl"] = serde_json::json!("https://registry.npmjs.org/h3/-/h3-1.0.0.tgz");
+    }
+    project
+        .write("tapid.lock", &serde_json::to_vec(&lock).unwrap())
+        .unwrap();
+    let store = project.path().join("cold-store");
+    for (flags, expected) in [
+        (
+            vec!["--frozen", "--registry-fixture", "registry.json"],
+            (0, 1),
+        ),
+        (vec!["--offline", "--frozen"], (1, 0)),
+    ] {
+        let mut args = vec!["--json", "install", "--store-dir", store.to_str().unwrap()];
+        args.extend(flags);
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{output:?}; human: {:?}",
+            run(project.path(), &args[1..])
+        );
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            value["data"]["artifact_statistics"],
+            serde_json::json!({
+                "availability": "available", "cached_trees_reused": expected.0,
+                "downloaded_artifacts_verified": 0, "local_artifacts_verified": expected.1
+            })
+        );
+    }
+}
+
+#[test]
+fn install_artifact_statistics_mixed_unavailable_and_corrupt_store() {
+    let project = tapid_test_support::TempProject::new("artifact-mixed").unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    let args = [
+        "--json",
+        "install",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    assert!(run(project.path(), &args).status.success());
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0","other":"npm:h3@2.0.0"}}"#).unwrap();
+    let mut rejected: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    rejected["packages"][1]["integrity"] = format!("sha512-{}", STANDARD.encode([0u8; 64])).into();
+    project
+        .write("registry.json", &serde_json::to_vec(&rejected).unwrap())
+        .unwrap();
+    let output = run(project.path(), &args);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(failure["data"].is_null());
+    assert_eq!(failure["errors"][0]["code"], "INTEGRITY_MISMATCH");
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let output = run(project.path(), &args);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["data"]["package_count"], 2);
+    assert_eq!(
+        value["data"]["artifact_statistics"],
+        serde_json::json!({
+            "availability":"available", "cached_trees_reused":1,
+            "downloaded_artifacts_verified":0, "local_artifacts_verified":1
+        })
+    );
+    // A legacy store with trees but no lock cannot supply a safe baseline.
+    // Existing installation recovery still succeeds and establishes its lock.
+    fs::remove_file(store.join(".store.lock")).unwrap();
+    let output = run(project.path(), &args);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["data"]["artifact_statistics"],
+        serde_json::json!({
+            "availability":"unavailable", "reason":"initial_store_baseline_unavailable"
+        })
+    );
+    let tree = fs::read_dir(store.join("trees"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(tree.join("package/package.json"), b"corrupt").unwrap();
+    let output = run(
+        project.path(),
+        &[
+            "--json",
+            "install",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["outcome"], "failure");
+    assert!(value["data"].is_null());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("artifact_statistics"));
+}
+
+#[test]
+fn install_artifact_statistics_distinguishes_archives_with_the_same_tree() {
+    let project = tapid_test_support::TempProject::new("artifact-identities").unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    let mut archive = STANDARD
+        .decode(
+            fixture["packages"][0]["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    // Change only gzip mtime: different archive bytes, identical extracted tree.
+    archive[4] ^= 1;
+    project.write("vendor/pkg.tgz", &archive).unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"copied":"file:vendor/pkg.tgz","registry":"npm:h3@1.0.0"}}"#).unwrap();
+    for (cached, local) in [(0, 2), (1, 0)] {
+        let output = run(
+            project.path(),
+            &["install", "--json", "--registry-fixture", "registry.json"],
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["data"]["artifact_statistics"],
+            serde_json::json!({
+                "availability":"available", "cached_trees_reused":cached,
+                "downloaded_artifacts_verified":0, "local_artifacts_verified":local
+            })
+        );
+    }
+}
+
+#[test]
 fn install_output_counts_exact_lock_selections() {
     let project = tapid_test_support::TempProject::new("install-output-counts").unwrap();
     project
@@ -4579,6 +4801,10 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
         );
 
         assert!(!output.status.success(), "{failure} unexpectedly succeeded");
+        assert!(
+            output.stdout.is_empty(),
+            "failed work must not emit a success summary: {output:?}"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         if failure == "integrity" {
             assert!(output.stdout.is_empty());
@@ -8043,6 +8269,7 @@ fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay(
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Artifacts: 0 cached trees reused; 0 downloaded archives verified; 1 local archive verified."), "{output:?}");
     let locked = fs::read(dir.join("tapid.lock")).unwrap();
     let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
     assert_eq!(lock.packages().len(), 2);
@@ -8086,12 +8313,30 @@ fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay(
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Artifacts: 1 cached tree reused; 0 downloaded archives verified; 0 local archives verified."), "{output:?}");
         assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), locked);
         assert_eq!(
             fs::read(dir.join("node_modules/copied/index.js")).unwrap(),
             fs::read(dir.join("node_modules/registry/index.js")).unwrap()
         );
     }
+    // Changed graph resolution reads and validates copied bytes before the
+    // fetcher accepts the existing pinned tree. Report both completed kinds of work.
+    project.write("package.json", br#"{"name":"demo","version":"1.0.1","dependencies":{"copied":"file:./vendor/pkg.tgz","registry":"npm:h3@1"}}"#).unwrap();
+    let output = run(
+        dir,
+        &[
+            "install",
+            "--registry-fixture",
+            fixture_path.to_str().unwrap(),
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Artifacts: 1 cached tree reused; 0 downloaded archives verified; 1 local archive verified."), "{output:?}");
+    let locked = fs::read(dir.join("tapid.lock")).unwrap();
     fs::write(dir.join("vendor/pkg.tgz"), b"changed").unwrap();
     let output = run(
         dir,

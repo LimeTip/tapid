@@ -81,6 +81,7 @@ pub(crate) fn fetch_imported(
     store
         .recover_transactions()
         .map_err(OperationalError::from)?;
+    let mut artifact_evidence = ArtifactEvidence::default();
     let mut transaction = store.transaction();
     let mut transports = BTreeMap::new();
     let origins = registry_config.configured_origins();
@@ -103,6 +104,7 @@ pub(crate) fn fetch_imported(
             libc: package.libc.clone(),
         }
         .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())?;
+        let mut acquired_archive = None;
         let cached = imported
             .verified_artifact(path)
             .filter(|receipt| {
@@ -222,6 +224,7 @@ pub(crate) fn fetch_imported(
                     .map_err(|e| e.to_string())?
                     .parse()
                     .map_err(|e: tapid_core::DomainError| e.to_string())?;
+                acquired_archive = Some(super::digest(&bytes));
                 (digest, ImportedTree::Extracted(temp))
             }
         };
@@ -257,6 +260,19 @@ pub(crate) fn fetch_imported(
         let tree = transaction
             .stage_verified_tree(&digest, temp.path())
             .map_err(OperationalError::from)?;
+        if let Some(archive) = acquired_archive {
+            artifact_evidence.acquired(
+                &archive,
+                &digest,
+                if fixture.is_some() {
+                    AcquisitionSource::Local
+                } else {
+                    AcquisitionSource::Network
+                },
+            );
+        } else {
+            artifact_evidence.cached(&digest);
+        }
         receipts.insert(path.clone(), digest.to_string());
         let mut locked = LockedPackage::new_with_context_and_provenance(
             package.registry.as_str(),
@@ -451,6 +467,7 @@ pub(crate) fn fetch_imported(
             .contains_key(&format!("node_modules/{}", link.name))
     });
     Ok(PreparedInstall {
+        artifact_evidence,
         candidate_exclusions: Default::default(),
         lock,
         layout: PreparedLayout {
