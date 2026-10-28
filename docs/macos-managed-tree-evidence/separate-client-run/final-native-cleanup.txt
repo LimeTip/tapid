@@ -1,0 +1,133 @@
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "normal"
+candidate = "unsandboxed-diagnostic"
+requested = "complete descendant cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "root_status=exit status: 0; marker_at_root_exit=false; delayed_marker=true; authoritative_emptiness=unavailable"
+enforced = "none"
+threshold = 600
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "error"
+candidate = "unsandboxed-diagnostic"
+requested = "complete descendant cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "root_status=exit status: 2; marker_at_root_exit=false; delayed_marker=true; authoritative_emptiness=unavailable"
+enforced = "none"
+threshold = 600
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "cancellation"
+candidate = "unsandboxed-diagnostic"
+requested = "complete descendant cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "root_status=signal: 9 (SIGKILL); marker_at_root_exit=false; delayed_marker=true; authoritative_emptiness=unavailable"
+enforced = "none"
+threshold = 600
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "harness killed direct root only; no tree cleanup"
+
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "timeout"
+candidate = "unsandboxed-diagnostic"
+requested = "complete descendant cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "root_status=signal: 9 (SIGKILL); marker_at_root_exit=false; delayed_marker=true; authoritative_emptiness=unavailable"
+enforced = "none"
+threshold = 600
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "harness killed direct root only; no tree cleanup"
+
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "worker-failure"
+candidate = "unsandboxed-diagnostic"
+requested = "complete descendant cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "root_status=signal: 9 (SIGKILL); marker_at_root_exit=false; delayed_marker=true; authoritative_emptiness=unavailable"
+enforced = "none"
+threshold = 600
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "controller-kill"
+candidate = "unsandboxed-diagnostic"
+requested = "complete descendant cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "root_status=signal: 9 (SIGKILL); marker_at_root_exit=false; delayed_marker=true; authoritative_emptiness=unavailable"
+enforced = "none"
+threshold = 600
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "harness killed direct root only; no tree cleanup"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "supervisor-failure"
+candidate = "unsandboxed-diagnostic"
+requested = "candidate supervisor cleanup"
+available = "process observations only; no authoritative boundary"
+observed = "no independently supervising candidate established; not simulated by PID polling"
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = false
+positive_control = false
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+

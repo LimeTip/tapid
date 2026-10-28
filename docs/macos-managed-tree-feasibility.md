@@ -20,6 +20,8 @@ Commands:
 | `rejection` | Generated-file Restricted positive control, followed independently by ManagedTree and each configured limit through the public API | Requires `UnsupportedContainment` and absent target marker for each unsupported request. Any positive fixture failure makes the entire command exit 2. |
 | `lineage` | Fresh worker/child processes; ordinary execution, `setsid`, `setpgid`, and double-fork/exec; worker exits before a delayed child write | Explicitly unsandboxed diagnostic, no authority or cleanup guarantee. No candidate kills or process-group inference. |
 | `xpc` | Connect to the embedded service, perform paired filesystem controls | Requires service reply bits 15: acknowledgement, generated-file read/write, permission-denied outside read and write. Missing files, arbitrary errors and missing service do not satisfy denial. |
+| `xpc-missing` | Send only hello to a random nonexistent service name | Requires explicit transport error; no authority payload is dispatched. Does not establish sandbox denial. |
+| `scoped-limits` | Paired disposable session-changing CPU and regular-file-size controls | Per-process CPU and per-file size observations only; no aggregate limit claim. |
 | `cleanup` | Double-fork/session-changing leaf after normal exit, injected error, cancellation, timeout, worker SIGKILL and controller SIGKILL | Unsandboxed counterexamples to root-exit/tree-exit equivalence; supervisor failure explicitly unsupported. Harness root kills are not candidate cleanup. |
 | `limits` | Fixed time, combined output, process and touched-memory inputs; one or three leaves, ordinary or session-changing with redirected streams | Sixteen workload controls, not enforcement. No configured aggregate candidate exists; every limit verdict is unsupported. |
 | `authority` | Paired synthetic outside-file, symlink/traversal, TCP/UDP/Unix socket and environment controls, repeated through a child; public Restricted request | Positive fixture must work before interpreting denial. Setup rejection is unsupported, never a successful negative authority control. |
@@ -369,3 +371,104 @@ command is configured in this task's engine handoff, and no source-matched
 isolated receipt is available. Remaining independent coding keeps this at a
 partial implementation checkpoint; macOS 26 and capable native execution remain
 later evidence requirements.
+
+## Separate-client continuation (2026-10-28)
+
+This continuation supersedes the same-process broker and missing-service gaps
+above. Current commands and logs are retained in
+[separate-client-run/index.json](macos-managed-tree-evidence/separate-client-run/index.json).
+Historical logs and fingerprints remain historical; they are not current receipts.
+
+`broker` now launches four fresh copies of the probe. Cases alternate ordinary
+and `setsid` clients, including an authorized session-changing positive control.
+The per-run capability travels through a private stdin pipe, outside argv and
+environment. Each client requires the expected authorization reply; the controller
+also checks that denied requests leave no marker. The controller waits for each
+client with a two-second deadline and joins the bounded server. Same-process
+protocol tests still use the existing exchange and server, while the executable
+command exercises actual subprocess dispatch. Native acknowledgements record PID
+and session as diagnostics, without implying kernel tree membership. All four
+controls completed. Sandboxed caller propagation and system-helper authorization
+remain unverified.
+
+`authority` records each filesystem/socket operation and repeats the paired
+payload through an ordinary child and a session-changing child. All three
+uncontained positive payloads completed. The contained request still rejects
+setup with `native probe profile installation failed`, before negative payload
+execution. Positive controls cannot establish denied authority propagation.
+
+After building through the wrapper and resolving the executable from compiler
+metadata, run these additional cases:
+
+```sh
+"$PROBE" scoped-limits
+"$PROBE_APP/Contents/MacOS/Probe" xpc-missing
+```
+
+`scoped-limits` compares unrestricted and configured fresh processes, each
+changing its own session. CPU work has a finite 1600 ms wall deadline; configured
+`RLIMIT_CPU` soft/hard values are one CPU second. The configured process received
+`SIGXCPU`; its unrestricted control completed. A separate 4096-byte regular-file
+write completed without a limit and received `SIGXFSZ` with a 1024-byte
+`RLIMIT_FSIZE`. Both installed limits require readback before work. The initial
+harness incorrectly expected `SIGKILL` for CPU exhaustion; the retained failed
+run led to checking the installed manual and correcting the expectation to
+`SIGXCPU`. Apple's [setrlimit manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/setrlimit.2.html)
+documents these signals and scopes. Neither CPU seconds nor file size substitutes
+for tree wall time or combined stdout/stderr. Elapsed time and termination are
+observations, not aggregate accounting or overshoot measurements. The same command also compares process admission with and without a
+per-caller `RLIMIT_NPROC` value of one: the unrestricted child starts, while the
+configured caller receives `EAGAIN`. Its counter covers the UID, rather than a
+Tapid-owned tree. Only the disposable caller changes its own limit; no system
+or other process limit is changed. Two concurrent session-changing descendants
+also inherit a 1024-byte file-size limit, verify it with `getrlimit`, and each
+write 768 bytes to separate files. Their combined 1536 bytes demonstrate the
+per-file scope. CPU inheritance and concurrent RSS enforcement remain unverified;
+RSS setup is unavailable and no aggregate-accounting candidate exists.
+
+`xpc-missing` creates a random service name and sends only hello, requiring an
+explicit transport error. It completes without dispatching authority work.
+Anonymous transport controls also pass. The freshly rebuilt, signed and verified
+bundle still returns `Connection invalid` for the named worker before its hello
+acknowledgement. `log show` returns `Cannot run while sandboxed`; this does not
+identify an entitlement prerequisite or prove native XPC impossible.
+
+`descriptors` deliberately leaves an outside synthetic-file descriptor inheritable
+in the disposable controller. An uncontained positive child verifies its device
+and inode with `fstat` and reads the synthetic bytes with `pread`. The contained
+child must not inherit that same object; a reused descriptor number is not
+mistaken for authority to the object. The positive completes; the negative
+request is unsupported at native profile installation, so descriptor isolation
+is still unverified. This extends the existing public request/execute controls
+without copying the production descriptor sanitizer.
+
+All results remain macOS 27.0.1 build 26A434 arm64 development evidence. There is
+no macOS 26 receipt or supported candidate. The bounded comparison fixtures are
+implemented; successful candidate setup is needed for enforcement experiments.
+Native worker startup diagnostics, authoritative ownership/emptiness, aggregate
+accounting, sandboxed broker propagation and the target-platform matrix remain
+evidence requirements. Installed privileged-helper classes remain untested; no
+privileged registration or real service probing is authorized by this fixture
+scope. The strict production gate is unchanged; #275 is incomplete.
+
+Final local validation for this continuation: the focused strict-rejection
+regression runs one test and passes; all 12 example tests pass. Workspace
+formatting, workspace Clippy with warnings denied, architecture checks and the
+separate integration workspace pass (one consumer and four contract tests).
+Workspace tests stop at CLI integration with 271 passes and five failures; each
+failure prints native profile installation failure. Earlier workspace suites
+report 282, eight and six passes. The separately executed runner suite reports
+152 passes and 25 failures. Those logs include direct setup errors and downstream
+support/receipt assertions; they are failed native runs, not passing acceptance.
+No production runtime or test was weakened to accommodate this host sandbox.
+
+The final native run completes broker, scoped-limit, RSS-disposition, six cleanup,
+sixteen workload, lineage, eight rapid-reparent and anonymous/missing-service XPC
+controls. Authority, descriptor, rejection-positive and named-worker commands
+exit 2 because their required native setup does not complete. The signed bundle
+and successful transport controls do not resolve worker startup. Native macOS 26
+execution and capable native sandbox/XPC diagnostics are still required. Portable
+isolated validation may supplement these failed local runs but cannot establish
+macOS enforcement; there is no current source-matched engine receipt or configured
+isolated-validation command in this task. Independent QA and Acceptance have not
+run on this snapshot. No commit, publication, merge or deployment was performed.

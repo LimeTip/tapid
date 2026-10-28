@@ -85,6 +85,23 @@ int64_t probe_client(const char *outside) {
     return result;
 }
 
+int64_t probe_missing_service(void) {
+    char name[128];
+    // Disposable nonexistent name; never register or contact an installed helper.
+    snprintf(name, sizeof(name), "org.tapid.research.missing.%08x.%08x", arc4random(), arc4random());
+    xpc_connection_t peer = xpc_connection_create(name, NULL);
+    xpc_connection_set_event_handler(peer, ^(xpc_object_t event) { (void)event; });
+    xpc_connection_resume(peer);
+    xpc_object_t hello = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_string(hello, "operation", "hello");
+    // Only hello is sent: unavailable setup cannot dispatch an authority payload.
+    int64_t result = exchange(peer, hello, NSEC_PER_SEC);
+    xpc_release(hello);
+    xpc_connection_cancel(peer);
+    xpc_release(peer);
+    return result;
+}
+
 // Anonymous endpoints test transport without registering a service or implying
 // any sandbox/identity guarantee. Modes: valid, malformed, silent, late reply.
 void probe_transport_controls(int64_t *results) {

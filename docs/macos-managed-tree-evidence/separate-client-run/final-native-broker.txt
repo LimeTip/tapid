@@ -1,0 +1,23 @@
+broker_client_ack case=0 transition=ordinary pid=97783 session=97781
+broker_client_ack case=1 transition=setsid pid=97784 session=97784
+broker_client_ack case=2 transition=ordinary pid=97786 session=97781
+broker_client_ack case=3 transition=setsid pid=97787 session=97787
+--- research case ---
+verdict = "unverified"
+
+[observation]
+case = "broker"
+candidate = "unsandboxed-diagnostic"
+requested = "authenticated broader-authority broker control"
+available = "process observations only; no authoritative boundary"
+observed = "kernel peer UID and per-run capability checked; wrong capability, ungranted operation and truncated request denied; authorized fixed write succeeded; separate_processes=true; alternating ordinary/setsid clients. Sandbox propagation, system brokers and privileged helpers unverified; setsid is no authoritative ownership boundary"
+enforced = "none"
+threshold = 4
+units = "fixed 33-byte requests; 250ms per stream; 3s accept deadline"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+

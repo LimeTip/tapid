@@ -101,3 +101,18 @@ pub fn transport_controls() -> io::Result<()> {
     }
     Ok(())
 }
+
+pub fn missing_service() -> io::Result<()> {
+    let pointer = symbol(c"probe_missing_service")?;
+    let entry: unsafe extern "C" fn() -> i64 = unsafe { std::mem::transmute(pointer) };
+    let result = unsafe { entry() };
+    println!(
+        "xpc_missing_service={result} authority_payload_dispatched=false candidate_enforcement=none"
+    );
+    if result != -1 {
+        return Err(io::Error::other(
+            "missing service did not return an explicit transport error",
+        ));
+    }
+    Ok(())
+}

@@ -1,0 +1,126 @@
+[
+  {
+    "name": "focused",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "test",
+      "-p",
+      "tapid-runner",
+      "--lib",
+      "--locked",
+      "managed_tree_and_every_resource_limit_fail_closed"
+    ],
+    "status": 0
+  },
+  {
+    "name": "example",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "test",
+      "-p",
+      "tapid-runner",
+      "--example",
+      "macos_managed_tree_probe",
+      "--locked"
+    ],
+    "status": 0
+  },
+  {
+    "name": "build",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "build",
+      "-p",
+      "tapid-runner",
+      "--example",
+      "macos_managed_tree_probe",
+      "--locked",
+      "--message-format=json"
+    ],
+    "status": 0
+  },
+  {
+    "name": "fmt",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "status": 0
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "clippy",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--locked",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "status": 0
+  },
+  {
+    "name": "workspace",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "test",
+      "--workspace",
+      "--all-features",
+      "--locked"
+    ],
+    "status": 101
+  },
+  {
+    "name": "integration",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "test",
+      "--manifest-path",
+      "tests/integration/Cargo.toml",
+      "--locked"
+    ],
+    "status": 0
+  },
+  {
+    "name": "runner",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "scripts/dev.ts",
+      "test",
+      "-p",
+      "tapid-runner",
+      "--all-features",
+      "--locked"
+    ],
+    "status": 101
+  },
+  {
+    "name": "architecture",
+    "command": [
+      "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+      "--experimental-strip-types",
+      "tools/check_architecture.ts"
+    ],
+    "status": 0
+  }
+]

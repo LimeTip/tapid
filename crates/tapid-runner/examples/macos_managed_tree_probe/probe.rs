@@ -34,11 +34,23 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         [command] if command == "rlimits" => rlimit::run(),
         #[cfg(target_os = "macos")]
+        [command] if command == "scoped-limits" => rlimit::scoped(),
+        #[cfg(target_os = "macos")]
         [command, mode] if command == "rlimit-child" => rlimit::child(mode),
         #[cfg(target_os = "macos")]
         [command] if command == "broker" => broker::run(),
         #[cfg(target_os = "macos")]
+        [command, socket, case, transition] if command == "broker-client" => {
+            broker::client(socket, case, transition)
+        }
+        #[cfg(target_os = "macos")]
         [command] if command == "authority" => authority::run(),
+        #[cfg(target_os = "macos")]
+        [command] if command == "descriptors" => authority::descriptors(),
+        #[cfg(target_os = "macos")]
+        [command, fd, device, inode, expected] if command == "descriptor-payload" => {
+            authority::descriptor_payload(fd, device, inode, expected)
+        }
         #[cfg(target_os = "macos")]
         [command, expected, outside, tcp, unix, depth] if command == "authority-payload" => {
             authority::payload(expected, outside, tcp, unix, depth)
@@ -56,6 +68,8 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         [command] if command == "xpc-transport" => xpc::transport_controls(),
         #[cfg(target_os = "macos")]
+        [command] if command == "xpc-missing" => xpc::missing_service(),
+        #[cfg(target_os = "macos")]
         [command] if command == "lineage" => {
             lineage(&["ordinary", "setsid", "setpgid", "double-fork"])
         }
@@ -70,7 +84,7 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         [command] if command == "rejection" => rejection(),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: macos_managed_tree_probe rejection|lineage|rapid-reparent <1..16>|cleanup|limits|rlimits|broker|authority|xpc (native macOS only)",
+            "usage: macos_managed_tree_probe rejection|lineage|rapid-reparent <1..16>|cleanup|limits|rlimits|scoped-limits|broker|authority|descriptors|xpc|xpc-transport|xpc-missing (native macOS only)",
         )),
     }
 }
