@@ -1174,9 +1174,10 @@ fn npm_import_workspace_failures_preserve_existing_project_state() {
             } else {
                 "packages/node_modules"
             };
+            let existing_tree = fs::canonicalize(project.path().join(tree)).unwrap();
             assert!(stderr.contains("unused backup location"), "{stderr}");
             assert!(
-                stderr.contains(&project.path().join(tree).display().to_string()),
+                stderr.contains(&existing_tree.display().to_string()),
                 "{stderr}"
             );
             assert_eq!(
