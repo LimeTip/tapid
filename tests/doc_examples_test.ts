@@ -159,10 +159,12 @@ test("bounded process releases pipes held by detached descendants after output o
         spawn(process.execPath, [__filename, 'writer'], {
           detached: true, stdio: ['ignore', 1, 2]
         });
+        // Produce overflow without waiting for a second Node startup. The
+        // detached child inherits the writers and keeps the cleanup seam live.
+        process.stdout.write(Buffer.alloc(65536, 120));
         setTimeout(() => process.exit(0), 3000);
       } else {
         process.stdout.on('error', () => process.exit(0));
-        process.stdout.write(Buffer.alloc(65536, 120));
         setInterval(() => process.stdout.write('x'), 50);
         setTimeout(() => process.exit(0), 3000);
       }
