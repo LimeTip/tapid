@@ -54,6 +54,97 @@ fn project_workload(project: &tapid_test_support::TempProject) -> PathBuf {
     fs::canonicalize(target).unwrap()
 }
 
+// Only the trusted outer test driver retries transient executable-busy errors.
+// Production target execution retains its original fail-closed behavior.
+fn spawn_test_driver(
+    command: &mut Command,
+    deadline: std::time::Instant,
+) -> io::Result<std::process::Child> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("test driver launch exhausted after {attempts} attempts: {error}"),
+                    ));
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+fn managed_driver_spawn_recovers_after_executable_writer_closes() {
+    let project = tapid_test_support::TempProject::new("driver-busy-release").unwrap();
+    let executable = project.path().join("true");
+    fs::copy("/bin/true", &executable).unwrap();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    assert_eq!(
+        Command::new(&executable)
+            .spawn()
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ETXTBSY)
+    );
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        drop(writer);
+    });
+    let mut child = spawn_test_driver(
+        &mut Command::new(&executable),
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(child.wait().unwrap().success());
+    release.join().unwrap();
+}
+
+#[test]
+fn managed_driver_spawn_bounds_persistent_executable_writer() {
+    let project = tapid_test_support::TempProject::new("driver-busy-deadline").unwrap();
+    let executable = project.path().join("true");
+    fs::copy("/bin/true", &executable).unwrap();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = spawn_test_driver(
+        &mut Command::new(&executable),
+        started + std::time::Duration::from_millis(50),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("attempts"), "{error}");
+    assert!(error.to_string().contains("os error 26"), "{error}");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    drop(writer);
+    assert!(Command::new(&executable).status().unwrap().success());
+}
+
+#[test]
+fn managed_driver_spawn_preserves_other_errors() {
+    let project = tapid_test_support::TempProject::new("driver-missing").unwrap();
+    let started = std::time::Instant::now();
+    let error = spawn_test_driver(
+        &mut Command::new(project.path().join("missing")),
+        started + std::time::Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
 fn root() -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "tapid-linux-restricted-{}-{}",
@@ -1550,16 +1641,19 @@ fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
     let project = tapid_test_support::TempProject::new("managed-unread-output").unwrap();
     let workload = project_workload(&project);
     let diagnostics = project.path().join("driver-stderr");
-    let mut child = Command::new(workload)
-        .args(["--exact", TEST, "--nocapture"])
-        .env(DRIVER, project.path())
-        .stdout(Stdio::piped())
-        .stderr(fs::File::create(&diagnostics).unwrap())
-        .spawn()
-        .unwrap();
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(10);
+    let mut child = spawn_test_driver(
+        Command::new(workload)
+            .args(["--exact", TEST, "--nocapture"])
+            .env(DRIVER, project.path())
+            .stdout(Stdio::piped())
+            .stderr(fs::File::create(&diagnostics).unwrap()),
+        started + std::time::Duration::from_millis(500),
+    )
+    .unwrap();
     // Deliberately retain the unread caller pipe through completion. No reader
     // may unblock a forwarding worker and turn this into a normal-output test.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(
