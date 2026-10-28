@@ -1087,3 +1087,57 @@ fn dependency_dry_run_retains_recorded_optional_omissions() {
     }
     assert!(!scenario.project.path().join("node_modules").exists());
 }
+
+#[test]
+fn dependency_dry_run_reports_new_optional_omissions_without_artifact_access() {
+    let scenario = CliFixture::new("preview-new-omissions");
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"parent":"1.0.0"},"optionalDependencies":{"local":"npm:missing@^1.0.0"}}"#;
+    scenario.project.write("package.json", manifest).unwrap();
+    let fixture = serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org", "name":"parent", "version":"1.0.0", "integrity":format!("sha512-{}", STANDARD.encode([1;64])), "artifact":"never-download", "optionalDependencies":{"native":"1.0.0"}}, {"registry":"https://registry.npmjs.org", "name":"native", "version":"1.0.0", "os":["unsupported-test-os"], "integrity":format!("sha512-{}", STANDARD.encode([1;64])), "artifact":"never-download"}]});
+    scenario
+        .project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    for json in [true, false] {
+        let mut args = vec![
+            "install",
+            "--dry-run",
+            "--registry-fixture",
+            "registry.json",
+        ];
+        if json {
+            args.insert(0, "--json");
+        }
+        let output = scenario.command(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        if json {
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let omissions = result["selection"]["omissions"].as_array().unwrap();
+            assert_eq!(omissions.len(), 2);
+            let root = omissions.iter().find(|o| o["name"] == "local").unwrap();
+            assert_eq!(root["reason"], "metadataAbsent");
+            let nested = omissions.iter().find(|o| o["name"] == "native").unwrap();
+            assert_eq!(nested["reason"], "incompatiblePlatform");
+            assert_eq!(result["selection"]["details_complete"], true);
+            assert_eq!(result["data"]["effects"]["artifact_requests"], 0);
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("local"));
+        }
+    }
+    assert_eq!(
+        fs::read(scenario.project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    for path in [
+        "tapid.lock",
+        "node_modules",
+        "store",
+        ".tapid-activation.lock",
+    ] {
+        assert!(!scenario.project.path().join(path).exists(), "{path}");
+    }
+}

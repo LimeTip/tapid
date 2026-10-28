@@ -27,6 +27,8 @@ The generated release installers select archives through `https://tapid.dev/rele
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
+Resolved dependency previews expose accepted optional omissions in human and JSON output, including newly resolved graph cuts. They do not verify artifacts or write selection facts.
+
 For ordinary locks with recorded selection facts, `tapid why` also explains accepted optional declaration omissions, matching local aliases or actual package names. These read-only reports describe the lock's recorded target and profile, including when inspected on a different host. Matching omissions exit successfully; absence from both selected paths and the omission ledger exits 1. Omission details are bounded and incomplete reports are marked explicitly. See the [JSON result contract](../../docs/json-results.md) for machine-readable fields.
 
 ## Commands

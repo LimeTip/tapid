@@ -13,7 +13,7 @@ pub(super) fn record_registry_selection(
     resolution: &Resolution,
     records: &BTreeMap<PackageRecordKey, PackageRecord>,
     config: &crate::registry::RegistryConfig,
-    mut omissions: Vec<AcceptedOmission>,
+    omissions: Vec<AcceptedOmission>,
 ) -> Result<(), OperationalError> {
     let keys = resolution
         .selected
@@ -42,68 +42,16 @@ pub(super) fn record_registry_selection(
             Ok((id.clone(), key))
         })
         .collect::<Result<BTreeMap<_, _>, OperationalError>>()?;
-    for parent in &resolution.selected {
-        let record = &records[&(
-            parent.registry.to_string(),
-            parent.name.to_string(),
-            parent.version.to_string(),
-        )];
-        let key = &keys[parent];
-        for (name, raw) in &record.optional_dependencies {
-            if lock.packages()[key].dependencies().contains_key(name) {
-                continue;
-            }
-            let name_value: PackageName = name
-                .parse()
-                .map_err(|error: tapid_core::DomainError| error.to_string())?;
-            let requirement: Requirement = raw
-                .parse()
-                .map_err(|error: ResolveError| error.to_string())?;
-            let actual = requirement.package_name(&name_value);
-            let registry = config.registry_for_dependency(&parent.registry, actual)?;
-            let candidates = records
-                .values()
-                .filter(|candidate| candidate.registry == registry && &candidate.name == actual)
-                .collect::<Vec<_>>();
-            let reason = if candidates.is_empty() {
-                OmissionReason::MetadataAbsent
-            } else if candidates.iter().any(|candidate| {
-                requirement.matches_tagged_version(&candidate.version, &candidate.dist_tags)
-            }) && candidates
-                .iter()
-                .filter(|candidate| {
-                    requirement.matches_tagged_version(&candidate.version, &candidate.dist_tags)
-                })
-                .all(|candidate| !current_platform_matches(&candidate.platform))
-            {
-                OmissionReason::IncompatiblePlatform
-            } else {
-                OmissionReason::NoUsableCandidate
-            };
-            omissions.push(AcceptedOmission {
-                original_requirement: None,
-                origin: OmissionOrigin::Package { key: key.clone() },
-                name: name.clone(),
-                requirement: raw.clone(),
-                registry: registry.to_string(),
-                target: None,
-                reason,
-            });
-        }
-    }
+    let omissions = registry_omissions(
+        resolution,
+        records,
+        &keys,
+        workspace_manifests,
+        config,
+        omissions,
+    )?;
     if omissions.is_empty() {
         return Ok(());
-    }
-    for omission in &mut omissions {
-        if let OmissionOrigin::Workspace { key } = &omission.origin {
-            let original = workspace_manifests[key]
-                .optional_dependencies()
-                .get(&omission.name)
-                .ok_or("missing original workspace omission declaration")?;
-            if original != &omission.requirement {
-                omission.original_requirement = Some(original.clone());
-            }
-        }
     }
     let mut declarations = Vec::new();
     for declaration in &resolution.declarations {
@@ -220,7 +168,6 @@ pub(super) fn record_registry_selection(
     }
     declarations.sort();
     declarations.dedup();
-    omissions.sort();
     lock.set_selection(LockedSelection {
         target: selection_target(),
         profile: SelectionProfile::Development,
@@ -228,4 +175,82 @@ pub(super) fn record_registry_selection(
         omissions,
     })
     .map_err(OperationalError::from)
+}
+
+/// Classify accepted graph cuts without requiring artifact preparation.
+pub(super) fn registry_omissions(
+    resolution: &Resolution,
+    records: &BTreeMap<PackageRecordKey, PackageRecord>,
+    keys: &BTreeMap<tapid_registry_client::RegistryPackageId, String>,
+    workspace_manifests: &BTreeMap<String, PackageManifest>,
+    config: &crate::registry::RegistryConfig,
+    mut omissions: Vec<AcceptedOmission>,
+) -> Result<Vec<AcceptedOmission>, OperationalError> {
+    let selected_edges = resolution
+        .dependencies
+        .iter()
+        .map(|edge| (&edge.parent, edge.dependency.as_str()))
+        .collect::<BTreeSet<_>>();
+    for parent in &resolution.selected {
+        let record = &records[&(
+            parent.registry.to_string(),
+            parent.name.to_string(),
+            parent.version.to_string(),
+        )];
+        let key = &keys[parent];
+        for (name, raw) in &record.optional_dependencies {
+            if selected_edges.contains(&(parent, name.as_str())) {
+                continue;
+            }
+            let name_value: PackageName = name
+                .parse()
+                .map_err(|error: tapid_core::DomainError| error.to_string())?;
+            let requirement: Requirement = raw
+                .parse()
+                .map_err(|error: ResolveError| error.to_string())?;
+            let actual = requirement.package_name(&name_value);
+            let registry = config.registry_for_dependency(&parent.registry, actual)?;
+            let candidates = records
+                .values()
+                .filter(|candidate| candidate.registry == registry && &candidate.name == actual)
+                .collect::<Vec<_>>();
+            let reason = if candidates.is_empty() {
+                OmissionReason::MetadataAbsent
+            } else if candidates.iter().any(|candidate| {
+                requirement.matches_tagged_version(&candidate.version, &candidate.dist_tags)
+            }) && candidates
+                .iter()
+                .filter(|candidate| {
+                    requirement.matches_tagged_version(&candidate.version, &candidate.dist_tags)
+                })
+                .all(|candidate| !current_platform_matches(&candidate.platform))
+            {
+                OmissionReason::IncompatiblePlatform
+            } else {
+                OmissionReason::NoUsableCandidate
+            };
+            omissions.push(AcceptedOmission {
+                original_requirement: None,
+                origin: OmissionOrigin::Package { key: key.clone() },
+                name: name.clone(),
+                requirement: raw.clone(),
+                registry: registry.to_string(),
+                target: None,
+                reason,
+            });
+        }
+    }
+    for omission in &mut omissions {
+        if let OmissionOrigin::Workspace { key } = &omission.origin {
+            let original = workspace_manifests[key]
+                .optional_dependencies()
+                .get(&omission.name)
+                .ok_or("missing original workspace omission declaration")?;
+            if original != &omission.requirement {
+                omission.original_requirement = Some(original.clone());
+            }
+        }
+    }
+    omissions.sort();
+    Ok(omissions)
 }

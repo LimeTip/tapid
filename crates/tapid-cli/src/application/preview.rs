@@ -334,6 +334,8 @@ fn inspect(
     let mut outcome = OperationOutcome::unchanged(project);
     if metadata_source == "lockfile" {
         outcome.record_selection(previous.as_ref().expect("reused lockfile"));
+    } else {
+        outcome.selection = next.selection;
     }
     if allow_unverified {
         outcome

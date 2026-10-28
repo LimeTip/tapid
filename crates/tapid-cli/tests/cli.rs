@@ -4512,11 +4512,17 @@ fn install_does_not_commit_verified_store_trees_when_materialization_fails() {
 fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
     use tapid_store::Store;
 
-    for failure in ["integrity", "archive", "archive-entry-limit"] {
+    for (failure, section) in ["integrity", "archive", "archive-entry-limit", "download"]
+        .into_iter()
+        .flat_map(|failure| {
+            ["dependencies", "optionalDependencies"].map(|section| (failure, section))
+        })
+    {
         let project = tapid_test_support::TempProject::new(&format!("rollback-{failure}")).unwrap();
         let dir = project.path().to_path_buf();
-        let manifest = r#"{"name":"demo","version":"1.0.0","dependencies":{"plugin":"1.0.0"}}"#;
-        fs::write(dir.join("package.json"), manifest).unwrap();
+        let manifest =
+            format!(r#"{{"name":"demo","version":"1.0.0","{section}":{{"plugin":"1.0.0"}}}}"#);
+        fs::write(dir.join("package.json"), &manifest).unwrap();
         let previous_lock = prior_empty_lock();
         fs::write(dir.join("tapid.lock"), &previous_lock).unwrap();
         fs::create_dir_all(dir.join("node_modules")).unwrap();
@@ -4557,12 +4563,17 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
         } else {
             format!("sha512-{}", STANDARD.encode(Sha512::digest(&archive)))
         };
+        let artifact = if failure == "download" {
+            "missing-archive.tgz".to_owned()
+        } else {
+            format!("base64:{}", STANDARD.encode(&archive))
+        };
         let fixture = dir.join("registry.json");
         fs::write(
             &fixture,
             format!(
-                r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","integrity":"{integrity}","artifact":"base64:{}"}}]}}"#,
-                STANDARD.encode(&archive)
+                r#"{{"packages":[{{"registry":"https://registry.npmjs.org","name":"plugin","version":"1.0.0","integrity":"{integrity}","artifact":"{}"}}]}}"#,
+                artifact
             ),
         )
         .unwrap();
@@ -4588,6 +4599,8 @@ fn install_preserves_project_and_store_on_integrity_and_archive_failures() {
             );
             assert!(stderr.contains("plugin"), "{stderr}");
             assert!(stderr.contains("integrity"), "unexpected error: {stderr}");
+        } else if failure == "download" {
+            assert!(stderr.contains("cannot read artifact"), "{stderr}");
         } else if failure == "archive-entry-limit" {
             assert!(stderr.contains("too large (536870913 bytes)"), "{stderr}");
         } else {
