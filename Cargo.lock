@@ -1659,6 +1659,8 @@ version = "0.0.1"
 dependencies = [
  "fs4",
  "libc",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

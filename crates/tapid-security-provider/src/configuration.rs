@@ -17,7 +17,7 @@ pub enum CredentialMode {
 /// Parsing performs no environment access, inventory disclosure or live requests.
 /// This is an adapter input, not an activation of the CLI's live provider.
 pub struct ProviderConfig {
-    origin: RegistryOrigin,
+    pub(crate) origin: RegistryOrigin,
     account: Option<String>,
     headless: Option<String>,
 }

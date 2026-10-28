@@ -4,6 +4,9 @@
 mod configuration;
 pub use configuration::{CredentialMode, InvalidProviderConfig, ProviderConfig};
 
+mod http;
+pub use http::HttpsProvider;
+
 mod retrieval;
 pub use retrieval::{Disclosure, RetrievalError, retrieve, retrieve_recorded};
 

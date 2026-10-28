@@ -10,7 +10,7 @@ must match the entire request, including audience, peers and placement.
 
 The adapter cannot return preverified claims or inject a verifier bypass. Tests
 use frozen signed conformance input and RFC public test keys; the crate has no
-default keys, implicit environment access, credential lookup or network adapter.
+default keys, implicit environment access or implicit credential lookup.
 Read failures return an unavailable state without exposing transport error text.
 Adapters must enforce read timeouts and credential authorization independently.
 
@@ -44,8 +44,8 @@ because another request failed. The caller must still enforce graph completeness
 and policy thresholds. Transport timeouts and collection deadlines remain the
 adapter's responsibility; this synchronous interface cannot interrupt a blocked read.
 
-This is the retrieval foundation, not a complete audit service. Live credentials,
-cache bodies, deadline enforcement and live transport remain unimplemented.
+This is the retrieval foundation, not a complete audit service. Credential
+provisioning, cache bodies and CLI provider activation remain unimplemented.
 Callers must supply trusted replay floors and persist accepted
 sequence/digest state before using evidence for policy. A verified response alone
 does not establish collection completeness. No project, verified-package store,
@@ -69,6 +69,28 @@ may already have happened. Equal-sequence retries still sync publication. Cache
 body eviction must never delete this directory. There is no eviction API.
 Windows persistence, CLI configuration loading and live provider activation remain
 unimplemented; the Unix adapter alone does not enable network requests.
+
+`HttpsProvider` is an explicitly constructed query adapter for the configured
+origin's `POST /v1/security/evidence/query` endpoint. It requires exact inventory
+consent through `ProviderConfig::authorize` before credential lookup or transport.
+It sends the exact v2 request as JSON and returns an unverified response stream;
+use it through `retrieve_recorded` or `collect_recorded`, retaining their byte,
+verification and durable replay gates. HTTP success alone is not evidence.
+There are no retries, redirects, environment proxies, identity refreshes, cookie
+sessions or body caching. Existing account and headless credentials remain
+separate. Responses other than HTTP 200 and nonidentity content encodings fail
+closed; the adapter requests identity encoding, so retrieval's byte bound applies
+directly. Transport failures expose only `Unavailable`, without URLs or secrets.
+
+Construction requires nonzero request and collection timeouts of at most five
+minutes. The collection deadline starts at construction. Each query uses the
+lesser of its request timeout and remaining collection time, covering connection,
+response headers and body reads. Expired collections make no credential lookup
+or request. Credential callbacks and replay filesystem operations are caller-owned
+and cannot be interrupted by the HTTP deadline. TLS tests use the registry
+client's frozen public certificate/key fixtures, copied locally for packaging;
+the POST fixture additionally verifies full inventory delivery. These loopback
+tests do not establish production service availability or hosted authorization.
 
 `ProviderConfig::parse` accepts at most 64 KiB of version-1 JSON adapter
 configuration. It requires a canonical credential-free HTTPS `origin` and an
