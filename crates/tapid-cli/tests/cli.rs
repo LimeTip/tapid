@@ -7619,6 +7619,11 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
             .join("node_modules/native-demo/generated.txt")
             .exists()
     );
+    let original_manifest = fs::read(project.path().join("package.json")).unwrap();
+    let source_only_lock = Lockfile::from_json(
+        &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
     project
         .write("tapid.lifecycle.toml", policy.as_bytes())
         .unwrap();
@@ -7644,6 +7649,17 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
     assert!(native.status.success());
     assert_eq!(native.stdout, b"native compiled\n");
     let lock_bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let built_lock = Lockfile::from_json(std::str::from_utf8(&lock_bytes).unwrap()).unwrap();
+    assert_eq!(built_lock.source_graph(), source_only_lock.source_graph());
+    assert_eq!(fs::read(project.path().join("package.json")).unwrap(), original_manifest);
+    // Ordinary online install reuses authenticated outputs even though the
+    // dependency hook was approved after a source-only installation.
+    let reused = install(&["--registry-fixture", "registry.json", "--json"]);
+    assert!(reused.status.success(), "{reused:?}");
+    let result: serde_json::Value = serde_json::from_slice(&reused.stdout).unwrap();
+    assert_eq!(result["lifecycle"]["hooks_executed"], 0);
+    assert_eq!(result["lifecycle"]["generated_outputs_reused"], 1);
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock_bytes);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&lock_bytes).unwrap()["lockfileVersion"],
         9
