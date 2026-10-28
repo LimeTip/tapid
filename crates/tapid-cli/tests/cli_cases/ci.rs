@@ -680,3 +680,284 @@ fn ci_recovers_store_and_project_after_precommit_and_postcommit_crashes() {
         assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
     }
 }
+
+#[test]
+fn explicit_profiles_transition_without_rewriting_complete_selection() {
+    let project = tapid_test_support::TempProject::new("cli-explicit-profile").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1.0.0"},"devDependencies":{"devtool":"npm:shared@1.0.0"},"optionalDependencies":{"optionaltool":"npm:shared@1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/npm-import/registry.json")).unwrap();
+    let record = fixture["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "shared" && p["version"] == "1.0.0")
+        .unwrap();
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let key = tapid_lockfile::LockfilePackageKey::new(
+        "https://registry.npmjs.org".parse().unwrap(),
+        "shared".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+        &Default::default(),
+        &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+    )
+    .to_string();
+    let selection = serde_json::json!({
+        "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+        "rootManifestDigest":format!("sha256-{:x}", sha2::Sha256::digest(manifest)),"workspaceManifestDigests":{},
+        "declarations":[{"workspace":null,"name":"shared","kind":"required","target":key},{"workspace":null,"name":"devtool","kind":"dev","target":key},{"workspace":null,"name":"optionaltool","kind":"optional","target":key}],
+        "packages":{key:{"sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/shared-1.0.0.tgz","artifactIntegrity":record["integrity"]},"dependencies":{},"peerProviders":{}}}
+    }).to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let store = project.path().join("store");
+    for (command, flags, dev, optional) in [
+        ("ci", vec![], true, true),
+        (
+            "ci",
+            vec!["--omit", "dev", "--omit", "optional"],
+            false,
+            false,
+        ),
+        (
+            "ci",
+            vec![
+                "--production",
+                "--omit",
+                "optional",
+                "--include",
+                "optional",
+            ],
+            false,
+            true,
+        ),
+        (
+            "install",
+            vec!["--frozen", "--production", "--include", "dev"],
+            true,
+            true,
+        ),
+    ] {
+        let mut args = vec![
+            "--json",
+            command,
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        args.extend(flags);
+        let result = run_with_env(project.path(), &args, "NODE_ENV", "production");
+        assert!(
+            result.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            result["data"]["profile"],
+            serde_json::json!({"include_dev":dev,"include_optional":optional})
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/shared/package.json")
+                .is_file()
+        );
+        assert_eq!(
+            project
+                .path()
+                .join("node_modules/devtool/package.json")
+                .is_file(),
+            dev
+        );
+        assert_eq!(
+            project
+                .path()
+                .join("node_modules/optionaltool/package.json")
+                .is_file(),
+            optional
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            selection.as_bytes()
+        );
+    }
+    let human = run(
+        project.path(),
+        &[
+            "ci",
+            "--production",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .contains("Dependency profile: dev=omitted, optional=included")
+    );
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    // Pending pins cannot become offline source evidence merely through a prior install.
+    let offline = run(
+        project.path(),
+        &[
+            "ci",
+            "--offline",
+            "--production",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!offline.status.success());
+    assert!(String::from_utf8_lossy(&offline.stderr).contains("verified source evidence"));
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        selection.as_bytes()
+    );
+}
+
+#[test]
+fn explicit_profile_dry_run_rejects_before_project_access() {
+    let project = tapid_test_support::TempProject::new("profile-dry-run").unwrap();
+    for flags in [
+        vec!["--production"],
+        vec!["--omit", "dev"],
+        vec!["--include", "optional"],
+    ] {
+        let mut args = vec!["install", "--dry-run"];
+        args.extend(flags);
+        let result = run(project.path(), &args);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be used with"));
+        assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn explicit_profiles_reject_legacy_locks_without_replacing_outputs() {
+    let project = locked_project();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let installed = fs::read(project.path().join("node_modules/foo/package.json")).unwrap();
+    for command in ["ci", "install"] {
+        let result = run(
+            project.path(),
+            &[
+                command,
+                "--production",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                project.path().join("store").to_str().unwrap(),
+            ],
+        );
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("complete native schema-11 selection")
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/foo/package.json")).unwrap(),
+            installed
+        );
+    }
+}
+
+#[test]
+fn fresh_production_install_supports_offline_ci_with_unchanged_selection() {
+    let project = tapid_test_support::TempProject::new("fresh-production-cli").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/npm-import/registry.json")).unwrap();
+    for record in fixture["packages"].as_array_mut().unwrap() {
+        record["artifactUrl"] = format!(
+            "https://registry.npmjs.org/{}-{}.tgz",
+            record["name"].as_str().unwrap(),
+            record["version"].as_str().unwrap()
+        )
+        .into();
+    }
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let first = run(
+        project.path(),
+        &[
+            "install",
+            "--production",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&first.stdout)
+            .contains("Dependency profile: dev=omitted, optional=included")
+    );
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let selection =
+        tapid_lockfile::NativeSelection::from_json(std::str::from_utf8(&lock).unwrap()).unwrap();
+    assert!(selection.packages().values().all(|p| matches!(
+        p.source_evidence,
+        tapid_lockfile::NativeSourceEvidence::Verified { .. }
+    )));
+    fs::remove_file(project.path().join("registry.json")).unwrap();
+    let replay = run(
+        project.path(),
+        &[
+            "--json",
+            "ci",
+            "--offline",
+            "--production",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stdout)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(
+        result["data"]["profile"],
+        serde_json::json!({"include_dev":false,"include_optional":true})
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+}

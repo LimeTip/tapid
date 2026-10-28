@@ -56,6 +56,23 @@ tapid clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | --result-file <PATH>] [-- <ARGS>...]
 ```
 
+`install` and `ci` accept repeated `--omit dev|optional`, `--include dev|optional`,
+and `--production` (equivalent to `--omit dev`). Both kinds are included by
+default; explicit inclusion wins regardless of argument order. `NODE_ENV` does
+not select a profile. Required dependencies and exact peer providers remain
+reachable even when also declared through an omitted kind. Optional declarations
+retain their existing override precedence. These options select materialization,
+not a smaller lockfile. Human and JSON success output report the native profile.
+
+Non-full profiles require a complete native schema-11 selection, or a fresh
+standalone registry install without an existing lock. Existing legacy and imported
+locks reject non-full profiles rather than infer transitive kinds. Native workspace
+activation, selection mutations and execution overrides remain unsupported and
+reject before activation. Profile options conflict with `--dry-run`. Frozen and
+CI replay preserve selection bytes; offline replay additionally requires verified
+source evidence and locally available content. Fresh default-full installs retain
+the existing lock format. Full replay of a schema-11 lock restores omitted kinds.
+
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
 `tapid manifest validate` rejects symlinks and other non-regular files before

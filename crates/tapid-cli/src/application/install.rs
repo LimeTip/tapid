@@ -34,6 +34,7 @@ pub(crate) struct ManifestEdit<'a> {
 
 #[derive(Debug)]
 pub(crate) struct InstallReport {
+    pub(crate) profile: Option<tapid_lockfile::InstallProfile>,
     pub(crate) candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
@@ -77,6 +78,7 @@ impl PackageChanges {
 }
 
 struct InstallSession {
+    profile: Option<tapid_lockfile::InstallProfile>,
     candidate_exclusions: super::outcome::CandidateExclusions,
     hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
@@ -91,6 +93,7 @@ struct InstallSession {
 impl InstallSession {
     fn new(project: &Path) -> Self {
         Self {
+            profile: None,
             hook_stages: Vec::new(),
             journal: None,
             lock_backup: None,
@@ -281,6 +284,7 @@ pub(crate) fn run_with_execution(
     }
     match perform_install(&mut session, request, overrides, report_replay_progress) {
         Ok((package_count, replayed)) => Ok(InstallReport {
+            profile: session.profile,
             candidate_exclusions: session.candidate_exclusions,
             package_count,
             replayed,

@@ -1,5 +1,4 @@
-//! Shared install/CI arguments, intentionally not flattened into live commands
-//! until profile-aware activation and replay are integrated.
+//! Explicit install/CI materialization policy. Never inferred from NODE_ENV.
 
 use clap::{Args, ValueEnum};
 use tapid_lockfile::InstallProfile;
@@ -10,7 +9,6 @@ enum Kind {
     Optional,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Args)]
 pub(super) struct ProfileArgs {
     /// Omit dependency kinds from materialization, preserving locked selections.
@@ -25,7 +23,6 @@ pub(super) struct ProfileArgs {
 }
 
 impl ProfileArgs {
-    #[allow(dead_code)]
     pub(super) fn effective(&self) -> InstallProfile {
         InstallProfile {
             include_dev: self.include.contains(&Kind::Dev)
@@ -93,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_arguments_are_not_exposed_before_runtime_integration() {
+    fn profile_arguments_are_exposed_by_install_and_ci() {
         for command in ["install", "ci"] {
             for arguments in [
                 vec!["--production"],
@@ -102,7 +99,7 @@ mod tests {
             ] {
                 let mut invocation = vec!["tapid", command];
                 invocation.extend(arguments);
-                assert!(super::super::Cli::try_parse_from(invocation).is_err());
+                assert!(super::super::Cli::try_parse_from(invocation).is_ok());
             }
         }
     }

@@ -117,6 +117,7 @@ fn activate(
     replayed: bool,
     mut progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
+    session.profile = Some(profile);
     let digest = online::root_digest(project)?;
     let activation = session.lock.as_ref().expect("project lock acquired");
     session.journal = Some(

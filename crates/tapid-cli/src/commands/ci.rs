@@ -3,6 +3,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    #[command(flatten)]
+    profile: super::profile::ProfileArgs,
     /// Project root containing package.json and tapid.lock.
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
@@ -21,7 +23,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     let result = crate::application::install::run(
         crate::application::install::InstallRequest {
-            profile: tapid_lockfile::InstallProfile::default(),
+            profile: args.profile.effective(),
             project_dir: &args.project_dir,
             target_manifest_path: std::path::Path::new("package.json"),
             mutation: crate::application::install::ManifestMutation::None,
@@ -47,6 +49,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 return crate::output::json::installed(&report, "ci");
             }
             crate::output::report_warnings(&report.outcome.warnings);
+            crate::output::install::report_profile(&report);
             println!(
                 "Installed from lockfile: {} package(s)",
                 report.package_count

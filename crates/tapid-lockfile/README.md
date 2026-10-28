@@ -61,9 +61,10 @@ keeps them distinct from registry and workspace sources. The historical JSON
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
 
 `NativeSelection` is the schema-11 capability model for explicit dependency-kind
-profiles. Internal application requests can create it for a fresh non-full
+profiles. `install` can create it for a fresh non-full
 registry selection and replay full or omitted profiles without changing its bytes.
-CLI profile flags remain unexposed. Replay validates complete declaration kinds and
+`install` and `ci` expose explicit omit/include and production options; existing
+legacy and imported locks reject non-full profiles. Replay validates complete declaration kinds and
 exact manifest bindings before archive access; only the enabled closure reaches
 lifecycle discovery and layout activation. These source layouts use default-denied
 lifecycle policy. Replay checks approvals and derived outputs only for materialized
@@ -81,7 +82,7 @@ approved hooks and records verified source and derived-output evidence in the
 complete selection. Omitted-only approvals require no archives or tools; failed
 authorization, execution or activation retains project rollback. Hook execution
 requires the supported Linux toolchain and containment backend. This is not
-complete install-profile command support. Unlike `Lockfile`, it
+workspace install-profile support. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.
 `new` accepts typed declaration, package, edge and source-evidence inputs;
