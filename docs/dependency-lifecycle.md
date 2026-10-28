@@ -1,49 +1,52 @@
 # Dependency lifecycle scripts
 
+This guide describes main, including unreleased reporting and invocation overrides. With published v0.0.13 use the [tagged policy guide](https://github.com/LimeTip/tapid/blob/v0.0.13/docs/dependency-lifecycle.md) and [version summary](compatibility.md#release-and-checkout-scope). Exact Linux approvals do not establish production support. [#310 inspection](https://github.com/LimeTip/tapid/issues/310) remains proposed; [#291 export](https://github.com/LimeTip/tapid/issues/291) is deferred.
+
 Installation denies dependency scripts by default. Tapid reports skipped hooks because packages with native builds or generated files may be unusable. Root package scripts still run only through `tapid run`.
 
 When `binding.gyp` synthesizes the required `node-gyp rebuild` install hook, missing approval stops installation and explains how to approve it or explicitly accept the risk. Tapid cannot infer whether an arbitrary explicit shell hook is essential; those hooks retain the default skip warning.
 
 If hook discovery fails for a package with no approvals, Tapid warns and leaves its scripts unexecuted. Discovery failure is fatal when any approval names that package. Package metadata must still pass normal installation validation.
 
-Approve each dependency's `preinstall`, `install`, or `postinstall` hook in a checked-in `tapid.lifecycle.toml`. Approval requires the exact package name, version, registry-declared archive SHA-512 integrity, and SHA-256 of the exact script bytes. An approval that names the hook but has a different version, archive, or script fails installation. `prepare`, `prepublish`, `preprepare`, and `postprepare` cannot be approved. A package with `binding.gyp` and no explicit `preinstall` or `install` has the implicit `install` command `node-gyp rebuild`.
+## Reading installation results
 
-The policy uses the following fields. Replace the example digests with verified values before use.
+Human output identifies skipped dependency hooks and reports executed hooks
+separately from reused authenticated outputs. JSON preserves each skipped-hook
+warning occurrence, exact lock instance context, discovery knowledge, authorization,
+and observed disposition. See the [JSON result contract](json-results.md#dependency-lifecycle-observations).
+Failed discovery and discovery that was not performed remain unknown; an empty
+successful discovery is a different result. Reports do not run hooks or grant
+approval to obtain information. Installed dependency files do not establish that
+an application builds, tests, or runs. A later rollback can preserve observations
+of execution while removing its staged output; check transaction state.
 
-```toml
-schema = 1
-[[approvals]]
-package = "native-demo"
-version = "1.0.0"
-archive-digest = "sha512-<canonical padded base64 SHA-512>"
-hook = "install"
-script-digest = "sha256-<64 lowercase hexadecimal characters>"
-system-toolchain = true
-read = ["."]
-write = ["build"]
-network = false
-environment = { TMPDIR = "build" }
-timeout-seconds = 30
-max-output-bytes = 65536
-max-processes = 64
-max-memory-bytes = 536870912
-tools = [
-  { name = "sh", path = "/bin/sh", digest = "sha256-<64 lowercase hexadecimal characters>" },
-  { name = "node", path = "/usr/bin/node", digest = "sha256-<64 lowercase hexadecimal characters>" },
-]
-```
+Imported schema-8 locks do not execute hooks and report discovery as unperformed.
+Before authoring an execution policy, account for conversion to native resolution:
+explicit dependency mutations can change imported selections, native peer support
+is narrower than npm ancestor lookup, and live workspace packages cannot be
+exposed to dependency hooks. See [npm migration limits](npm-lockfile-import.md)
+and the [compatibility matrix](compatibility.md#compatibility-matrix).
 
-Every approval must explicitly acknowledge `system-toolchain = true`. Linux execution can read and execute the backend's system runtime directories, including `/usr/bin`, libraries, headers, certificates, `/usr/share/nodejs` for distribution-provided Node builtins, and basic character devices. This permits native compilers and their helper programs. It does not grant reads of the caller's home or writes to system directories. Tool entries pin bytes copied into a private executable directory. `sh` is required; declare `node` when the hook uses Node. PATH contains that private directory, approved dependency shims when enabled, and `/usr/bin`, never the caller's PATH. The backend fingerprints the accessible system toolchain, kernel, and Tapid executable as well as declared tools. Toolchain changes invalidate generated-output reuse. Unreadable system files and directories the caller cannot search are fingerprinted by ownership, mode, size, and modification/change timestamps. Changes to readability or recorded metadata invalidate reuse. Searchable directories that cannot be listed remain fatal because known child files may still be readable. Other inspection errors also remain fatal.
+Cold CI needs the exact eligible derived output and valid store-local attestation
+state, as well as the source archives and checked policy/toolchain prerequisites.
+Copying generated tree bytes alone does not enable authenticated frozen/offline
+reuse. Do not export the store's secret authentication key as a project artifact.
+An empty or independently initialized store must obtain eligible authenticated
+outputs through its approved build workflow on a supported host. Changed source
+bytes, original script bytes, policy, or toolchain invalidate old approval/output
+reuse; old observations never grant permission for a changed input.
 
-Windows policies may pin `cmd` as their shell. Private Windows executables receive an `.exe` suffix when absent. Tool names must fit the portable executable filename limit and cannot collide through case folding or an optional `.exe` suffix, on any policy-parsing host.
-
-Read and write paths are relative to a private copy of the dependency. Missing write directories are created there. Scripts cannot write the verified source store, active `node_modules`, project manifests, lockfiles, or other packages. The environment contains only literal policy values and Tapid's constructed PATH. Caller variables and credentials are not inherited. Enabled networking permits IPv4/IPv6 sockets; host Unix sockets remain denied and local stream socketpairs support runtime IPC. Credential names, loader injection variables, HOME, and PATH cannot be approved.
-
-Optional `dependencies = true` grants read access to a private materialization of the resolved dependency graph. Approved packages build after their dependencies. Cyclic graphs and graphs deeper than 1024 packages fail closed when approvals are present. Live workspace packages cannot be exposed to hooks; use verified published dependencies. Optional `process-memory-stats = true` exposes the backend's read-only private procfs view. It does not expose host processes. Seccomp still denies ptrace, process_vm access, and pidfd acquisition; procfs visibility is restricted to the private PID namespace.
+Linux execution evidence does not establish native Windows or macOS support.
+Windows identity/integrated acceptance and native macOS feasibility remain
+separate platform work; no Linux VM fallback is implied. Representative native
+build/generated-code usability and external pilots remain adoption acceptance,
+independent of a truthful installation report.
 
 ## Execution and outputs
 
 Authenticated, cacheable dependency builds currently use Linux ManagedTree. It requires Landlock ABI 3 or newer, seccomp, util-linux `unshare`, private PID and mount namespaces, and a writable delegated cgroup v2 parent with the memory and pids controllers enabled. `cgroup.kill` and swap controls must be available. Tapid does not configure host delegation. Missing prerequisites fail before dependency code runs. macOS contained dependency builds remain unavailable and fail closed. Windows can run invocation-only contained hooks with `--allow-unapproved-dependency-scripts`, using private low-integrity write copies, LPAC, and Job Object supervision. Authenticated, cacheable Windows builds remain gated on complete toolchain identity and integrated acceptance. The approval override does not require `--unsafe-no-dependency-sandbox` when native Windows containment is available. Explicit uncontained execution is a separate risk override, as described below.
+
+Portable package/archive and original script identity are review evidence. Execution authority additionally depends on exact policy grants, pinned tool bytes, backend and host toolchain; store-local output authentication is not portable authority. Do not copy secret store keys as project evidence. Review eligible execution options below before writing approvals.
 
 ## Explicit execution overrides
 
@@ -80,36 +83,39 @@ Imported npm schema 8 locks retain their separate pinned-artifact workflow and n
 
 Approved mutable executables are read from a held file, checked against their pinned digest, and copied into the private tools directory. Replacing the original path after verification does not change the bytes launched. The explicit uncontained macOS path may retain a canonical system executable only when its held file reports a kernel read-only root filesystem, because relocation can invalidate its signature. This assumes trusted host administration; administrative remounts and host mutation remain outside the boundary. Mutable original paths never receive this exception.
 
-## Reading installation results
+## Exact approvals
 
-Human output identifies skipped dependency hooks and reports executed hooks
-separately from reused authenticated outputs. JSON preserves each skipped-hook
-warning occurrence, exact lock instance context, discovery knowledge, authorization,
-and observed disposition. See the [JSON result contract](json-results.md#dependency-lifecycle-observations).
-Failed discovery and discovery that was not performed remain unknown; an empty
-successful discovery is a different result. Reports do not run hooks or grant
-approval to obtain information. Installed dependency files do not establish that
-an application builds, tests, or runs. A later rollback can preserve observations
-of execution while removing its staged output; check transaction state.
+Approve each dependency's `preinstall`, `install`, or `postinstall` hook in a checked-in `tapid.lifecycle.toml`. Approval requires the exact package name, version, registry-declared archive SHA-512 integrity, and SHA-256 of the exact script bytes. An approval that names the hook but has a different version, archive, or script fails installation. `prepare`, `prepublish`, `preprepare`, and `postprepare` cannot be approved. A package with `binding.gyp` and no explicit `preinstall` or `install` has the implicit `install` command `node-gyp rebuild`.
 
-Imported schema-8 locks do not execute hooks and report discovery as unperformed.
-Before authoring an execution policy, account for conversion to native resolution:
-explicit dependency mutations can change imported selections, native peer support
-is narrower than npm ancestor lookup, and live workspace packages cannot be
-exposed to dependency hooks. See [npm migration limits](npm-lockfile-import.md)
-and the [compatibility matrix](compatibility.md#compatibility-matrix).
+The policy uses the following fields. Replace the example digests with verified values before use.
 
-Cold CI needs the exact eligible derived output and valid store-local attestation
-state, as well as the source archives and checked policy/toolchain prerequisites.
-Copying generated tree bytes alone does not enable authenticated frozen/offline
-reuse. Do not export the store's secret authentication key as a project artifact.
-An empty or independently initialized store must obtain eligible authenticated
-outputs through its approved build workflow on a supported host. Changed source
-bytes, original script bytes, policy, or toolchain invalidate old approval/output
-reuse; old observations never grant permission for a changed input.
+```toml
+schema = 1
+[[approvals]]
+package = "native-demo"
+version = "1.0.0"
+archive-digest = "sha512-<canonical padded base64 SHA-512>"
+hook = "install"
+script-digest = "sha256-<64 lowercase hexadecimal characters>"
+system-toolchain = true
+read = ["."]
+write = ["build"]
+network = false
+environment = { TMPDIR = "build" }
+timeout-seconds = 30
+max-output-bytes = 65536
+max-processes = 64
+max-memory-bytes = 536870912
+tools = [
+  { name = "sh", path = "/bin/sh", digest = "sha256-<64 lowercase hexadecimal characters>" },
+  { name = "node", path = "/usr/bin/node", digest = "sha256-<64 lowercase hexadecimal characters>" },
+]
+```
 
-Linux execution evidence does not establish native Windows or macOS support.
-Windows identity/integrated acceptance and native macOS feasibility remain
-separate platform work; no Linux VM fallback is implied. Representative native
-build/generated-code usability and external pilots remain adoption acceptance,
-independent of a truthful installation report.
+Every approval must explicitly acknowledge `system-toolchain = true`. Linux execution can read and execute the backend's system runtime directories, including `/usr/bin`, libraries, headers, certificates, `/usr/share/nodejs` for distribution-provided Node builtins, and basic character devices. This permits native compilers and their helper programs. It does not grant reads of the caller's home or writes to system directories. Tool entries pin bytes copied into a private executable directory. `sh` is required; declare `node` when the hook uses Node. PATH contains that private directory, approved dependency shims when enabled, and `/usr/bin`, never the caller's PATH. The backend fingerprints the accessible system toolchain, kernel, and Tapid executable as well as declared tools. Toolchain changes invalidate generated-output reuse. Unreadable system files and directories the caller cannot search are fingerprinted by ownership, mode, size, and modification/change timestamps. Changes to readability or recorded metadata invalidate reuse. Searchable directories that cannot be listed remain fatal because known child files may still be readable. Other inspection errors also remain fatal.
+
+Windows policies may pin `cmd` as their shell. Private Windows executables receive an `.exe` suffix when absent. Tool names must fit the portable executable filename limit and cannot collide through case folding or an optional `.exe` suffix, on any policy-parsing host.
+
+Read and write paths are relative to a private copy of the dependency. Missing write directories are created there. Scripts cannot write the verified source store, active `node_modules`, project manifests, lockfiles, or other packages. The environment contains only literal policy values and Tapid's constructed PATH. Caller variables and credentials are not inherited. Enabled networking permits IPv4/IPv6 sockets; host Unix sockets remain denied and local stream socketpairs support runtime IPC. Credential names, loader injection variables, HOME, and PATH cannot be approved.
+
+Optional `dependencies = true` grants read access to a private materialization of the resolved dependency graph. Approved packages build after their dependencies. Cyclic graphs and graphs deeper than 1024 packages fail closed when approvals are present. Live workspace packages cannot be exposed to hooks; use verified published dependencies. Optional `process-memory-stats = true` exposes the backend's read-only private procfs view. It does not expose host processes. Seccomp still denies ptrace, process_vm access, and pidfd acquisition; procfs visibility is restricted to the private PID namespace.

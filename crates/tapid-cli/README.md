@@ -1,5 +1,7 @@
 # tapid
 
+This guide includes unreleased main behavior. Check `tapid --version`, the [release/checkout summary](../../docs/compatibility.md#release-and-checkout-scope), and the [v0.0.13 CLI guide](https://github.com/LimeTip/tapid/blob/v0.0.13/crates/tapid-cli/README.md) for the published release.
+
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/tapid)](https://crates.io/crates/tapid)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid)](https://crates.io/crates/tapid)
@@ -23,7 +25,7 @@ curl -fsSL https://tapid.dev/install.sh | bash
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-The generated release installers select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The 0.0.11 rollout introduced these routes; this source README does not establish their current deployed state. See the [administrator lifecycle contract](../../docs/release-distribution.md#administrator-lifecycle-contract) for explicit-path detection and unattended limitations. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
+Published v0.0.13 release installers authenticate the release record through its native verifier, select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. See the [recorded v0.0.13 upgrade receipts](../../docs/documentation-contracts.md#running-the-unix-lanes) for exact tested journeys; source documentation does not establish current deployed state. See the [administrator lifecycle contract](../../docs/release-distribution.md#administrator-lifecycle-contract) for explicit-path detection and unattended limitations. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 

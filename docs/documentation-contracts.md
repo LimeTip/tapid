@@ -187,3 +187,34 @@ owned/gated work. No automatic promotion is implemented here. Failures remain
 visible in Actions; integrity failures require human review, not fallback to a
 cached or locally built binary. Review Actions allowances before enabling schedules
 in any private fork; no paid CI expansion is authorized.
+
+## Compatibility claim release review
+
+Tapid maintainers own capability contracts and their evidence. The authoritative
+public entry point is [compatibility](compatibility.md); migration, lifecycle and
+production-adoption guides own their detailed boundaries. Website maintainers own
+presentation and promotion of a reviewed upstream pin through tapid-web review.
+The [2026-10-28 claims audit and website handoff](adoption-claims-audit.md) records
+the initial release/main distinction, not a new compatibility database.
+
+For each release or website pin promotion:
+
+1. Resolve the exact published tag and peeled source commit. Record binary/version
+   and platform identities separately from runner/docs revisions.
+2. Compare README, CLI guide, website and release notes for dist-tags, copied Git,
+   copied file, npm import, ci, lifecycle, lock formats and upgrade verification.
+   Record absent claims and unknown support; do not infer binary execution from
+   implementation or source tests.
+3. Check command help and runnable-example eligibility for that exact release.
+   Reuse `docs/examples/contracts.json`; keep narrative compatibility out of the
+   executable runner inventory. Check receipt age, retention and host gates.
+4. Preserve experimental/development/production distinctions and explain each
+   security guarantee's limits. Require exact versions, current official sources
+   and review dates for retained competitor comparisons; require real receipts
+   for pilot or speed claims.
+5. Keep old tag-specific guides and release notes usable. Do not replace a valid
+   historical claim with unreleased main behavior. Review links and rollback.
+6. Prepare file-level website corrections and submit them through tapid-web's
+   separate review process during authorized delivery. Record the owning PR,
+   reviewed upstream pin and resulting website revision; until then coordination
+   is pending. Do not synchronize installers or publish as part of this checklist.

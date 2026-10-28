@@ -4,6 +4,12 @@
 
 Tapid manages packages and lockfiles. It is not a runtime and does not replace Node.js, workerd, Wrangler, or deployment tools. npm is not required to import a v3 lock or to install and replay the resulting Tapid lock.
 
+## Evaluation eligibility
+
+This is the [#151 migration workflow](https://github.com/LimeTip/tapid/issues/151) for maintainers evaluating a development release. Check `tapid --version` and `tapid import-package-lock --help`. Published v0.0.13 supports registry-only imports: workspace import and coordinated member recovery below are unreleased main behavior. Use the [tagged guide](https://github.com/LimeTip/tapid/blob/v0.0.13/docs/npm-lockfile-import.md) and [version summary](compatibility.md#release-and-checkout-scope) for that binary. Production support remains pending.
+
+Use a disposable checkout. Retain a known-good npm install/deployment path, matching root/member manifests, npm lock, configuration and any prior Tapid lock. Record Node/npm versions and baseline build/test/start results before changing the installer. Never replace your only working installation for this experiment.
+
 ## Migration
 
 Keep a backup or a version-control copy of `package.json`, `package-lock.json`, and any existing `tapid.lock` before importing. Use a clean project with no interrupted Tapid transaction.
@@ -35,6 +41,16 @@ tapid install --offline --frozen
 
 A plain `tapid install` also preserves an imported graph. Explicit dependency mutations such as `add`, `remove`, and `update` use Tapid's ordinary resolver and write an ordinary Tapid lock. Those operations can change selections and retain the ordinary resolver's narrower peer semantics. `outdated` currently requires an ordinary verified-tree lock rather than an imported lock.
 
+## Check the application before switching
+
+Read installation warnings first. A skipped hook can leave native or generated-code packages unusable despite successful verification. Imported locks never execute hooks; their discovery remains unperformed. See [available lifecycle evidence](dependency-lifecycle.md#reading-installation-results) and [host eligibility](dependency-lifecycle.md#execution-and-outputs) before policy authoring.
+
+Review versions, aliases, sources, peer instances and platform omissions against the retained npm lock. `tapid lock verify` checks structure, not graph equivalence or application correctness. The [synthetic comparator](news-site-fixture.md) is fixture-specific. [#310 lifecycle inspection](https://github.com/LimeTip/tapid/issues/310) remains proposed and [#291 export](https://github.com/LimeTip/tapid/issues/291) deferred; neither supplies a command to use here. Main's `tapid status` reports bounded local metadata, not installed-tree integrity or lifecycle authorization; it is not a v0.0.13 capability claim.
+
+Run the same application build, tests and start/health check with the baseline runtime, environment and tooling against the Tapid installation. For projects defining those scripts, `npm run build`, `npm test` and `npm start` use npm as the script launcher rather than installer. Substitute your project's actual checks; they execute project code. Record commands, versions, OS/architecture, exit codes and behavioral differences. Experimental `tapid run` needs a separately reviewed profile and is optional for package evaluation.
+
+Keep the npm path until checks and rollback rehearsal pass. For imported-graph maintenance, update with npm in the baseline checkout, review and reimport. `tapid add`, `remove` or `update` converts to native resolution and can change selections and peer placement. Back up first and repeat graph/application review before using the converted lock or approving builds. Successful import is not external application acceptance.
+
 ## Supported subset
 
 The importer accepts v3 `packages` entries for registry tarballs with canonical, credential-free HTTPS URLs, a conventional package/version tarball path, and one canonical padded SHA-512 integrity value. It supports nested duplicate versions, npm aliases with explicit actual package names, already selected ancestor peer providers, and distinct peer contexts when the resulting Tapid instance graph can represent them. It retains ordinary npm descriptive metadata, including license, engines, funding, deprecation, bin metadata, and install-script flags. Retaining engines metadata does not add runtime engine enforcement.
@@ -53,12 +69,12 @@ The importer does not reproduce npm's physical hoisting layout. Tapid's managed 
 
 The imported lock keeps all selected platform variants and their npm `os`, `cpu`, and `libc` constraints. Each install selects the applicable graph for the current platform without choosing another version. Incompatible optional branches are skipped. A required incompatible package fails, including a required child of an otherwise applicable optional package. Tapid aborts instead of installing that optional parent with a missing required dependency. A platform switch can require another frozen install to fetch the previously unverified variants. Offline replay fails if those verified trees are unavailable.
 
-Tapid differs from `npm ci` when an applicable optional package fails download, integrity, extraction, or identity verification. Tapid aborts the whole install instead of silently accepting that failure. It also disables dependency scripts, which can make native or generated-code packages unusable even when their selected versions agree with npm. The fixture uses a deliberately unsupported OS to check deterministic optional omission on every test platform.
+If an applicable optional package fails download, integrity, extraction, or identity verification, Tapid aborts the whole install. It also disables dependency scripts, which can make native or generated-code packages unusable even when their selected versions agree with npm. The fixture uses a deliberately unsupported OS to check deterministic optional omission on every test platform.
 
 ## Rollback
 
 Import failures leave root and member manifests, the previous lock, store, and active dependencies unchanged. Import refuses pending install recovery instead of attempting it. Restore your saved `tapid.lock` to undo a successful import. Import itself has not changed `node_modules`.
 
-After an install, restore the saved lock and matching manifest, then replay their verified trees, or restore the saved npm project and run `npm ci`. Keep the npm lock backup until you have checked your application with its chosen runtime and tools.
+After an install, complete pending Tapid transaction recovery before using the evaluation project. Prefer returning to the retained clean npm checkout or prior application artifact. Restore matching root/member manifests, configuration and `package-lock.json`, then run `npm ci` there with the baseline runtime. If reusing the evaluation directory, first move Tapid-managed root/member `node_modules` trees aside rather than mixing layouts. Restore or remove the evaluation-only `tapid.lock` from your backup as appropriate. Re-run baseline application checks. Rehearse npm network/cache or prior-image availability before relying on rollback. Replacing only the Tapid executable does not restore a dependency graph.
 
 Imported locks use Tapid schema 8, separately from ordinary schema 7 verified-tree locks. Schema 8 retains the npm selections and stores tree verification receipts by package placement, bound to each receipt's tarball URL and integrity value. Older Tapid clients reject this schema. Receipts can change on the first frozen install; selected versions, sources, integrity values, and constraints do not. See [ADR 0008](adr/0008-offline-npm-lock-import.md) and the [npm lockfile format](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/).
