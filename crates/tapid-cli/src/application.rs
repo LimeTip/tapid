@@ -14,6 +14,7 @@ pub(crate) mod preview;
 mod release_record;
 pub(crate) mod release_verification;
 pub(crate) mod replay;
+mod selection;
 pub(crate) mod status;
 
 pub(crate) mod tools;

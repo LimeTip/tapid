@@ -64,6 +64,12 @@ journal without resolving again. A redirected project root is rejected before
 locking its replacement. The command writer remains disabled until command,
 import, copied-source, and result integration are complete.
 
+An internal native-install entrypoint now captures current inputs, validates any
+previous native selection, resolves once with locked preferences, and publishes
+that candidate. It settles metadata recovery before capture and refuses activation
+recovery. The candidate retains request counts and exclusions for later shared
+reporting. Imported-lock orchestration and command routing remain unavailable.
+
 ## Commands
 
 ```text

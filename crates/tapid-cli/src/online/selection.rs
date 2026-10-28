@@ -1,6 +1,31 @@
 //! Persistable native selections assembled without artifact or store preparation.
 use super::*;
 
+/// Resolve once and retain the complete validated selection for publication.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_selection(
+    project: &Path,
+    manifest: &PackageManifest,
+    workspace: WorkspaceMaterialization,
+    fixture: Option<&Path>,
+    config: &crate::registry::RegistryConfig,
+    previous: Option<&Lockfile>,
+    root_digest: &str,
+) -> Result<SelectionCandidate, OperationalError> {
+    graph::resolve_package_graph(
+        project,
+        manifest,
+        workspace,
+        fixture,
+        false,
+        config,
+        previous,
+        None,
+        |_| {},
+    )?
+    .into_selection(root_digest, previous)
+}
+
 impl graph::ResolvedGraph {
     // Shared persistence rules for fetched and selection-only graphs.
     pub(super) fn assemble_lock(
@@ -153,9 +178,9 @@ impl graph::ResolvedGraph {
     }
 }
 
-// Kept private and unreachable from commands until stale-input publication is wired.
+// Commands remain gated on imported-lock handling and shared result integration.
 #[allow(dead_code)]
-pub(super) struct SelectionCandidate {
+pub(crate) struct SelectionCandidate {
     pub lock: Lockfile,
     pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,

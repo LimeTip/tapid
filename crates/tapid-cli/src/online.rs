@@ -8,6 +8,7 @@ pub(crate) use copied::{
     file_bytes as copied_file_bytes, validate_copied_root_binding, validate_locked_files,
 };
 pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview_graph};
+pub(crate) use selection::{SelectionCandidate, prepare_selection};
 mod locked;
 use crate::application::outcome::{ErrorKind, OperationalError};
 pub(crate) use locked::{
