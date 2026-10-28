@@ -2058,6 +2058,60 @@ fn npm_import_why_scopes_workspace_alias_omissions_and_rejects_stale_members() {
 }
 
 #[test]
+fn npm_import_why_preserves_workspace_peer_kinds() {
+    for optional in [false, true] {
+        let (project, _home) = workspace_project();
+        if optional {
+            for filename in ["package-lock.json", "packages/helper/package.json"] {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(project.path().join(filename)).unwrap())
+                        .unwrap();
+                let member = if filename == "package-lock.json" {
+                    &mut value["packages"]["packages/helper"]
+                } else {
+                    &mut value
+                };
+                member["peerDependenciesMeta"]["shared"]["optional"] = true.into();
+                project
+                    .write(filename, value.to_string().as_bytes())
+                    .unwrap();
+            }
+        }
+        let imported = invoke(&project, &["import-package-lock", "package-lock.json"]);
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+        let output = invoke(
+            &project,
+            &["why", "shared", "--workspace", "@scope/helper", "--json"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let paths = value["data"]["paths"].as_array().unwrap();
+        assert!(!paths.is_empty());
+        for path in paths {
+            assert_eq!(
+                path["steps"].as_array().unwrap().last().unwrap()["edgeKind"],
+                if optional {
+                    "optionalPeerDependencies"
+                } else {
+                    "peerDependencies"
+                }
+            );
+        }
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
 fn npm_import_why_bounds_omissions_without_claiming_absence() {
     use sha2::{Digest, Sha256};
     let project = TempProject::new("npm-import-why-bound").unwrap();

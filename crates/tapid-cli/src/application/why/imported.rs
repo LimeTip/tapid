@@ -92,6 +92,19 @@ pub(super) fn explain(
         graph.edges.insert(path.clone(), edges);
     }
     for (path, member) in &imported.workspaces {
+        let edge_kind = |name: &str| {
+            if member["optionalDependencies"].get(name).is_some() {
+                "optionalDependencies"
+            } else if member["dependencies"].get(name).is_some() {
+                "dependencies"
+            } else if member["devDependencies"].get(name).is_some() {
+                "devDependencies"
+            } else if member["peerDependenciesMeta"][name]["optional"].as_bool() == Some(true) {
+                "optionalPeerDependencies"
+            } else {
+                "peerDependencies"
+            }
+        };
         let name = member["name"]
             .as_str()
             .ok_or_else(|| OperationalError::new(ErrorKind::Lockfile, "workspace name missing"))?
@@ -114,26 +127,14 @@ pub(super) fn explain(
                     .map(|(name, target)| Edge {
                         name: name.clone(),
                         target: target.clone(),
-                        kind: if roots.optional_dependencies.contains(name) {
-                            "optionalDependencies"
-                        } else {
-                            "dependencies"
-                        },
+                        kind: edge_kind(name),
                     })
                     .collect()
             })
             .unwrap_or_default();
         graph.edges.insert(path.clone(), edges);
         for (name, target) in lock.workspace_bindings(path).map_err(invalid)? {
-            let kind = if member["optionalDependencies"].get(&name).is_some() {
-                "optionalDependencies"
-            } else if member["dependencies"].get(&name).is_some() {
-                "dependencies"
-            } else if member["devDependencies"].get(&name).is_some() {
-                "devDependencies"
-            } else {
-                "peerDependencies"
-            };
+            let kind = edge_kind(&name);
             graph
                 .edges
                 .get_mut(path)

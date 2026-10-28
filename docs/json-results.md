@@ -79,6 +79,8 @@ and profile; `data.omissions` uses imported records (`declaringPlacement`, `name
 Imported reasons are `incompatiblePlatform` and `importedPlacementAbsent`.
 Schema 8 uses the current host for platform filtering and has no recorded omissions.
 Selected aliases and omitted aliases match either their local or actual package name.
+Workspace edges retain their declaration sections, including `peerDependencies`
+and `optionalPeerDependencies` for peer-only declarations.
 The same path/visit/omission bounds and read-only guarantees apply.
 
 A confirmed match missing from both selected paths and accepted omissions is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. If traversal or omission reporting reaches a safety bound, the envelope outcome is `partial`, `data.truncated` is true, `data.not_found` is false, and the command exits 0. Operational errors use the standard `failure` envelope and typed `errors` entry.
