@@ -6,7 +6,11 @@ use tapid_linker::{InstanceKey, NamedLayoutInput, VerifiedTreeReference};
 use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 
+mod live;
+mod project;
 mod selection;
+#[cfg(test)]
+use live::bind_live_command;
 
 /// Reconstruct locked instances from existing authenticated store evidence.
 /// The caller must retain `guard` while consuming these paths and separately
@@ -121,6 +125,61 @@ mod tests {
             )
         };
         let (input, trees) = inspect().unwrap();
+        let project = TempProject::new("installed-copied-live").unwrap();
+        let plan = tapid_linker::plan_named_layout(
+            tapid_linker::ManagedRoot::new(project.path()).unwrap(),
+            input.clone(),
+            crate::application::replay::current_platform(),
+        )
+        .unwrap();
+        crate::filesystem::tree::materialize_stage(
+            project.path(),
+            &plan,
+            &input.instances,
+            &trees,
+            false,
+        )
+        .unwrap();
+        let select_live = || {
+            bind_live_command(
+                project.path(),
+                project.path(),
+                &input,
+                &plan,
+                &tapid_linker::WorkspaceLinkPlan::default(),
+                Some("local"),
+                "tool",
+            )
+        };
+        assert!(
+            select_live().is_err(),
+            "a matching layout does not establish managed ownership"
+        );
+        project
+            .write(".tapid-managed", b"tapid-managed-v1\n")
+            .unwrap();
+        let selected = select_live().unwrap();
+        assert_eq!(
+            selected.entry,
+            project.path().join("node_modules/local/cli.js")
+        );
+        assert_eq!(selected.selection.owner.id.name.as_str(), "tool");
+        let mut foreign_plan = plan.clone();
+        foreign_plan.entries[0].instance.name = "foreign".parse().unwrap();
+        assert!(
+            bind_live_command(
+                project.path(),
+                project.path(),
+                &input,
+                &foreign_plan,
+                &tapid_linker::WorkspaceLinkPlan::default(),
+                Some("local"),
+                "tool",
+            )
+            .is_err()
+        );
+        std::fs::write(project.path().join("node_modules/local/cli.js"), b"hostile").unwrap();
+        assert!(select_live().is_err());
         assert_eq!(input.root_dependencies[0].name.as_str(), "local");
         assert_eq!(
             input.instances[0].id.registry.as_str(),
