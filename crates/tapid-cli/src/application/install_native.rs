@@ -33,12 +33,25 @@ pub(super) fn replay(
             ));
         }
     }
-    if !policy.approvals().is_empty() || selection.packages().values().any(|package| {
-        matches!(&package.source_evidence, tapid_lockfile::NativeSourceEvidence::Verified { package }
-            if !package.derived_hooks().is_empty())
-    }) {
-        return Err(OperationalError::new(ErrorKind::InvalidRequest,
-            "native selection lifecycle output integration is required before replaying approved or derived hooks"));
+    // Omitted selections never reach lifecycle discovery. Their approvals and
+    // derived outputs must not prevent replay of the enabled source closure.
+    // Match approval names conservatively, as lifecycle discovery does: stale
+    // versions or archive pins for a retained name still require integration.
+    for key in selection.materialized_keys(profile)? {
+        let identity: tapid_lockfile::LockfilePackageKey = key.parse()?;
+        let package = &selection.packages()[&key];
+        if policy
+            .approvals()
+            .iter()
+            .any(|approval| approval.package() == identity.name.as_str())
+            || matches!(&package.source_evidence, tapid_lockfile::NativeSourceEvidence::Verified { package }
+                if !package.derived_hooks().is_empty())
+        {
+            return Err(OperationalError::new(
+                ErrorKind::InvalidRequest,
+                "native selection lifecycle output integration is required before replaying approved or derived hooks",
+            ));
+        }
     }
     let config = crate::registry::RegistryConfig::load(project)
         .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;

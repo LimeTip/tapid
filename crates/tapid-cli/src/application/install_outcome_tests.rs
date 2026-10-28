@@ -75,6 +75,165 @@ fn native_selection_fixture() -> (TempProject, PathBuf, String) {
     (project, fixture, selection)
 }
 
+fn native_approval_policy(project: &TempProject, package: &str) -> String {
+    format!(
+        r#"schema = 1
+[[approvals]]
+package = "{package}"
+version = "1.0.0"
+archive-digest = "{INTEGRITY}"
+hook = "install"
+script-digest = "sha256-{}"
+system-toolchain = true
+read = ["."]
+write = ["."]
+network = false
+environment = {{}}
+timeout-seconds = 5
+max-output-bytes = 1024
+max-processes = 32
+max-memory-bytes = 134217728
+tools = [{{name="sh", path={}, digest="sha256-{}"}}]
+"#,
+        "0".repeat(64),
+        serde_json::to_string(&project.path().join("unused-sh")).unwrap(),
+        "0".repeat(64)
+    )
+}
+
+#[test]
+fn native_replay_ignores_approvals_for_omitted_packages_but_rejects_retained_approvals() {
+    let (project, fixture, _) = native_selection_fixture();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","devDependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut selection: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+    selection["rootManifestDigest"] = online::root_digest(project.path()).unwrap().into();
+    selection["declarations"][0]["kind"] = "dev".into();
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let policy = native_approval_policy(&project, "shared");
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    fs::remove_file(&fixture).unwrap();
+    let store = project.path().join("store");
+    let request = |profile| InstallRequest {
+        profile,
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Ci,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    let report = run(
+        request(tapid_lockfile::InstallProfile::production()),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 0);
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let failure = run(request(tapid_lockfile::InstallProfile::default()), |_| {}).unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("lifecycle output integration")
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+    assert!(!project.path().join("unused-sh").exists());
+}
+
+#[test]
+fn native_replay_omitted_approval_does_not_require_acyclic_retained_sources() {
+    let (project, fixture, _) = native_selection_fixture();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"a":"1.0.0"},"devDependencies":{"devtool":"1.0.0"}}"#).unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("../../tests/fixtures/aliased-root-cycle.json"),
+        )
+        .unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let key = |name: &str| {
+        tapid_lockfile::LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            name.parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string()
+    };
+    let mut packages = serde_json::Map::new();
+    for (name, dependency) in [("a", "b"), ("b", "a")] {
+        let record = registry["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name && p["version"] == "1.0.0")
+            .unwrap();
+        packages.insert(key(name), serde_json::json!({
+            "sourceEvidence":{"state":"pending","artifactUrl":format!("https://registry.npmjs.org/{name}-1.0.0.tgz"),"artifactIntegrity":record["integrity"]},
+            "dependencies":{dependency:{"kind":"required","target":key(dependency)}},"peerProviders":{}
+        }));
+    }
+    packages.insert(key("devtool"), serde_json::json!({
+        "sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/devtool-1.0.0.tgz","artifactIntegrity":INTEGRITY},
+        "dependencies":{},"peerProviders":{}
+    }));
+    let selection = serde_json::json!({
+        "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+        "rootManifestDigest":online::root_digest(project.path()).unwrap(),"workspaceManifestDigests":{},
+        "declarations":[
+            {"workspace":null,"name":"a","kind":"required","target":key("a")},
+            {"workspace":null,"name":"devtool","kind":"dev","target":key("devtool")}
+        ],"packages":packages
+    });
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let policy = native_approval_policy(&project, "devtool");
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let report = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::production(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 2);
+    assert!(project.path().join("node_modules/a/package.json").is_file());
+    assert!(!project.path().join("node_modules/devtool").exists());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
 #[test]
 fn native_selection_cold_ci_activates_sources_without_rewriting_selection() {
     let (project, fixture, selection) = native_selection_fixture();

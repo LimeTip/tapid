@@ -66,9 +66,12 @@ registry selection and replay full or omitted profiles without changing its byte
 CLI profile flags remain unexposed. Replay validates complete declaration kinds and
 exact manifest bindings before archive access; only the enabled closure reaches
 lifecycle discovery and layout activation. These source layouts use default-denied
-lifecycle policy; workspace
-activation, approved hooks, derived outputs and selection mutation reject pending
-their integration. This is not complete install-profile command support. Unlike `Lockfile`, it
+lifecycle policy. Replay checks approvals and derived outputs only for materialized
+packages; omitted-only lifecycle approvals do not require their archives or tools.
+Approvals for retained package names (including stale pins), retained derived
+outputs, workspace activation and selection mutation reject pending integration.
+Fresh profile preparation still rejects nonempty approval policies. This is not
+complete install-profile command support. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.
 `new` accepts typed declaration, package, edge and source-evidence inputs;
