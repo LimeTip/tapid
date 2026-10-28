@@ -15,6 +15,7 @@ type Options = {
   binary: string;
   node: string;
   evidence: string;
+  nodeMajor?: number;
   readinessMs?: number;
   shutdownMs?: number;
 };
@@ -90,7 +91,9 @@ export async function runManagedNewsSite(options: Options) {
   const summary: any = { status: "running", project, binary, node, commands: [] };
   const version = spawnSync(node, ["--version"], { env, encoding: "utf8", timeout: 10000 });
   assert.equal(version.status, 0, "selected Node version probe failed");
-  assert.match(version.stdout.trim(), /^v22\./, "acceptance requires Node 22");
+  const nodeMajor = options.nodeMajor ?? 22;
+  assert.ok(Number.isSafeInteger(nodeMajor) && nodeMajor > 0, "expected Node major must be a positive integer");
+  assert.equal(Number(/^v(\d+)\./.exec(version.stdout.trim())?.[1]), nodeMajor, `acceptance requires Node ${nodeMajor}`);
   summary.runtime = {
     version: version.stdout.trim(), platform: process.platform, architecture: process.arch, kernel: release(),
     node_sha256: createHash("sha256").update(readFileSync(node)).digest("hex"),
@@ -142,6 +145,7 @@ export async function runManagedNewsSite(options: Options) {
     const server = launch(binary, args, project, env, join(evidence, "start.log"));
     const url = `http://127.0.0.1:${port}/acceptance`;
     let polling = true;
+    let readinessFailed = false;
     try {
       await deadline((async () => {
         while (polling) {
@@ -155,11 +159,20 @@ export async function runManagedNewsSite(options: Options) {
         }
       })(), options.readinessMs ?? 60000, "HTTP readiness");
       writeFileSync(join(evidence, "acceptance.txt"), "TAPID_NEWS_SITE_ACCEPTANCE_V1\n");
+    } catch (error) {
+      readinessFailed = true;
+      throw error;
     } finally {
       polling = false;
-      const result = await stop(server);
-      assert.equal(result.code, 130, `start cancellation exited ${result.code} (${result.signal})`);
-      summary.start = checkedResult(join(evidence, "start.json"), "Cancelled");
+      summary.cleanup_attempted = true;
+      try {
+        const result = await stop(server);
+        assert.equal(result.code, 130, `start cancellation exited ${result.code} (${result.signal})`);
+        summary.start = checkedResult(join(evidence, "start.json"), "Cancelled");
+      } catch (error) {
+        summary.cleanup_error = String(error);
+        if (!readinessFailed) throw error;
+      }
     }
     let stillServing = false;
     try {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { temporary } from "./script-support.ts";
 import { runManagedNewsSite } from "../scripts/check-managed-news-site.ts";
@@ -24,13 +24,27 @@ function receipt(termination) {
  fs.writeFileSync(result, JSON.stringify({outcome:'completed', receipt:{assurance:'ManagedTree', termination, requested:{filesystem_read:true}, enforced:{filesystem_read:true}, completion:{cleanup_confidence:mode === 'bad-cleanup' ? 'NoCleanupGuarantee' : 'KernelOwnedComplete'}}}));
 }
 if (args[1] !== 'start') { receipt('Exited(0)'); process.exit(0); }
-const server = http.createServer((req,res) => res.end(mode === 'not-ready' ? 'wrong marker' : 'TAPID_NEWS_SITE_ACCEPTANCE_V1'));
+if (mode === 'early-exit') process.exit(42);
+const server = http.createServer((req,res) => res.end(mode.startsWith('not-ready') ? 'wrong marker' : 'TAPID_NEWS_SITE_ACCEPTANCE_V1'));
 server.listen(Number(args[args.indexOf('--port')+1]), '127.0.0.1');
-process.on('SIGINT', () => { if (mode === 'ignore-cancel') return; server.close(() => { receipt('Cancelled'); process.exit(130); }); });
+process.on('SIGINT', () => { fs.writeFileSync(project + '/shutdown-attempted', 'yes'); if (mode === 'ignore-cancel') return; server.close(() => { receipt('Cancelled'); process.exit(mode === 'not-ready-bad-cancel' ? 43 : 130); }); });
 `);
   chmodSync(binary, 0o755);
-  return { source, binary, node: process.execPath, evidence: join(path, "evidence"), readinessMs: 1500, shutdownMs: 2000 };
+  return { source, binary, node: process.execPath, nodeMajor: Number(process.versions.node.split('.')[0]), evidence: join(path, "evidence"), readinessMs: 1500, shutdownMs: 2000 };
 }
+
+test("runtime mismatch rejects before invoking Tapid", () => temporary(async path => {
+  const options = await fixture(path, "success");
+  options.nodeMajor += 1;
+  await assert.rejects(runManagedNewsSite(options), /acceptance requires Node/);
+  assert.equal(existsSync(join(options.evidence, 'project/calls')), false);
+}));
+
+test("native runtime default remains Node 22", () => temporary(async path => {
+  const { nodeMajor, ...options } = await fixture(path, "build-failure");
+  await assert.rejects(runManagedNewsSite(options), nodeMajor === 22 ? /build.*37/ : /acceptance requires Node 22/);
+  assert.equal(existsSync(join(options.evidence, 'project/calls')), nodeMajor === 22);
+}));
 
 test("ManagedTree fixture runs build/test/start with explicit runtime, policy, arguments and cancellation receipts", () => temporary(async path => {
   const options = await fixture(path, "success");
@@ -64,6 +78,19 @@ test("readiness timeout still cancels and checks cleanup", () => temporary(async
   const result = JSON.parse(readFileSync(join(options.evidence, 'start.json'), 'utf8'));
   assert.equal(result.receipt.termination, 'Cancelled');
 }));
+
+for (const mode of ['early-exit', 'not-ready-bad-cancel']) {
+  test(`${mode} preserves readiness error alongside cleanup diagnostics`, () => temporary(async path => {
+    const options = await fixture(path, mode);
+    const expected = mode === 'early-exit' ? /start exited before readiness.*42/ : /HTTP readiness timed out/;
+    await assert.rejects(runManagedNewsSite(options), expected);
+    const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
+    assert.match(report.error, expected);
+    assert.match(report.cleanup_error, /start cancellation exited/);
+    assert.equal(report.cleanup_attempted, true);
+    if (mode !== 'early-exit') assert.equal(readFileSync(join(report.project, 'shutdown-attempted'), 'utf8'), 'yes');
+  }));
+}
 
 
 test("a successful script with insufficient cleanup evidence fails acceptance", () => temporary(async path => {

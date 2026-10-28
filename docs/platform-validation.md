@@ -148,6 +148,15 @@ the checkout SHA, kernel/architecture, runtime/toolchain versions, controller
 observations, and test results. This configured job is **not** native acceptance
 evidence until it executes successfully on the candidate source.
 
+An always-run evidence step makes only the allowlisted acceptance files readable
+to the artifact uploader, using held descriptors and rejecting symlinks,
+nonregular files and hardlinks. It does not traverse the installed project.
+It prints bounded command diagnostics before upload and preserves the native
+step's failure status. Synthetic orchestration may declare its expected Node
+major; the native entry point and default acceptance still require Node 22.
+Readiness failures remain primary even when cancellation also fails; summaries
+retain the secondary cleanup diagnostic without claiming successful cleanup.
+
 The ManagedTree fixture retains its exact policy, commands, selected Node version and
 binary fingerprints, logs and checked result files. Its separate candidate policy
 uses 180 seconds, 4 MiB combined output, 256 kernel tasks and 2 GiB cgroup memory.

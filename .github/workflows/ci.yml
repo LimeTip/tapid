@@ -145,6 +145,44 @@ jobs:
               test -z "$(find "$group/fixture" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
               test -z "$(find "$group" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
             ' 2>&1 | tee "$RUNNER_TEMP/linux-managed-acceptance.log"
+      - name: Prepare readable native acceptance evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the fixed evidence directory and allowlisted regular files;
+          # never traverse the installed project or follow symbolic/hard links.
+          sudo -n "$(node -p 'process.execPath')" --input-type=module - "$RUNNER_TEMP/linux-managed-news" "$(id -u)" "$(id -g)" <<'NODE'
+          import { constants as c, openSync, closeSync, fstatSync, readdirSync, fchownSync, fchmodSync } from 'node:fs';
+          const [path, uid, gid] = process.argv.slice(2);
+          let directory;
+          try { directory = openSync(path, c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW); }
+          catch (error) { if (error.code === 'ENOENT') process.exit(0); throw error; }
+          try {
+            const held = `/proc/self/fd/${directory}`;
+            const allowed = /^(?:(?:summary|build|test|start)\.json|(?:install|build|test|start)\.log|policy\.toml|acceptance\.txt|(?:memory|pids)\.peak)$/;
+            for (const name of readdirSync(held).filter(name => allowed.test(name))) {
+              const fd = openSync(`${held}/${name}`, c.O_RDONLY | c.O_NOFOLLOW | c.O_NONBLOCK);
+              try {
+                const stat = fstatSync(fd);
+                if (!stat.isFile() || stat.nlink !== 1) throw new Error(`unsafe evidence: ${name}`);
+                fchownSync(fd, Number(uid), Number(gid));
+                fchmodSync(fd, 0o644);
+              } finally { closeSync(fd); }
+            }
+            fchownSync(directory, Number(uid), Number(gid));
+            fchmodSync(directory, 0o755);
+          } finally { closeSync(directory); }
+          NODE
+          # Print diagnostics before upload, so an uploader failure cannot hide
+          # the command failure. The native step retains its original status.
+          for name in summary.json build.log build.json test.log start.log; do
+            path="$RUNNER_TEMP/linux-managed-news/$name"
+            if test -f "$path" && ! test -L "$path"; then
+              echo "=== $name ==="
+              tail -c 65536 -- "$path"
+            fi
+          done
       - name: Retain exact-source native acceptance logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -153,11 +191,18 @@ jobs:
           path: |
             ${{ runner.temp }}/linux-managed-source.txt
             ${{ runner.temp }}/linux-managed-acceptance.log
-            ${{ runner.temp }}/linux-managed-news/*.json
-            ${{ runner.temp }}/linux-managed-news/*.log
+            ${{ runner.temp }}/linux-managed-news/summary.json
+            ${{ runner.temp }}/linux-managed-news/build.json
+            ${{ runner.temp }}/linux-managed-news/test.json
+            ${{ runner.temp }}/linux-managed-news/start.json
+            ${{ runner.temp }}/linux-managed-news/install.log
+            ${{ runner.temp }}/linux-managed-news/build.log
+            ${{ runner.temp }}/linux-managed-news/test.log
+            ${{ runner.temp }}/linux-managed-news/start.log
             ${{ runner.temp }}/linux-managed-news/policy.toml
             ${{ runner.temp }}/linux-managed-news/acceptance.txt
-            ${{ runner.temp }}/linux-managed-news/*.peak
+            ${{ runner.temp }}/linux-managed-news/memory.peak
+            ${{ runner.temp }}/linux-managed-news/pids.peak
           retention-days: 30
           if-no-files-found: error
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { strict as assert } from 'node:assert';
-import { readFile, readdir, mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, mkdir, writeFile, rm, copyFile, symlink, link, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -682,6 +682,65 @@ test('ManagedTree delegation uses a systemd-owned driver leaf and an empty paren
   assertManagedDelegation(await workflow('ci'));
 });
 
+const assertManagedEvidence = (ci: string) => {
+  const owner = job(ci, 'linux-managed-tree');
+  const prepare = step(owner, 'Prepare readable native acceptance evidence');
+  assert.match(prepare, /if: always\(\)/);
+  assert(owner.indexOf(prepare) < owner.indexOf(step(owner, 'Retain exact-source native acceptance logs')));
+  assert.match(prepare, /set -euo pipefail/);
+  for (const required of ['O_NOFOLLOW', 'O_DIRECTORY', 'fstatSync', 'isFile()', 'nlink', 'fchownSync', 'fchmodSync', '/proc/self/fd/', 'build.log', 'summary.json', 'linux-managed-news']) {
+    assert(prepare.includes(required), `missing evidence protection: ${required}`);
+  }
+  assert.doesNotMatch(prepare, /chown -R|chmod -R|continue-on-error|\|\| true/);
+  // Preparation is a separate always-run step: it cannot overwrite the native
+  // step's status or swallow systemd's pipefail result.
+  assert.match(step(owner, 'Require native ManagedTree execution in a delegated host context'), /set -euo pipefail/);
+};
+
+test('ManagedTree failure evidence is prepared before upload without masking native failure', async () => {
+  const ci = await workflow('ci');
+  assertManagedEvidence(ci);
+  for (const token of ['O_NOFOLLOW', 'O_DIRECTORY', 'fchownSync', 'fchmodSync', 'if: always()']) {
+    const prepare = step(job(ci, 'linux-managed-tree'), 'Prepare readable native acceptance evidence');
+    assert.throws(() => assertManagedEvidence(ci.replace(prepare, prepare.replaceAll(token, 'REMOVED'))));
+  }
+});
+
+test('ManagedTree evidence preparation touches only allowlisted single-link regular files', { skip: process.platform === 'win32' ? 'Linux evidence uses POSIX descriptors' : false }, async () => {
+  const prepare = step(job(await workflow('ci'), 'linux-managed-tree'), 'Prepare readable native acceptance evidence');
+  let program = prepare.match(/<<'NODE'\n([\s\S]*?)\n          NODE/)![1].replace(/^          /gm, '');
+  // macOS has no procfs descriptor directory. Exercise file selection, modes
+  // and link rejection there using the trusted fixture path; Linux executes
+  // the exact held-directory program. Neither is a privileged CI receipt.
+  if (process.platform !== 'linux') program = program.replace('`/proc/self/fd/${directory}`', 'path');
+  const root = await mkdtemp(join(tmpdir(), 'managed evidence '));
+  try {
+    const script = join(root, 'prepare.mjs');
+    await writeFile(script, program);
+    const run = (directory: string) => execFileAsync(process.execPath, [script, directory, String(process.getuid!()), String(process.getgid!())]);
+    const directory = join(root, 'evidence');
+    await mkdir(directory);
+    await writeFile(join(directory, 'build.json'), 'receipt', { mode: 0o600 });
+    await writeFile(join(directory, 'unrelated.json'), 'private', { mode: 0o600 });
+    await mkdir(join(directory, 'project'), { mode: 0o700 });
+    await run(directory);
+    assert.equal((await stat(join(directory, 'build.json'))).mode & 0o777, 0o644);
+    assert.equal((await stat(join(directory, 'unrelated.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(directory, 'project'))).mode & 0o777, 0o700);
+    const outside = join(root, 'secret');
+    await writeFile(outside, 'synthetic secret', { mode: 0o600 });
+    await symlink(outside, join(directory, 'start.json'));
+    await assert.rejects(run(directory));
+    await rm(join(directory, 'start.json'));
+    await link(outside, join(directory, 'start.json'));
+    await assert.rejects(run(directory), /unsafe evidence/);
+    assert.equal((await stat(outside)).mode & 0o777, 0o600);
+    const alias = join(root, 'alias');
+    await symlink(directory, alias);
+    await assert.rejects(run(alias));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('ManagedTree launch leaves shell expressions for Bash expansion', { skip: process.platform === 'win32' ? 'Linux harness requires POSIX Bash' : false }, async () => {
   const ci = await workflow('ci');
   assertManagedDelegation(ci);
@@ -717,6 +776,13 @@ test('ManagedTree launch leaves shell expressions for Bash expansion', { skip: p
     env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: tmpdir(), RUSTFLAGS: '', node_bin: process.execPath, target_dir: tmpdir(), probe_path: '/owned/driver' },
   });
   assert.match(result.stdout, /^pid=(\d+) bashpid=\1 leaf=driver substitution=intact\n$/);
+  const evidence = await mkdtemp(join(tmpdir(), 'managed failure status '));
+  try {
+    await assert.rejects(execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', stub + launch.replace('uname -a', () => probe.replace('exit 0', 'exit 37')) + ' 2>&1 | tee "$RUNNER_TEMP/failure.log"'], {
+      env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: evidence, RUSTFLAGS: '', node_bin: process.execPath, target_dir: evidence, probe_path: '/owned/driver' },
+    }), error => (error as NodeJS.ErrnoException & { code: number }).code === 37);
+    assert.match(await readFile(join(evidence, 'failure.log'), 'utf8'), /substitution=intact/);
+  } finally { await rm(evidence, { recursive: true, force: true }); }
 });
 
 test('ManagedTree delegation rejects missing prerequisites and driver-parent confusion', async () => {
