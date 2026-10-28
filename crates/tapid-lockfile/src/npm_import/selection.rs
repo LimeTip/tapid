@@ -38,6 +38,11 @@ impl ImportedSelection {
             return Err(invalid());
         }
         let graph = lock.graph()?;
+        let selected = graph.selected_paths(
+            &self.target.os,
+            &self.target.cpu,
+            self.target.libc.as_deref(),
+        )?;
         let placements: BTreeMap<_, _> = graph
             .packages
             .keys()
@@ -60,8 +65,27 @@ impl ImportedSelection {
                 || lock.npm_lock["packages"][parent]["optionalDependencies"][&omission.name]
                     .as_str()
                     != Some(&omission.requirement)
-                || parse::lookup(&placements, parent, &omission.name, false).is_some()
             {
+                return Err(invalid());
+            }
+            if let Some(path) = parse::lookup(&placements, parent, &omission.name, false) {
+                let package = graph.packages.get(&path).ok_or_else(invalid)?;
+                let constraints = tapid_core::PackagePlatform {
+                    os: package.os.clone(),
+                    cpu: package.cpu.clone(),
+                    libc: package.libc.clone(),
+                };
+                if omission.reason != OmissionReason::IncompatiblePlatform
+                    || selected.contains(&path)
+                    || constraints.matches(
+                        &self.target.os,
+                        &self.target.cpu,
+                        self.target.libc.as_deref(),
+                    )
+                {
+                    return Err(invalid());
+                }
+            } else if omission.reason == OmissionReason::IncompatiblePlatform {
                 return Err(invalid());
             }
         }
@@ -70,6 +94,59 @@ impl ImportedSelection {
 }
 
 impl ImportedNpmLockfile {
+    /// Record target-specific optional platform cuts from the pinned npm graph.
+    /// Required reachability is checked before any selection facts are changed.
+    pub fn record_platform_selection(
+        &mut self,
+        target: SelectionTarget,
+        profile: SelectionProfile,
+    ) -> Result<(), NpmImportError> {
+        let graph = self.graph()?;
+        let selected = graph.selected_paths(&target.os, &target.cpu, target.libc.as_deref())?;
+        let placements: BTreeMap<_, _> = graph
+            .packages
+            .keys()
+            .chain(graph.workspace_links.keys())
+            .map(|p| (p.clone(), ()))
+            .collect();
+        let mut omissions = Vec::new();
+        for parent in std::iter::once("")
+            .chain(graph.workspaces.keys().map(String::as_str))
+            .chain(selected.iter().map(String::as_str))
+        {
+            let Some(declarations) =
+                self.npm_lock["packages"][parent]["optionalDependencies"].as_object()
+            else {
+                continue;
+            };
+            for (name, requirement) in declarations {
+                let Some(path) = parse::lookup(&placements, parent, name, false) else {
+                    continue;
+                };
+                if graph.packages.contains_key(&path) && !selected.contains(&path) {
+                    omissions.push(ImportedOmission {
+                        declaring_placement: parent.to_owned(),
+                        name: name.clone(),
+                        requirement: requirement
+                            .as_str()
+                            .expect("validated requirement")
+                            .to_owned(),
+                        reason: OmissionReason::IncompatiblePlatform,
+                    });
+                }
+            }
+        }
+        if !omissions.is_empty() {
+            omissions.sort();
+            self.set_placement_selection(ImportedSelection {
+                target,
+                profile,
+                omissions,
+            })?;
+        }
+        Ok(())
+    }
+
     /// Validate all facts before replacing the legacy imported contract.
     pub fn set_placement_selection(
         &mut self,

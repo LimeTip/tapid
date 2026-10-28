@@ -38,9 +38,11 @@ validates current declarations and composes verified storage and project
 transactions. Neither an optional flag nor a warm cache relaxes verification.
 
 Imported schema 12 uses a separate placement-keyed ledger because ordinary keys
-cannot preserve npm placement identity. Normal import generation still emits
-schema 8. Complete imported generation and broader reporting remain separate
-implementation work. Copied root declarations retain their original file or Git
+cannot preserve npm placement identity. Offline import generation still emits
+schema 8. First artifact verification records optional platform cuts in schema 12
+without deleting the pinned npm placements. Required reachability remains fatal;
+replay requires the recorded target/profile. Missing-placement generation and
+broader reporting remain separate implementation work. Copied root declarations retain their original file or Git
 specification in `originalRequirement`, the resolved npm package requirement,
 and the exact immutable source-qualified target key. The lockfile validates the
 bounded input and effective package identity; the CLI reuses copied specification

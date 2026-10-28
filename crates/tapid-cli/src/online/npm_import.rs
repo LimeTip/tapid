@@ -59,6 +59,14 @@ pub(crate) fn fetch_imported(
     let selected = graph
         .selected_paths(std::env::consts::OS, std::env::consts::ARCH, current_libc())
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
+    if imported.placement_selection().is_none() {
+        imported
+            .record_platform_selection(
+                selection_target(),
+                tapid_lockfile::SelectionProfile::Development,
+            )
+            .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
+    }
     for path in &selected {
         let package = &graph.packages[path];
         let identity = DiagnosticPackage {

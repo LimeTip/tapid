@@ -377,7 +377,9 @@ preserve the actual package name; overrides cannot redirect local workspace link
 Copied file and Git roots can coexist with these omissions. Their original root
 specifications and resolved package requirements are retained alongside immutable
 source identities; replay still verifies file bytes and copied source bindings.
-Imported schema 12 generation, artifact/hook
+Imported installs record optional platform cuts in schema 12 on first verification,
+preserving exact declaring placements and the target/profile for replay. Initial
+offline imports still emit schema 8. Missing-placement ledger generation, artifact/hook
 omission selection and complete optional-failure semantics remain unfinished.
 Preview and status integration is not established by this replay API.
 

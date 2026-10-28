@@ -1545,3 +1545,87 @@ fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() 
         );
     }
 }
+
+#[test]
+fn npm_import_records_platform_cuts_before_unchanged_offline_replay() {
+    let project = reference_project("npm-import-platform-ledger");
+    let imported = invoke(&project, &["import-package-lock", "package-lock.json"]);
+    assert!(imported.status.success());
+    let store = project.path().join("store");
+    let output = invoke(
+        &project,
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let bytes = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let wire: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(wire["lockfileVersion"], 12);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["selection"]["omissions"],
+        wire["placementSelection"]["omissions"]
+    );
+    assert_eq!(result["selection"]["details_complete"], true);
+    assert_eq!(
+        wire["placementSelection"]["omissions"],
+        serde_json::json!([
+            {"declaringPlacement":"", "name":"native", "requirement":"1.0.0", "reason":"incompatiblePlatform"}
+        ])
+    );
+    assert!(!project.path().join("node_modules/native").exists());
+    project.write("registry.json", b"not JSON").unwrap();
+    for args in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["install", "--offline"],
+    ] {
+        let output = invoke(
+            &project,
+            &[
+                args.as_slice(),
+                &["--store-dir", store.to_str().unwrap(), "--json"],
+            ]
+            .concat(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            bytes
+        );
+    }
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    let rejected = invoke(
+        &project,
+        &[
+            "ci",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        fs::read(project.path().join(".tapid-managed")).unwrap(),
+        marker
+    );
+}

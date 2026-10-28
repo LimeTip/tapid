@@ -724,3 +724,48 @@ fn imported_selection_writer_rejects_unchecked_schema_confusion() {
     let unchecked: ImportedNpmLockfile = serde_json::from_value(wire).unwrap();
     assert!(unchecked.to_json().is_err());
 }
+
+#[test]
+fn imported_platform_cuts_preserve_alias_placements_and_required_reachability() {
+    let mut input: Value = serde_json::from_str(INPUT).unwrap();
+    let mut package = input["packages"]["node_modules/native"].clone();
+    package["optional"] = true.into();
+    package["name"] = "native".into();
+    input["packages"]["node_modules/renamed"] = package;
+    input["packages"][""]["optionalDependencies"]["renamed"] = "npm:native@1.0.0".into();
+    let manifest = input["packages"][""].to_string();
+    let mut lock = ImportedNpmLockfile::import(&input.to_string(), &manifest, DIGEST).unwrap();
+    let target = crate::SelectionTarget {
+        os: "linux".into(),
+        cpu: "x86_64".into(),
+        libc: None,
+    };
+    lock.record_platform_selection(target.clone(), crate::SelectionProfile::Development)
+        .unwrap();
+    let selection = lock.placement_selection().unwrap().clone();
+    assert!(
+        selection
+            .omissions
+            .iter()
+            .any(|cut| cut.name == "renamed" && cut.requirement == "npm:native@1.0.0")
+    );
+    let before = lock.to_json().unwrap();
+    let mut forged = selection.clone();
+    forged
+        .omissions
+        .iter_mut()
+        .find(|cut| cut.name == "renamed")
+        .unwrap()
+        .reason = crate::OmissionReason::MetadataAbsent;
+    assert!(lock.set_placement_selection(forged).is_err());
+    assert_eq!(lock.to_json().unwrap(), before);
+    input["packages"]["node_modules/parent"]["dependencies"]["renamed"] = "npm:native@1.0.0".into();
+    let mut required = ImportedNpmLockfile::import(&input.to_string(), &manifest, DIGEST).unwrap();
+    let before = required.to_json().unwrap();
+    assert!(
+        required
+            .record_platform_selection(target, crate::SelectionProfile::Development)
+            .is_err()
+    );
+    assert_eq!(required.to_json().unwrap(), before);
+}

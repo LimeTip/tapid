@@ -110,12 +110,13 @@ Imported schema 12 provides a separate `ImportedSelection` persistence building
 block. `placementSelection` records target/profile and ordered cuts identified by
 exact declaring npm placement (the empty string denotes the root). Each local
 name and requirement must match that placement's retained optional declaration;
-root, workspace, and nested placements remain distinct. Selected or hoisted
+root, workspace, and nested placements remain distinct. Compatible selected or hoisted
 providers, workspace links, unknown origins, duplicate cuts, and unsafe facts are
-rejected. `set_placement_selection` validates atomically. Shared target validation
+rejected. Existing placements may carry incompatible-platform cuts only when
+target-aware traversal excludes them and their constraints reject the target. `set_placement_selection` validates atomically. Shared target validation
 and the existing narrow reason enum are reused from ordinary selection facts.
-This initial contract represents absent placements only; it does not remove npm
-placements, record artifact/hook failures, or enable omission success. Schema 8
+The ledger represents absent placements and verified optional platform cuts;
+it does not remove npm placements or record artifact/hook failures. Schema 8
 rejects the new ledger, schema 12 requires it, and `validate_replay` explicitly
 rejects schema 12. `validate_replay_with_selection` checks exact target/profile facts and the
 ledger before existing imported manifest validation. Neither opt-in API performs
@@ -124,4 +125,6 @@ Normal CLI imports still emit schema 8. The CLI now opts into both recorded repl
 APIs for the current build-host target and development profile. It retains
 ordinary root/member declaration checks, imported manifest/placement checks,
 selected artifact verification and bounded omission reporting. These replay paths
-do not add new accepted failure reasons or generate selection ledgers.
+do not add new accepted failure reasons. First verification records platform cuts
+with `record_platform_selection`; required reachability is validated before the
+ledger changes. Missing-placement generation remains unfinished.
