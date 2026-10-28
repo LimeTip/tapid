@@ -1,6 +1,6 @@
 import { strictEqual as equal } from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,42 @@ test("shell detection accepts only a complete successful stable version", { skip
 });
 
 const pwshAvailable = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]).status === 0;
+test("PowerShell detection bounds a hung executable and inherited output pipes", {
+  skip: !pwshAvailable || process.platform === "win32" ? "requires pwsh and Unix executable fixtures" : false,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tapid detection timeout "));
+  const executable = join(directory, "tapid fixture");
+  const pidFile = join(directory, "child-pid");
+  const home = join(directory, "home");
+  await mkdir(home);
+  try {
+    // Exclude PowerShell's first-run home initialization from the detector deadline.
+    equal(spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], {
+      env: { ...process.env, HOME: home }, timeout: 30_000,
+    }).status, 0);
+    for (const retainedPipe of [false, true]) {
+      // Both fixtures have a finite lifetime even if detector cleanup fails.
+      await writeFile(executable, `#!/bin/sh\nsleep 20 &\nchild=$!\nprintf '%s' "$child" > '${pidFile.replaceAll("'", "'\\''")}'\n${retainedPipe ? "printf 'tapid 1.2.3\\n'\nexit 0" : 'wait "$child"'}\n`);
+      await chmod(executable, 0o755);
+      const started = performance.now();
+      try {
+        const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", script.replace(/\.sh$/, ".ps1"), "-ExecutablePath", executable, "-ExpectedVersion", "1.2.3"], {
+          encoding: "utf8", timeout: 10_000, cwd: home, env: { ...process.env, HOME: home },
+        });
+        equal(result.error, undefined, "detector must return before the outer watchdog");
+        equal(result.status, 1, result.stderr);
+        equal(result.stdout, "");
+        equal(result.stderr, "tapid detection: missing, invalid, failed, or mismatched version\n");
+        equal(performance.now() - started < 9_000, true, "deadline plus cleanup/startup margin");
+      } finally {
+        const pid = Number(await readFile(pidFile, "utf8"));
+        try { process.kill(pid, "SIGKILL"); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 for (const engine of ["shell", "PowerShell"] as const) {
   test(`${engine} detection rejects invalid arguments and output without normalization`, {
     skip: engine === "shell" ? (process.platform === "win32" ? "POSIX fixture requires Unix" : false) : (!pwshAvailable ? "pwsh unavailable" : process.platform === "win32" ? "Unix executable fixtures; native failure probe runs separately" : false),

@@ -22,12 +22,19 @@ try {
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $info
     $bytes = [IO.MemoryStream]::new()
+    $started = $false
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
         if (-not $process.Start()) { throw 'Invocation failed' }
+        $started = $true
         # Read raw bytes: StreamReader decoding can silently remove a BOM.
         $stdout = $process.StandardOutput.BaseStream.CopyToAsync($bytes)
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        # One deadline covers both execution and EOF (including inherited pipes).
+        while (-not ($process.HasExited -and $stdout.IsCompleted -and $stderr.IsCompleted)) {
+            if ($watch.ElapsedMilliseconds -ge 5000) { throw 'Detection timed out' }
+            Start-Sleep -Milliseconds 10
+        }
         $null = $stdout.GetAwaiter().GetResult()
         $output = [Convert]::ToBase64String($bytes.ToArray())
         $null = $stderr.GetAwaiter().GetResult()
@@ -35,7 +42,20 @@ try {
             ($output -cne [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("tapid $version")) -and
              $output -cne [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("tapid $version`n")) -and
              $output -cne [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("tapid $version`r`n")))) { throw 'Failed or mismatched version' }
-    } finally { $bytes.Dispose(); $process.Dispose() }
+    } finally {
+        if ($started) {
+            try {
+                if (-not $process.HasExited) {
+                    $process.Kill($true)
+                    $null = $process.WaitForExit(1000)
+                }
+            } catch { } # Cleanup failure must still return the detection failure.
+            $process.StandardOutput.Dispose()
+            $process.StandardError.Dispose()
+        }
+        $bytes.Dispose()
+        $process.Dispose()
+    }
     exit 0
 } catch {
     [Console]::Error.WriteLine('tapid detection: missing, invalid, failed, or mismatched version')

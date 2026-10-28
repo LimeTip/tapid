@@ -694,11 +694,21 @@ They compare strings without numeric ordering. Complete stdout must be exactly
 whitespace, prefixes, suffixes, prerelease and build text are failures. They
 invoke only the selected absolute executable with `--version`.
 
+PowerShell applies one five-second monotonic deadline to execution and completion
+of both output reads. Expiry returns exit 1 with the existing detection diagnostic;
+cleanup attempts to terminate the live process tree and waits at most one additional
+second before closing redirected streams. A descendant retaining a pipe after the
+root exits also fails within that deadline; termination of an already orphaned
+descendant is not guaranteed. The POSIX detector has no internal deadline: its
+caller must impose an execution timeout for unattended inventory.
+
 ### Evidence and ownership
 
 The [detection suite](../tools/release/detect_version_test.ts) executes success,
 argument, path, output and failure cases, including spaces, extra newlines and
 BOM-prefixed output. Both detectors compare stdout bytes without decoding.
+PowerShell deadline fixtures cover a hung executable and a root that exits while
+a descendant retains the output pipes, with finite fixture lifetimes and cleanup.
 The shared output matrix runs shell and PowerShell on Unix; Windows has native
 failure probes. PowerShell-on-macOS results do not establish native Windows
 compatibility. Full native Windows success/output evidence remains a platform
