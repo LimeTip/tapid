@@ -457,6 +457,30 @@ Native Windows execution of these controls remains required.
 
 ## Private Windows dependency write and key validation
 
+The suspended launcher now supplies
+`PROCESS_CREATION_MITIGATION_POLICY_EXTENSION_POINT_DISABLE_ALWAYS_ON` through
+the process attribute list. Its boxed policy storage survives `CreateProcessW`.
+Before returning a child, the launcher queries
+`ProcessExtensionPointDisablePolicy` on the actual suspended process and rejects
+query failure or a clear `DisableExtensionPoints` bit. The existing child owner
+terminates rejected children; Job assignment and resume ordering are unchanged.
+No dynamic-code prohibition is requested, so this does not deliberately disable
+Node's JIT.
+
+The existing paired LPAC provider/COM controls now require a native policy query
+and marker from both the root and its ordinary Rust descendant for each token
+variant. Exact marker counts reject a missing descendant or zero-test success.
+These controls have not executed on this macOS worker. A compiler check does not
+prove policy installation, inheritance, or rejection of an injected DLL.
+
+Microsoft's [creation attribute contract](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+limits this mitigation to legacy extension points (AppInit DLLs, Winsock LSPs,
+global hooks and legacy IMEs); local hooks remain possible. Ordinary explicit
+DLL loads, KnownDLL/API-set and side-by-side resolution, registry and COM/broker
+authority, ARAP access and profile storage are still outside a complete bound
+identity. This mitigation neither supplies an ordered runtime snapshot nor
+changes recipe identity or the Windows authenticated dependency gate.
+
 The issue #155 branch adds protected owner-only Windows lifecycle keys and validates low-integrity write targets. The CLI labels only its private dependency copies. General execution also supports existing ordinary declared write targets through the main branch topology and effective-access checks. Native regressions require overwrite and reopen of an existing file, creation and reopen in the requested working directory, denied reads/writes outside authority, exact DACL restoration, hard-link rejection, and key/attestation forgery rejection. Cross-compilation and local Unix tests are development evidence. The focused Windows acceptance step and full native workspace suite must pass at the claimed commit. Toolchain identity and integrated contained dependency acceptance remain outstanding. See [ADR 0010](adr/0010-private-windows-dependency-write-trees.md).
 
 Native Windows CI run [38094689980](https://github.com/LimeTip/tapid/actions/runs/38094689980) on code commit `6c30fc20d462c6295ed5808705e5686f42d1e76e` passed all three lifecycle-key probes and all 25 containment tests with Node explicitly configured, followed by the complete Windows workspace, integration, and installer job. The hard-link regression exposed label propagation changing external inheritance metadata before rejection; preparation now validates the entire tree before changing any label. The junction and creation/reopen probes pass, including outside-path denial and exact DACL restoration. This is targeted component acceptance, not completion of the common assurance matrix or support for default authenticated Windows dependency builds.

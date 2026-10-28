@@ -327,6 +327,31 @@ fn host_authority_probe_preserves_output_and_rejects_each_oversized_stream() {
 
 #[test]
 fn provider_helper() {
+    if matches!(
+        std::env::var("TAPID_TEST_MARKER").as_deref(),
+        Ok("provider-contained" | "provider-capability-free" | "com-descendant")
+    ) {
+        use windows_sys::Win32::System::SystemServices::PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY;
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessMitigationPolicy, ProcessExtensionPointDisablePolicy,
+        };
+        let mut policy: PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY = unsafe { zeroed() };
+        // SAFETY: the pseudo handle is valid and policy is the documented output structure.
+        assert_ne!(
+            unsafe {
+                GetProcessMitigationPolicy(
+                    GetCurrentProcess(),
+                    ProcessExtensionPointDisablePolicy,
+                    (&mut policy as *mut PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY).cast(),
+                    size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
+                )
+            },
+            0
+        );
+        // SAFETY: Windows initialized this union's bitfield representation above.
+        assert_eq!(unsafe { policy.Anonymous.Anonymous._bitfield } & 1, 1);
+        println!("loader:legacy-extension-points:disabled");
+    }
     if let Ok(marker @ ("com-descendant" | "com-descendant-host")) =
         std::env::var("TAPID_TEST_MARKER").as_deref()
     {
@@ -658,6 +683,13 @@ fn compare_lpac_com_clients(
             String::from_utf8_lossy(&stderr)
         );
         let stdout = String::from_utf8_lossy(&stdout);
+        assert_eq!(
+            stdout
+                .matches("loader:legacy-extension-points:disabled")
+                .count(),
+            2,
+            "both root and descendant must execute the mitigation control: {stdout}"
+        );
         assert!(stdout.contains("provider:startup:ok"), "{stdout}");
         assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
         assert!(stdout.contains("registry:host-input:"), "{stdout}");

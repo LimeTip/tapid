@@ -91,6 +91,14 @@ read-only handles across request clones; Unix rechecks bytes before execution.
 This does not close loader, registry, search-order or host mutation races and
 does not enable authenticated Windows dependency builds.
 
+Windows suspended launches additionally request the creation-time legacy
+extension-point disable mitigation and query the actual child policy before
+returning the suspended child. Failure to install or observe the policy rejects
+launch without resuming the target. This narrows automatic DLL injection through
+AppInit DLLs, Winsock LSPs, global hooks and legacy IMEs. It does not bound ordinary
+DLL loads, COM, registry values, or system runtime identity. Native root and
+descendant mitigation controls remain required; Windows authentication stays gated.
+
 On Unix, a declared tool whose canonical parent is in the explicit PATH is
 also checked for earlier same-named candidates at construction and prelaunch.
 Existing candidates must resolve to that exact canonical tool; uninspectable or
