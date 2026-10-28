@@ -15,6 +15,19 @@ impl ArtifactFetcher<'_> {
         pinned: Option<&LockedPackage>,
         store_transaction: &mut StoreTransaction,
     ) -> Result<(PackageIntegrity, ArtifactDigest, PathBuf), OperationalError> {
+        self.prepare_with_archive(id, record, pinned, store_transaction, || Ok(None))
+    }
+
+    /// Defer caller-owned archive retrieval until verified store reuse is exhausted.
+    /// Supplied bytes pass through the same integrity, extraction and tree checks.
+    pub(super) fn prepare_with_archive(
+        &mut self,
+        id: &tapid_registry_client::RegistryPackageId,
+        record: &PackageRecord,
+        pinned: Option<&LockedPackage>,
+        store_transaction: &mut StoreTransaction,
+        fetch_archive: impl FnOnce() -> Result<Option<Vec<u8>>, OperationalError>,
+    ) -> Result<(PackageIntegrity, ArtifactDigest, PathBuf), OperationalError> {
         let store = self.store;
         if let Some(package) = pinned {
             let digest: ArtifactDigest = package
@@ -51,8 +64,12 @@ impl ArtifactFetcher<'_> {
                 "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
             ));
         }
-        let bytes = if let Some(bytes) = &record.copied_archive {
-            std::borrow::Cow::Borrowed(bytes.as_slice())
+        let supplied_archive = fetch_archive()?;
+        let bytes = if let Some(bytes) = supplied_archive
+            .as_deref()
+            .or_else(|| record.copied_archive.as_deref().map(Vec::as_slice))
+        {
+            std::borrow::Cow::Borrowed(bytes)
         } else {
             std::borrow::Cow::Owned(if record.fixture {
                 if let Some(encoded) = record.artifact.strip_prefix("base64:") {

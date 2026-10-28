@@ -193,7 +193,7 @@ pub(super) fn prepare_native_replay(
         let record = PackageRecord {
             complete_dependency_kinds: true,
             git_reference: None,
-            copied_archive: Some(std::sync::Arc::new(fetch(&identity, url)?)),
+            copied_archive: None,
             dist_tags: BTreeSet::new(),
             registry: identity
                 .source
@@ -219,7 +219,10 @@ pub(super) fn prepare_native_replay(
             name: record.name.clone(),
             version: record.version.clone(),
         };
-        let (integrity, digest, tree) = fetcher.prepare(&id, &record, pinned, &mut transaction)?;
+        let (integrity, digest, tree) =
+            fetcher.prepare_with_archive(&id, &record, pinned, &mut transaction, || {
+                fetch(&identity, url).map(Some)
+            })?;
         validate_native_source_identity(&id, &tree)?;
         sources.insert(
             key.clone(),
@@ -762,6 +765,134 @@ mod tests {
             fs::read(project.path().join("tapid.lock")).unwrap(),
             lock_bytes.as_bytes()
         );
+    }
+
+    #[test]
+    fn native_verified_replay_reuses_validated_store_without_archive_access() {
+        let project = tapid_test_support::TempProject::new("native-verified-offline").unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/npm-import/registry.json"
+        ))
+        .unwrap();
+        let archive = fixture["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "shared" && package["version"] == "1.0.0")
+            .unwrap();
+        let bytes = STANDARD
+            .decode(
+                archive["artifact"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("base64:")
+                    .unwrap(),
+            )
+            .unwrap();
+        let key = LockfilePackageKey::new(
+            NPM.parse().unwrap(),
+            "shared".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string();
+        let url = format!("{NPM}/shared.tgz");
+        let mut packages = BTreeMap::new();
+        packages.insert(
+            key.clone(),
+            NativeSelectedPackage {
+                source_evidence: NativeSourceEvidence::Pending {
+                    artifact_url: url.clone(),
+                    artifact_integrity: archive["integrity"].as_str().unwrap().into(),
+                },
+                dependencies: BTreeMap::new(),
+                peer_providers: BTreeMap::new(),
+            },
+        );
+        let pending = NativeSelection::new(
+            "0".into(),
+            "0".into(),
+            format!("sha256-{}", "a".repeat(64)),
+            BTreeMap::new(),
+            vec![NativeDeclaration {
+                workspace: None,
+                name: "shared".into(),
+                kind: NativeDeclarationKind::Required,
+                target: key.clone(),
+            }],
+            packages,
+        )
+        .unwrap();
+        let store = Store::new(project.path().join("store"));
+        let config = crate::registry::RegistryConfig::default();
+        let full = tapid_lockfile::InstallProfile::default();
+        let prepared =
+            prepare_native_replay(&pending, &config, &store, full, |_, _| Ok(bytes.clone()))
+                .unwrap();
+        let source = &prepared.sources[&key];
+        let mut locked = LockedPackage::new_with_provenance(
+            NPM,
+            "shared",
+            "1.0.0",
+            &source.integrity.to_string(),
+            &source.digest.to_string(),
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        locked.set_artifact_url(&url).unwrap();
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&pending.to_json().unwrap()).unwrap();
+        wire["packages"][&key]["sourceEvidence"] =
+            serde_json::to_value(NativeSourceEvidence::Verified {
+                package: Box::new(locked),
+            })
+            .unwrap();
+        let selection = NativeSelection::from_json(&wire.to_string()).unwrap();
+        prepared.transaction.publish().unwrap().commit().unwrap();
+        let before = selection.to_json().unwrap();
+        let replayed = prepare_native_replay(&selection, &config, &store, full, |_, _| {
+            Err("offline archive unavailable".into())
+        })
+        .unwrap();
+        assert_eq!(replayed.sources.len(), 1);
+        assert_eq!(selection.to_json().unwrap(), before);
+        drop(replayed);
+
+        let cold_store = Store::new(project.path().join("cold-store"));
+        let mut fetches = 0;
+        let cold = prepare_native_replay(&selection, &config, &cold_store, full, |_, requested| {
+            fetches += 1;
+            assert_eq!(requested, url);
+            Ok(bytes.clone())
+        })
+        .unwrap();
+        assert_eq!(fetches, 1);
+        let digest = cold.sources[&key].digest.clone();
+        drop(cold);
+        let error = prepare_native_replay(&selection, &config, &cold_store, full, |_, _| {
+            Ok(b"tampered".to_vec())
+        })
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("integrity mismatch"), "{error}");
+
+        let cached_tree = store.verified_tree_path(&digest).unwrap();
+        fs::write(
+            cached_tree.join("package/package.json"),
+            b"tampered cached tree",
+        )
+        .unwrap();
+        let error = prepare_native_replay(&selection, &config, &store, full, |_, _| {
+            panic!("a corrupt verified cache must fail closed before archive fallback")
+        })
+        .err()
+        .unwrap();
+        assert!(
+            error.to_string().contains("locked store tree is invalid"),
+            "{error}"
+        );
+        assert_eq!(selection.to_json().unwrap(), before);
     }
 
     #[test]
