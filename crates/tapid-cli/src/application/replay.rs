@@ -401,6 +401,10 @@ pub(crate) fn replay_root_keys_with_config(
     typed_keys: &[tapid_lockfile::LockfilePackageKey],
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<Vec<String>, String> {
+    validate_recorded_root_declarations(lock, manifest, registry_config)?;
+    if lock.selection().is_some() && lock.root_bindings().is_empty() {
+        return Ok(lock.roots().to_vec());
+    }
     if !lock.root_bindings().is_empty() {
         let required_names = manifest
             .dependencies()
@@ -606,6 +610,91 @@ pub(crate) fn replay_root_keys_with_config(
     Ok(lock.roots().to_vec())
 }
 
+/// Compare declaration facts before the legacy binding checks collapse sections.
+/// This does not authorize replay: callers must also validate digest, target and profile.
+fn validate_recorded_root_declarations(
+    lock: &Lockfile,
+    manifest: &PackageManifest,
+    config: &crate::registry::RegistryConfig,
+) -> Result<(), String> {
+    use tapid_lockfile::{DeclarationSection, OmissionOrigin, SelectionProfile};
+    let Some(selection) = lock.selection() else {
+        return Ok(());
+    };
+    let mut expected = BTreeMap::new();
+    let mut optional_specs = BTreeMap::new();
+    for (kind, dependencies) in manifest.dependency_sections() {
+        let section = match kind {
+            DependencyKind::Dependencies => DeclarationSection::Dependencies,
+            DependencyKind::DevDependencies => {
+                if selection.profile == SelectionProfile::Production {
+                    continue;
+                }
+                DeclarationSection::DevDependencies
+            }
+            DependencyKind::OptionalDependencies => DeclarationSection::OptionalDependencies,
+            DependencyKind::PeerDependencies => continue,
+        };
+        for (name, requirement) in dependencies {
+            let (_, local_name) = online::dep_parts(name)?;
+            if section == DeclarationSection::OptionalDependencies {
+                optional_specs.insert(local_name.to_string(), name);
+            }
+            if expected
+                .insert((section, local_name.to_string()), requirement.as_str())
+                .is_some()
+            {
+                return Err("manifest has ambiguous local dependency declarations".into());
+            }
+        }
+    }
+    let mut recorded = BTreeMap::new();
+    for declaration in &selection.declarations {
+        if declaration.origin == OmissionOrigin::Root {
+            recorded.insert(
+                (declaration.section, declaration.name.clone()),
+                declaration.requirement.as_str(),
+            );
+        }
+    }
+    for omission in &selection.omissions {
+        if omission.origin != OmissionOrigin::Root {
+            continue;
+        }
+        // Resolve the original spec so registry routing cannot be hidden by an omission.
+        let spec = optional_specs.get(&omission.name).ok_or_else(|| {
+            "recorded root omission has no current optional declaration".to_string()
+        })?;
+        let (declared_registry, local_name) = online::dep_parts(spec)?;
+        let requirement = omission
+            .requirement
+            .parse::<tapid_resolver::Requirement>()
+            .map_err(|error| error.to_string())?;
+        let registry = if declared_registry.as_str() == "https://jsr.io" {
+            declared_registry
+        } else {
+            config.origin_for_name(requirement.package_name(&local_name))?
+        };
+        if registry.as_str() != omission.registry {
+            return Err("recorded root omission registry does not match current routing".into());
+        }
+        recorded.insert(
+            (
+                DeclarationSection::OptionalDependencies,
+                omission.name.clone(),
+            ),
+            omission.requirement.as_str(),
+        );
+    }
+    if expected != recorded {
+        return Err(
+            "recorded root declarations do not match current manifest sections and requirements"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn workspace_root_matches(key: &tapid_lockfile::LockfilePackageKey) -> bool {
     key.source.workspace().is_some_and(|source| {
         source.name() == key.name.as_str() && source.version() == key.version.to_string()
@@ -709,6 +798,145 @@ pub(crate) fn current_platform() -> Platform {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn recorded_selected_roots_preserve_required_optional_overlap() {
+        use tapid_lockfile::{DeclarationSection, OmissionOrigin, RetainedDeclaration};
+        let mut lock = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let package = tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            "native",
+            "1.0.0",
+            &format!("sha512-{}==", "A".repeat(86)),
+            &format!("sha256-{}", "b".repeat(64)),
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        lock.insert_package(package).unwrap();
+        lock.set_roots([key.clone()]).unwrap();
+        lock.set_root_bindings(BTreeMap::from([("native".into(), key.clone())]))
+            .unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: None,
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            omissions: vec![],
+            declarations: [
+                DeclarationSection::Dependencies,
+                DeclarationSection::OptionalDependencies,
+            ]
+            .into_iter()
+            .map(|section| RetainedDeclaration {
+                origin: OmissionOrigin::Root,
+                section,
+                name: "native".into(),
+                requirement: "^1".into(),
+                target: key.clone(),
+            })
+            .collect(),
+        })
+        .unwrap();
+        let keys = [key.parse().unwrap()];
+        let matching = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"native":"^1"},"optionalDependencies":{"native":"^1"}}"#,
+        ).unwrap();
+        assert_eq!(replay_root_keys(&lock, &matching, &keys).unwrap(), [key]);
+        for changed in [
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"native":"^1"}}"#,
+            r#"{"name":"root","version":"1.0.0","devDependencies":{"native":"^1"},"optionalDependencies":{"native":"^1"}}"#,
+            r#"{"name":"root","version":"1.0.0","dependencies":{"native":"*"},"optionalDependencies":{"native":"^1"}}"#,
+        ] {
+            assert!(
+                replay_root_keys(&lock, &PackageManifest::parse(changed).unwrap(), &keys).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_root_omission_requires_exact_current_declaration() {
+        let mut lock = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: Some("gnu".into()),
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            declarations: vec![],
+            omissions: vec![tapid_lockfile::AcceptedOmission {
+                origin: tapid_lockfile::OmissionOrigin::Root,
+                name: "native".into(),
+                requirement: "^1".into(),
+                registry: "https://registry.npmjs.org".into(),
+                target: None,
+                reason: tapid_lockfile::OmissionReason::MetadataAbsent,
+            }],
+        })
+        .unwrap();
+        let matching = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"native":"^1"}}"#,
+        )
+        .unwrap();
+        assert!(replay_root_keys(&lock, &matching, &[]).is_ok());
+        for manifest in [
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"native":"^2"}}"#,
+            r#"{"name":"root","version":"1.0.0"}"#,
+            r#"{"name":"root","version":"1.0.0","dependencies":{"native":"^1"}}"#,
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"native":"^1","other":"1"}}"#,
+            r#"{"name":"root","version":"1.0.0","dependencies":{"native":"^1"},"optionalDependencies":{"native":"^1"}}"#,
+        ] {
+            let manifest = PackageManifest::parse(manifest).unwrap();
+            assert!(
+                replay_root_keys(&lock, &manifest, &[]).is_err(),
+                "{manifest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_alias_omission_uses_target_registry_route() {
+        let config = crate::registry::RegistryConfig::parse_toml_bytes(
+            b"[registries.'@vendor']\nurl = 'https://registry.example.test'\n",
+        )
+        .unwrap();
+        let mut lock = Lockfile::new(
+            "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: None,
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            declarations: vec![],
+            omissions: vec![tapid_lockfile::AcceptedOmission {
+                origin: tapid_lockfile::OmissionOrigin::Root,
+                name: "local".into(),
+                requirement: "npm:@vendor/native@^1".into(),
+                registry: "https://registry.example.test".into(),
+                target: None,
+                reason: tapid_lockfile::OmissionReason::MetadataAbsent,
+            }],
+        })
+        .unwrap();
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","optionalDependencies":{"local":"npm:@vendor/native@^1"}}"#,
+        ).unwrap();
+        assert!(replay_root_keys_with_config(&lock, &manifest, &[], &config).is_ok());
+        assert!(replay_root_keys(&lock, &manifest, &[]).is_err());
+    }
 
     #[test]
     fn replay_progress_is_reported_after_snapshot_completion() {
