@@ -3,7 +3,7 @@ use super::*;
 /// Capture a contained directory as canonical tar bytes for subsequent archive
 /// verification. Paths are normalized relative to `root`; forbidden roots use
 /// the same namespace. This does not publish or trust the resulting bytes.
-/// Non-Unix platforms currently return `Unsupported` without reading the source.
+/// Unsupported platforms currently return `Unsupported` without reading the source.
 /// Writers must stop for a coherent view; capture is not an atomic snapshot.
 pub fn capture_directory(
     root: &Path,
@@ -11,11 +11,11 @@ pub fn capture_directory(
     forbidden: &[&str],
     limits: ArchiveLimits,
 ) -> Result<Vec<u8>, ExtractError> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        unix::capture_directory(root, source, forbidden, limits)
+        filesystem::capture_directory(root, source, forbidden, limits)
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (root, source, forbidden, limits);
         Err(io::Error::new(
@@ -26,14 +26,23 @@ pub fn capture_directory(
     }
 }
 
+#[cfg(any(unix, windows))]
+mod filesystem;
 #[cfg(unix)]
-mod unix;
+#[path = "capture/unix.rs"]
+mod platform;
+#[cfg(windows)]
+#[path = "capture/windows.rs"]
+#[allow(
+    unsafe_code,
+    reason = "Windows capture requires no-follow native object metadata"
+)]
+mod platform;
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn directory_capture_is_deterministic_and_pins_bytes_not_timestamps() {
         let project = tapid_test_support::TempProject::new("directory-capture").unwrap();
@@ -60,6 +69,7 @@ mod tests {
             .unwrap();
         file.set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
             .unwrap();
+        drop(file);
         assert_eq!(
             first,
             capture_directory(project.path(), "vendor/pkg", &[], ArchiveLimits::default()).unwrap()
@@ -139,7 +149,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn directory_capture_rejects_unsafe_sources_and_honors_bounds() {
         let project = tapid_test_support::TempProject::new("capture-safety").unwrap();
@@ -221,7 +230,6 @@ mod tests {
         assert!(capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn directory_capture_long_names_roundtrip() {
         let project = tapid_test_support::TempProject::new("capture-long-path").unwrap();
@@ -233,6 +241,10 @@ mod tests {
         assert_eq!(
             first,
             capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).unwrap()
+        );
+        assert!(
+            first.as_slice() == include_bytes!("../tests/fixtures/directory-v1-long.tar"),
+            "canonical long-name archive encoding changed"
         );
         let output = project.path().join("output");
         extract_to(
@@ -267,7 +279,7 @@ mod tests {
             project.write("pkg/package.json", b"{}").unwrap();
             project.write("pkg/index.js", b"original").unwrap();
             let path = project.path().join("pkg/index.js");
-            unix::before_encoding(move || {
+            filesystem::before_encoding(move || {
                 if replace {
                     let replacement = path.with_extension("replacement");
                     fs::write(&replacement, b"replaced").unwrap();
@@ -289,6 +301,28 @@ mod tests {
                 .collect();
             assert_eq!(names, [std::ffi::OsString::from("pkg")]);
             capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_capture_rejects_directory_and_ancestor_replacement() {
+        for target in ["vendor", "vendor/pkg", "vendor/pkg/nested"] {
+            let project = tapid_test_support::TempProject::new("capture-directory-race").unwrap();
+            project.write("vendor/pkg/package.json", b"{}").unwrap();
+            project
+                .write("vendor/pkg/nested/index.js", b"original")
+                .unwrap();
+            let path = project.path().join(target);
+            filesystem::before_encoding(move || {
+                fs::rename(&path, path.with_extension("old")).unwrap();
+                std::os::unix::fs::symlink(path.with_extension("old"), &path).unwrap();
+            });
+            assert!(
+                capture_directory(project.path(), "vendor/pkg", &[], ArchiveLimits::default())
+                    .is_err(),
+                "{target}"
+            );
         }
     }
 
@@ -327,5 +361,218 @@ mod tests {
         )
         .unwrap();
         assert!(capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "The Windows alias fixture queries a bounded native short path"
+    )]
+    fn directory_capture_windows_rejects_available_short_name_aliases() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        let project = tapid_test_support::TempProject::new("windows-capture-short-name").unwrap();
+        project
+            .write("managed-directory/package.json", b"{}")
+            .unwrap();
+        let path = project.path().join("managed-directory");
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut short = vec![0u16; 32768];
+        // SAFETY: the input is terminated; the output buffer matches its length.
+        let len =
+            unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), short.len() as u32) };
+        assert!(
+            len > 0 && (len as usize) < short.len(),
+            "short path query failed: {}",
+            io::Error::last_os_error()
+        );
+        let short = std::path::PathBuf::from(String::from_utf16(&short[..len as usize]).unwrap());
+        let name = short.file_name().unwrap().to_str().unwrap();
+        if !name.eq_ignore_ascii_case("managed-directory") {
+            assert!(
+                capture_directory(
+                    project.path(),
+                    name,
+                    &["managed-directory"],
+                    ArchiveLimits::default()
+                )
+                .is_err()
+            );
+        }
+        // Volumes may disable 8.3 creation. The ordinary contained path still
+        // exercises capture there; alias rejection runs when an alias exists.
+        capture_directory(
+            project.path(),
+            "managed-directory",
+            &[],
+            ArchiveLimits::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn directory_capture_windows_honors_case_insensitive_managed_paths() {
+        let project = tapid_test_support::TempProject::new("windows-capture-managed-case").unwrap();
+        project.write("päckage/package.json", b"{}").unwrap();
+        assert!(
+            capture_directory(
+                project.path(),
+                "PÄCKAGE",
+                &["päckage"],
+                ArchiveLimits::default()
+            )
+            .is_err()
+        );
+        project.write("päckage/MANAGED/data", b"managed").unwrap();
+        assert!(
+            capture_directory(
+                project.path(),
+                "päckage",
+                &["päckage/managed"],
+                ArchiveLimits::default()
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(project.path().join("päckage/MANAGED")).unwrap();
+        project
+            .write("päckage/NODE_MODULES/data", b"excluded")
+            .unwrap();
+        let bytes =
+            capture_directory(project.path(), "päckage", &[], ArchiveLimits::default()).unwrap();
+        let output = project.path().join("output");
+        extract_to(
+            &bytes,
+            ArchiveFormat::Tar,
+            &output,
+            ArchiveLimits::default(),
+        )
+        .unwrap();
+        assert!(!output.join("NODE_MODULES").exists());
+    }
+
+    #[test]
+    fn directory_capture_windows_rejects_junctions_in_sources_entries_and_exclusions() {
+        use std::os::windows::process::CommandExt;
+        let project = tapid_test_support::TempProject::new("windows-capture-junction").unwrap();
+        let outside = tapid_test_support::TempProject::new("windows-capture-outside").unwrap();
+        project.write("pkg/package.json", b"{}").unwrap();
+        outside.write("package.json", b"external").unwrap();
+        for name in [
+            "alias",
+            "pkg/link",
+            "pkg/node_modules",
+            "pkg/.git",
+            "pkg/NODE_MODULES",
+        ] {
+            let path = project.path().join(name);
+            let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/cmd.exe");
+            let output = std::process::Command::new(cmd)
+                .raw_arg(format!(
+                    "/D /S /C \"mklink /J \"{}\" \"{}\"\"",
+                    path.display(),
+                    outside.path().display()
+                ))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "junction fixture failed: {output:?}"
+            );
+            let source = if name == "alias" { "alias" } else { "pkg" };
+            assert!(
+                capture_directory(project.path(), source, &[], ArchiveLimits::default()).is_err(),
+                "{name}"
+            );
+            fs::remove_dir(path).unwrap();
+        }
+        assert_eq!(
+            fs::read(outside.path().join("package.json")).unwrap(),
+            b"external"
+        );
+    }
+
+    #[test]
+    fn directory_capture_windows_rejects_hardlinks_and_active_writers() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let project = tapid_test_support::TempProject::new("windows-capture-links").unwrap();
+        project.write("pkg/package.json", b"{}").unwrap();
+        let path = project.path().join("pkg/package.json");
+        let writer = fs::OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)
+            .unwrap();
+        assert!(capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).is_err());
+        drop(writer);
+        capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).unwrap();
+        fs::hard_link(path, project.path().join("pkg/copy")).unwrap();
+        assert!(capture_directory(project.path(), "pkg", &[], ArchiveLimits::default()).is_err());
+    }
+
+    #[test]
+    fn directory_capture_windows_denies_writable_ancestor_handles() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let project =
+            tapid_test_support::TempProject::new("windows-capture-ancestor-lock").unwrap();
+        project.write("vendor/pkg/package.json", b"{}").unwrap();
+        let root = project.path().to_owned();
+        filesystem::before_encoding(move || {
+            for relative in ["vendor", "vendor/pkg"] {
+                let writer = fs::OpenOptions::new()
+                    .write(true)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(root.join(relative));
+                let error = writer.expect_err("held ancestor must deny reparse-point writers");
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(32),
+                    "expected sharing violation for {relative}: {error}"
+                );
+            }
+        });
+        capture_directory(project.path(), "vendor/pkg", &[], ArchiveLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn directory_capture_windows_prevents_ancestor_and_directory_replacement() {
+        for target in ["vendor", "vendor/pkg", "vendor/pkg/nested"] {
+            let project = tapid_test_support::TempProject::new("windows-capture-race").unwrap();
+            project.write("vendor/pkg/package.json", b"{}").unwrap();
+            project
+                .write("vendor/pkg/nested/index.js", b"original")
+                .unwrap();
+            let path = project.path().join(target);
+            filesystem::before_encoding(move || {
+                // The source/ancestor chain is held without delete sharing.
+                // Nested directories may be replaced between passes, but that
+                // replacement must then be rejected by the captured identity.
+                let replaced = fs::rename(&path, path.with_extension("old"));
+                if replaced.is_ok() {
+                    fs::create_dir(&path).unwrap();
+                }
+            });
+            let result =
+                capture_directory(project.path(), "vendor/pkg", &[], ArchiveLimits::default());
+            if project.path().join(target).with_extension("old").exists() {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+            }
+        }
     }
 }

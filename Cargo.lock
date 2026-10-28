@@ -1515,6 +1515,7 @@ dependencies = [
  "sha2",
  "tapid-test-support",
  "tar",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

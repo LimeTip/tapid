@@ -40,7 +40,10 @@ verified graph content. Transitive copied declarations and copied peer specifier
 remain unsupported. No implicit hooks or extra script filesystem grants follow
 from snapshotting or linking.
 
-Implementation is incomplete: current changes establish Unix archive capture and
-source/schema representation. Windows capture, additional directory/ancestor race tests, qualified
-member bindings, CLI integration, update/replay, and transaction/reporting coverage
+Implementation is incomplete: current changes establish Unix and Windows archive capture and
+source/schema representation. Windows traversal retains ancestor handles without
+write/delete sharing and rejects reparse points using native handle metadata;
+active writers fail closed. Windows roots currently require local drive paths.
+Native Windows runtime validation, qualified member bindings, CLI integration,
+update/replay, and transaction/reporting coverage
 must complete before the CLI advertises directory dependency support.
