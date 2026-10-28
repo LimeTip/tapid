@@ -972,6 +972,7 @@ fn json_help_and_version_are_successful_without_project_access() {
         (vec!["i", "--json", "-h"], "--registry-fixture"),
         (vec!["--json", "help", "run"], "--node-runtime"),
         (vec!["manifest", "validate", "--json", "--help"], "Usage:"),
+        (vec!["completions", "--json", "--help"], "powershell"),
     ] {
         let (output, result) = invoke(&project, &args);
         assert!(output.status.success(), "{result}");
@@ -1017,6 +1018,8 @@ fn json_unsupported_results_preserve_canonical_command_names() {
     for (args, operation) in [
         (vec!["--json", "run", "test"], "run"),
         (vec!["--json", "license"], "license"),
+        (vec!["--json", "completions", "bash"], "completions"),
+        (vec!["completions", "bash", "--json"], "completions"),
         (vec!["--json", "upgrade"], "upgrade"),
         (vec!["--json"], "none"),
     ] {
