@@ -142,6 +142,11 @@ pub struct LocalServer {
 
 impl LocalServer {
     pub fn new() -> Self {
+        Self::with_class(&unique_class())
+    }
+
+    pub fn with_class(class: &str) -> Self {
+        let class_guid = GUID::from_u128(u128::from_str_radix(class, 16).unwrap());
         // SAFETY: the test thread has no previous COM initialization.
         assert!(unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) } >= 0);
         let creations = Arc::new(AtomicU32::new(0));
@@ -152,28 +157,19 @@ impl LocalServer {
         }))
         .cast();
         let mut server = Self {
-            class: String::new(),
+            class: class.to_owned(),
             cookie: None,
             factory,
             creations,
             _thread: PhantomData,
         };
-        let mut class = GUID::from_u128(0);
-        assert_eq!(unsafe { CoCreateGuid(&mut class) }, 0);
-        server.class = format!(
-            "{:08x}{:04x}{:04x}{:016x}",
-            class.data1,
-            class.data2,
-            class.data3,
-            u64::from_be_bytes(class.data4)
-        );
         let mut cookie = 0;
         // Register only a running local server, not an in-process class or an
         // executable to be launched by SCM. The unique cookie owns revocation.
         assert_eq!(
             unsafe {
                 CoRegisterClassObject(
-                    &class,
+                    &class_guid,
                     factory,
                     CLSCTX_LOCAL_SERVER,
                     REGCLS_MULTI_SEPARATE as u32,
@@ -197,6 +193,60 @@ impl LocalServer {
         }
     }
 }
+
+pub fn unique_class() -> String {
+    let mut class = GUID::from_u128(0);
+    assert_eq!(unsafe { CoCreateGuid(&mut class) }, 0);
+    format!(
+        "{:08x}{:04x}{:04x}{:016x}",
+        class.data1,
+        class.data2,
+        class.data3,
+        u64::from_be_bytes(class.data4)
+    )
+}
+
+// This callback belongs only to the Rust library test executable. COM appends
+// -Embedding to LocalServer32 commands; dispatch before libtest parses it.
+// No production binary contains this entry point or accepts these arguments.
+#[used]
+#[unsafe(link_section = ".CRT$XCU")]
+static STANDALONE_SERVER_INIT: extern "C" fn() = {
+    extern "C" fn init() {
+        let arguments: Vec<_> = std::env::args_os().collect();
+        if arguments
+            .get(1)
+            .is_none_or(|arg| arg != "--tapid-test-com-server")
+        {
+            return;
+        }
+        let result = std::panic::catch_unwind(|| {
+            assert_eq!(arguments.len(), 5);
+            assert_eq!(arguments[4], "-Embedding");
+            let mut server = LocalServer::with_class(arguments[2].to_str().unwrap());
+            let root = std::path::Path::new(&arguments[3]);
+            // Parent owns this disposable directory. Create-new rejects stale
+            // readiness evidence instead of silently overwriting it.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join("ready"))
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !root.join("stop").exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "standalone COM server timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            server.cleanup();
+            println!("com:standalone:creations={}", server.creations());
+        });
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+    init
+};
 
 impl Drop for LocalServer {
     fn drop(&mut self) {

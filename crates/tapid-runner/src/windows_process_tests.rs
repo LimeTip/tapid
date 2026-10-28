@@ -38,6 +38,72 @@ fn bounded_host_output(
     })
 }
 
+#[test]
+fn standalone_com_server_activates_and_revokes_its_supplied_class() {
+    let project = tapid_test_support::TempProject::new("standalone-com-server").unwrap();
+    let class = super::com_probe::unique_class();
+    let executable = std::env::current_exe().unwrap();
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let mut command = std::process::Command::new(&executable);
+            command
+                .arg("--tapid-test-com-server")
+                .arg(&class)
+                .arg(project.path())
+                .arg("-Embedding");
+            bounded_host_output(&mut command, 15_000).unwrap()
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !project.path().join("ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "COM server did not register"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut client = std::process::Command::new(&executable);
+        client
+            .args([
+                "--exact",
+                &format!(
+                    "{}::provider_helper",
+                    module_path!().split_once("::").unwrap().1
+                ),
+                "--nocapture",
+            ])
+            .env("TAPID_TEST_MARKER", "com-descendant-host")
+            .env("TAPID_TEST_COM_CLASS", &class);
+        let activated = bounded_host_output(&mut client, 5_000).unwrap();
+        project.write("stop", b"").unwrap();
+        let output = server.join().unwrap();
+        assert!(
+            activated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&activated.stderr)
+        );
+        assert!(String::from_utf8_lossy(&activated.stdout).contains("com:descendant:activated"));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "com:standalone:creations=1"
+        );
+        client.env("TAPID_TEST_MARKER", "com-revoked");
+        let revoked = bounded_host_output(&mut client, 5_000).unwrap();
+        assert!(
+            revoked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&revoked.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&revoked.stdout).contains("com:local-server:class-unavailable")
+        );
+    });
+}
+
 fn bounded_child_status(
     child: &mut std::process::Child,
     timeout_ms: u32,

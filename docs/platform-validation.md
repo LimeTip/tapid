@@ -339,6 +339,21 @@ It does not test SCM launch from registry registration, arbitrary brokers, or
 response/input binding. Native paired observations and authority closure remain
 required before identity work can claim closure. No native results exist yet.
 
+`standalone_com_server_activates_and_revokes_its_supplied_class` adds an
+independently running server process using that same Rust factory. A test-only
+Windows CRT initializer dispatches its exact private argument prefix before
+libtest parses COM's `-Embedding` argument. Production binaries contain no such
+dispatch. The parent supplies a fresh GUID and disposable directory; create-new
+readiness evidence follows registration, and a stop file requests exact-cookie
+revocation. The server has a ten-second internal deadline and the existing
+bounded host supervisor owns termination and reaping. A separate client must
+activate the class, the server must report exactly one dispatch, and a fresh
+client must observe class unavailability after server exit. Native execution is
+pending. This is a prerequisite for a
+[LocalServer32 command](https://learn.microsoft.com/en-us/windows/win32/com/localserver32),
+not an SCM-launched control: the test still starts the server directly. Disposable
+registry registration, SCM supervision and paired LPAC attempts remain required.
+
 The capability comparison's host-positive helper has a ten-second native process
 wait. Timeout terminates the helper and requires termination observation within
 five seconds before returning failure. File-backed stdout/stderr avoid waiting
