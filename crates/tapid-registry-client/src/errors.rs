@@ -29,7 +29,15 @@ pub enum TransportError {
     InvalidUrl(String),
     OriginNotAllowed(String),
     Http(String),
-    TooLarge { limit: usize },
+    /// A transient HTTP status remained after the bounded GET retry policy.
+    /// This is status evidence, not permission to ignore a failed request.
+    HttpStatusExhausted {
+        status: u16,
+        attempts: u32,
+    },
+    TooLarge {
+        limit: usize,
+    },
     InvalidResponse(String),
 }
 impl fmt::Display for TransportError {

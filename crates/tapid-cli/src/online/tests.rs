@@ -951,6 +951,81 @@ fn unavailable_optional_requirement_does_not_fail_resolution() {
 }
 
 #[test]
+fn confirmed_metadata_absence_only_allows_an_optional_declaration() {
+    for optional in [true, false] {
+        let roots = vec![Dependency::new(
+            NPM.parse().unwrap(),
+            "app".parse().unwrap(),
+            "*".parse().unwrap(),
+        )];
+        let result = resolve_with_fetch(&roots, |_, name| {
+            Ok(match name.as_str() {
+                "app" => {
+                    let mut package = named_record("app", "1.0.0", &[]);
+                    if optional {
+                        package
+                            .optional_dependencies
+                            .insert("native".into(), "1".into());
+                    } else {
+                        package.dependencies.insert("native".into(), "1".into());
+                    }
+                    vec![package]
+                }
+                // The registry parser represents confirmed absence as no candidates.
+                "native" => Vec::new(),
+                other => panic!("unexpected metadata fetch for {other}"),
+            })
+        });
+        if optional {
+            let (resolution, _, _) = result.unwrap();
+            assert_eq!(resolution.selected.len(), 1);
+            assert_eq!(resolution.selected[0].name.as_str(), "app");
+        } else {
+            assert!(result.is_err(), "required absence must fail");
+        }
+    }
+}
+
+#[test]
+fn optional_metadata_transport_failure_is_not_candidate_absence() {
+    let roots = vec![Dependency::new(
+        NPM.parse().unwrap(),
+        "app".parse().unwrap(),
+        "*".parse().unwrap(),
+    )];
+    let error = resolution::resolve_with_fetch_routed_and_overrides(
+        &roots,
+        |parent, _| Ok(parent.clone()),
+        &BTreeMap::new(),
+        |_, name| match name.as_str() {
+            "app" => {
+                let mut package = named_record("app", "1.0.0", &[]);
+                package
+                    .optional_dependencies
+                    .insert("native".into(), "1".into());
+                Ok(vec![package])
+            }
+            "native" => Err(crate::application::outcome::OperationalError::from(
+                tapid_registry_client::RegistryClientError::Transport(
+                    tapid_registry_client::TransportError::HttpStatusExhausted {
+                        status: 503,
+                        attempts: 3,
+                    },
+                ),
+            )),
+            other => panic!("unexpected metadata fetch for {other}"),
+        },
+        |_| {},
+    )
+    .err()
+    .expect("optional metadata transport failures must remain fatal");
+    assert_eq!(
+        error.kind,
+        crate::application::outcome::ErrorKind::RegistryTransport
+    );
+}
+
+#[test]
 fn unusable_optional_candidate_does_not_become_a_required_edge() {
     let roots = vec![Dependency::new(
         NPM.parse().unwrap(),

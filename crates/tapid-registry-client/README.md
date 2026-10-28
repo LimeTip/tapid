@@ -43,6 +43,12 @@ The crate-level `download_artifact` operation accepts canonical HTTPS URLs, uses
 
 The crate is read-only. It does not publish, mutate registry state, choose credential sources, or mirror. Unit tests use local fixtures and do not call live registries.
 
+Exhausted transient HTTP statuses retain the status and attempt count in
+`TransportError::HttpStatusExhausted`. Other request and response-read failures
+remain `Http` errors; callers must not infer availability or optional-dependency
+omission permission from their display text. A typed exhausted status is evidence
+of a failed request, not authorization to omit a dependency during replay.
+
 ## HTTPS Git artifacts
 
 `GitDependency` parses credential-free `git+https` repositories with branch, tag,
