@@ -826,3 +826,94 @@ fn status_reports_root_bindings_without_requiring_workspace_discovery() {
         );
     }
 }
+
+#[test]
+fn status_describes_recorded_optional_omissions_without_mutation() {
+    use tapid_lockfile::*;
+    for (imported, count) in [(false, 1), (true, 1), (false, 51), (true, 51)] {
+        let project = tapid_test_support::TempProject::new("status-omissions").unwrap();
+        let optional = (0..count)
+            .map(|index| (format!("missing-{index:02}"), serde_json::json!("^1")))
+            .collect::<serde_json::Map<_, _>>();
+        let manifest =
+            serde_json::json!({"name":"root","version":"1.0.0","optionalDependencies":optional})
+                .to_string();
+        project.write("package.json", manifest.as_bytes()).unwrap();
+        let digest = format!("sha256-{:x}", Sha256::digest(manifest.as_bytes()));
+        let target = SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: None,
+        };
+        let bytes = if imported {
+            let npm = serde_json::json!({"lockfileVersion":3,"packages":{"":serde_json::from_str::<serde_json::Value>(&manifest).unwrap()}});
+            let mut lock =
+                ImportedNpmLockfile::import(&npm.to_string(), &manifest, &digest).unwrap();
+            lock.record_platform_selection(target, SelectionProfile::Development)
+                .unwrap();
+            lock.to_json().unwrap()
+        } else {
+            let mut lock = Lockfile::new(&digest).unwrap();
+            lock.set_selection(LockedSelection {
+                target,
+                profile: SelectionProfile::Development,
+                declarations: vec![],
+                omissions: (0..count)
+                    .map(|index| AcceptedOmission {
+                        origin: OmissionOrigin::Root,
+                        name: format!("missing-{index:02}"),
+                        requirement: "^1".into(),
+                        original_requirement: None,
+                        registry: "https://registry.npmjs.org".into(),
+                        target: None,
+                        reason: OmissionReason::MetadataAbsent,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+            lock.to_json().unwrap()
+        };
+        project.write("tapid.lock", bytes.as_bytes()).unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert!(output.status.success(), "{imported}: {value}");
+        assert_eq!(value["data"]["manifest_lock_agreement"], "match");
+        assert_eq!(
+            value["data"]["selection"]["omissions"][0]["name"],
+            "missing-00"
+        );
+        assert_eq!(value["data"]["selection"]["details_complete"], count == 1);
+        assert_eq!(value["data"]["selection"]["target"]["os"], "linux");
+        assert_eq!(
+            value["data"]["selection"]["omissions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            count.min(50)
+        );
+        assert_eq!(
+            value["data"]["selection"]["omitted_records"],
+            count.saturating_sub(50)
+        );
+        let human = run(project.path(), &["status"]);
+        assert!(human.status.success());
+        assert!(
+            String::from_utf8_lossy(&human.stdout)
+                .contains("Optional dependency missing-00@^1 from project root omitted:")
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            bytes.as_bytes()
+        );
+        assert!(!project.path().join("node_modules").exists());
+        project
+            .write("package.json", manifest.replace("^1", "^2").as_bytes())
+            .unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert!(!output.status.success(), "{value}");
+        assert_eq!(value["data"]["manifest_lock_agreement"], "mismatch");
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            bytes.as_bytes()
+        );
+    }
+}

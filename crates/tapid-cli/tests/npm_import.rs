@@ -1545,3 +1545,618 @@ fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() 
         );
     }
 }
+
+#[test]
+fn npm_import_records_platform_cuts_before_unchanged_offline_replay() {
+    let project = reference_project("npm-import-platform-ledger");
+    let imported = invoke(&project, &["import-package-lock", "package-lock.json"]);
+    assert!(imported.status.success());
+    let store = project.path().join("store");
+    let output = invoke(
+        &project,
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let bytes = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let wire: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(wire["lockfileVersion"], 12);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["selection"]["omissions"],
+        wire["placementSelection"]["omissions"]
+    );
+    assert_eq!(result["selection"]["details_complete"], true);
+    assert_eq!(
+        wire["placementSelection"]["omissions"],
+        serde_json::json!([
+            {"declaringPlacement":"", "name":"native", "requirement":"1.0.0", "reason":"incompatiblePlatform"}
+        ])
+    );
+    assert!(!project.path().join("node_modules/native").exists());
+    project.write("registry.json", b"not JSON").unwrap();
+    for args in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["install", "--offline"],
+    ] {
+        let output = invoke(
+            &project,
+            &[
+                args.as_slice(),
+                &["--store-dir", store.to_str().unwrap(), "--json"],
+            ]
+            .concat(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            bytes
+        );
+    }
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    let rejected = invoke(
+        &project,
+        &[
+            "ci",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        fs::read(project.path().join(".tapid-managed")).unwrap(),
+        marker
+    );
+}
+
+#[test]
+fn npm_import_records_absent_root_and_nested_aliases_and_replays_without_metadata() {
+    let project = reference_project("npm-import-absent-ledger");
+    let mut npm: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package-lock.json")).unwrap())
+            .unwrap();
+    npm["packages"][""]["optionalDependencies"]["missing"] = "npm:absent@^1".into();
+    npm["packages"]["node_modules/parent"]["optionalDependencies"] =
+        serde_json::json!({"missing":"npm:absent@^2"});
+    project
+        .write("package.json", npm["packages"][""].to_string().as_bytes())
+        .unwrap();
+    project
+        .write("package-lock.json", npm.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    let store = project.path().join("store");
+    let installed = invoke(
+        &project,
+        &[
+            "install",
+            "--frozen",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stdout)
+    );
+    let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(
+        result["selection"]["omissions"],
+        wire["placementSelection"]["omissions"]
+    );
+    for (parent, requirement) in [
+        ("", "npm:absent@^1"),
+        ("node_modules/parent", "npm:absent@^2"),
+    ] {
+        assert!(
+            result["selection"]["omissions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({
+                    "declaringPlacement":parent,"name":"missing","requirement":requirement,
+                    "reason":"importedPlacementAbsent"
+                }))
+        );
+    }
+    project.write("registry.json", b"invalid JSON").unwrap();
+    for args in [
+        vec!["install", "--offline", "--frozen"],
+        vec!["install", "--offline"],
+    ] {
+        let output = invoke(
+            &project,
+            &[args.as_slice(), &["--store-dir", store.to_str().unwrap()]].concat(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("ImportedPlacementAbsent"));
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert!(!project.path().join("node_modules/missing").exists());
+    }
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    let mut forged = wire;
+    forged["placementSelection"]["omissions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|cut| cut["name"] == "missing")
+        .unwrap()["reason"] = "metadataAbsent".into();
+    let forged = forged.to_string();
+    project.write("tapid.lock", forged.as_bytes()).unwrap();
+    assert!(
+        !invoke(&project, &["install", "--offline", "--json"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        forged
+    );
+    assert_eq!(
+        fs::read(project.path().join(".tapid-managed")).unwrap(),
+        marker
+    );
+}
+
+/// Explicit development oracle: never consults a registry or a user's npm cache.
+#[test]
+fn optional_failure_stages_match_pinned_npm_baseline() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let Some(npm) = std::env::var_os("TAPID_NPM_OPTIONAL_ORACLE") else {
+        return;
+    };
+    let fixtures: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-import/registry.json")).unwrap();
+    let package = &fixtures["packages"][0];
+    let name = package["name"].as_str().unwrap();
+    let archive = STANDARD
+        .decode(
+            package["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    for stage in ["download", "archive", "integrity", "platform"] {
+        for optional in [false, true] {
+            let project = TempProject::new("npm-optional-failure-oracle").unwrap();
+            let home = TempHome::new("npm-optional-failure-oracle").unwrap();
+            project.write("empty.npmrc", b"").unwrap();
+            project.write("global.npmrc", b"").unwrap();
+            if stage != "download" {
+                project
+                    .write(
+                        "artifact.tgz",
+                        if stage == "archive" {
+                            b"invalid archive"
+                        } else {
+                            &archive
+                        },
+                    )
+                    .unwrap();
+            }
+            let section = if optional {
+                "optionalDependencies"
+            } else {
+                "dependencies"
+            };
+            let manifest =
+                serde_json::json!({"name":"oracle", "version":"1.0.0", section:{name:"1.0.0"}});
+            project
+                .write("package.json", &serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+            let mut entry = serde_json::json!({"name":name,"version":"1.0.0","resolved":"file:artifact.tgz", "optional":optional});
+            if stage == "integrity" {
+                entry["integrity"] = format!("sha512-{}", STANDARD.encode([0u8; 64])).into();
+            }
+            if stage == "platform" {
+                entry["os"] = serde_json::json!(["tapid-nonexistent-os"]);
+            }
+            let lock = serde_json::json!({"name":"oracle","version":"1.0.0","lockfileVersion":3,"packages":{"":manifest,format!("node_modules/{name}"):entry}});
+            project
+                .write("package-lock.json", &serde_json::to_vec(&lock).unwrap())
+                .unwrap();
+            let run = |args: &[&str]| {
+                let mut command = Command::new(&npm);
+                command.env_clear();
+                for variable in [
+                    "PATH",
+                    "SystemRoot",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TMP",
+                    "TEMP",
+                    "TMPDIR",
+                ] {
+                    if let Some(value) = std::env::var_os(variable) {
+                        command.env(variable, value);
+                    }
+                }
+                command
+                    .current_dir(project.path())
+                    .args(args)
+                    .args([
+                        "--offline",
+                        "--ignore-scripts",
+                        "--no-audit",
+                        "--no-fund",
+                        "--fetch-retries=0",
+                        "--cache",
+                        home.path().join("cache").to_str().unwrap(),
+                        "--userconfig",
+                        project.path().join("empty.npmrc").to_str().unwrap(),
+                        "--globalconfig",
+                        project.path().join("global.npmrc").to_str().unwrap(),
+                    ])
+                    .env("HOME", home.path())
+                    .env("USERPROFILE", home.path())
+                    .output()
+                    .unwrap()
+            };
+            let version = run(&["--version"]);
+            assert!(version.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&version.stdout).trim(),
+                "10.9.9",
+                "oracle requires pinned npm 10.9.9"
+            );
+            let output = run(&["ci"]);
+            assert_eq!(
+                output.status.success(),
+                optional,
+                "{stage}, optional={optional}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !optional {
+                let code = match stage {
+                    "download" => "ENOENT",
+                    "archive" => "TAR_BAD_ARCHIVE",
+                    "integrity" => "EINTEGRITY",
+                    "platform" => "EBADPLATFORM",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains(code),
+                    "{stage}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert!(
+                !project.path().join(format!("node_modules/{name}")).exists(),
+                "failed package must not be installed: {stage}"
+            );
+        }
+    }
+}
+
+#[test]
+fn npm_import_why_preserves_placements_and_recorded_omissions() {
+    let project = reference_project("npm-import-why-selection");
+    let mut npm: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package-lock.json")).unwrap())
+            .unwrap();
+    npm["packages"][""]["dependencies"]["alias"] = "npm:shared@1.0.0".into();
+    npm["packages"]["node_modules/alias"] = npm["packages"]["node_modules/shared"].clone();
+    npm["packages"]["node_modules/alias"]["name"] = "shared".into();
+    let manifest = npm["packages"][""].to_string();
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let npm = npm.to_string();
+    use sha2::{Digest, Sha256};
+    let mut lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &npm,
+        &manifest,
+        &format!("sha256-{:x}", Sha256::digest(manifest.as_bytes())),
+    )
+    .unwrap();
+    lock.record_platform_selection(
+        tapid_lockfile::SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: Some("gnu".into()),
+        },
+        tapid_lockfile::SelectionProfile::Development,
+    )
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let output = invoke(&project, &["why", "native", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["omissions"][0]["declaringPlacement"], "");
+    assert_eq!(
+        value["data"]["omissions"][0]["reason"],
+        "incompatiblePlatform"
+    );
+    assert_eq!(value["data"]["not_found"], false);
+    let alias = invoke(&project, &["why", "alias", "--json"]);
+    assert!(
+        alias.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alias.stdout)
+    );
+    let alias: serde_json::Value = serde_json::from_slice(&alias.stdout).unwrap();
+    assert_eq!(
+        alias["data"]["paths"][0]["steps"][0]["key"],
+        "node_modules/alias"
+    );
+    let output = invoke(&project, &["why", "shared", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let paths = value["data"]["paths"].as_array().unwrap();
+    assert!(paths.iter().any(|p| p["steps"].as_array().unwrap().last().unwrap()["key"] == "node_modules/shared"));
+    assert!(
+        paths
+            .iter()
+            .any(|p| p["steps"].as_array().unwrap().last().unwrap()["key"]
+                == "node_modules/parent/node_modules/shared")
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn npm_import_why_scopes_workspace_alias_omissions_and_rejects_stale_members() {
+    use sha2::{Digest, Sha256};
+    let (project, _home) = workspace_project();
+    let mut npm: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package-lock.json")).unwrap())
+            .unwrap();
+    for path in ["packages/member", "apps/second"] {
+        let manifest_path = format!("{path}/package.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.path().join(&manifest_path)).unwrap())
+                .unwrap();
+        manifest["optionalDependencies"]["alias"] = "npm:absent@^1".into();
+        npm["packages"][path]["optionalDependencies"]["alias"] = "npm:absent@^1".into();
+        project
+            .write(&manifest_path, manifest.to_string().as_bytes())
+            .unwrap();
+    }
+    let manifest = fs::read_to_string(project.path().join("package.json")).unwrap();
+    let digest = |text: &str| format!("sha256-{:x}", Sha256::digest(text.as_bytes()));
+    let mut lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &npm.to_string(),
+        &manifest,
+        &digest(&manifest),
+    )
+    .unwrap();
+    let manifests = ["packages/member", "packages/helper", "apps/second"]
+        .into_iter()
+        .map(|path| {
+            let text = fs::read_to_string(project.path().join(path).join("package.json")).unwrap();
+            (path.to_owned(), (text.clone(), digest(&text)))
+        })
+        .collect();
+    lock.bind_workspace_manifests(&manifests).unwrap();
+    lock.record_platform_selection(
+        tapid_lockfile::SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: Some("gnu".into()),
+        },
+        tapid_lockfile::SelectionProfile::Development,
+    )
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    for name in ["alias", "absent"] {
+        let output = invoke(&project, &["why", name, "--workspace", "member", "--json"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["omissions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            value["data"]["omissions"][0]["declaringPlacement"],
+            "packages/member"
+        );
+    }
+    let root_paths = invoke(&project, &["why", "shared", "--json"]);
+    assert!(root_paths.status.success());
+    let root_paths: serde_json::Value = serde_json::from_slice(&root_paths.stdout).unwrap();
+    assert!(
+        root_paths["data"]["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|path| path["steps"][0]["sourceKind"] == "workspace")
+    );
+    let second = invoke(
+        &project,
+        &["why", "alias", "--workspace", "second", "--json"],
+    );
+    assert!(second.status.success());
+    let second: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second["data"]["omissions"].as_array().unwrap().len(), 2);
+    let output = invoke(&project, &["why", "alias", "--workspace", "member"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("imported placement absent"));
+    let output = invoke(
+        &project,
+        &["why", "shared", "--workspace", "member", "--json"],
+    );
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["data"]["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|path| path["steps"][0]["key"] == "packages/member")
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"2.0.0"}"#,
+        )
+        .unwrap();
+    assert!(
+        !invoke(
+            &project,
+            &["why", "alias", "--workspace", "member", "--json"]
+        )
+        .status
+        .success()
+    );
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn npm_import_why_preserves_workspace_peer_kinds() {
+    for optional in [false, true] {
+        let (project, _home) = workspace_project();
+        if optional {
+            for filename in ["package-lock.json", "packages/helper/package.json"] {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(project.path().join(filename)).unwrap())
+                        .unwrap();
+                let member = if filename == "package-lock.json" {
+                    &mut value["packages"]["packages/helper"]
+                } else {
+                    &mut value
+                };
+                member["peerDependenciesMeta"]["shared"]["optional"] = true.into();
+                project
+                    .write(filename, value.to_string().as_bytes())
+                    .unwrap();
+            }
+        }
+        let imported = invoke(&project, &["import-package-lock", "package-lock.json"]);
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+        let output = invoke(
+            &project,
+            &["why", "shared", "--workspace", "@scope/helper", "--json"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let paths = value["data"]["paths"].as_array().unwrap();
+        assert!(!paths.is_empty());
+        for path in paths {
+            assert_eq!(
+                path["steps"].as_array().unwrap().last().unwrap()["edgeKind"],
+                if optional {
+                    "optionalPeerDependencies"
+                } else {
+                    "peerDependencies"
+                }
+            );
+        }
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn npm_import_why_bounds_omissions_without_claiming_absence() {
+    use sha2::{Digest, Sha256};
+    let project = TempProject::new("npm-import-why-bound").unwrap();
+    let optional: std::collections::BTreeMap<_, _> = (0..51)
+        .map(|i| (format!("alias-{i:02}"), "npm:absent@1"))
+        .collect();
+    let manifest =
+        serde_json::json!({"name":"root", "version":"1.0.0", "optionalDependencies":optional})
+            .to_string();
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let npm = serde_json::json!({"lockfileVersion":3, "packages":{"":serde_json::from_str::<serde_json::Value>(&manifest).unwrap()}}).to_string();
+    let mut lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &npm,
+        &manifest,
+        &format!("sha256-{:x}", Sha256::digest(manifest.as_bytes())),
+    )
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+    let legacy = invoke(&project, &["why", "absent", "--json"]);
+    assert!(!legacy.status.success());
+    let legacy: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_eq!(legacy["data"]["selection"], serde_json::Value::Null);
+    assert_eq!(legacy["data"]["omissions"], serde_json::json!([]));
+    lock.record_platform_selection(
+        tapid_lockfile::SelectionTarget {
+            os: "linux".into(),
+            cpu: "x86_64".into(),
+            libc: None,
+        },
+        tapid_lockfile::SelectionProfile::Development,
+    )
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let output = invoke(&project, &["why", "absent", "--json"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["outcome"], "partial");
+    assert_eq!(value["data"]["not_found"], false);
+    assert_eq!(value["data"]["truncated"], true);
+    assert_eq!(value["data"]["omissions"].as_array().unwrap().len(), 50);
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+}

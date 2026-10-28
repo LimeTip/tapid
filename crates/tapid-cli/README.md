@@ -27,6 +27,10 @@ The generated release installers select archives through `https://tapid.dev/rele
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
+Resolved dependency previews expose accepted optional omissions in human and JSON output, including newly resolved graph cuts. They do not verify artifacts or write selection facts.
+
+For ordinary locks with recorded selection facts, `tapid why` also explains accepted optional declaration omissions, matching local aliases or actual package names. These read-only reports describe the lock's recorded target and profile, including when inspected on a different host. Matching omissions exit successfully; absence from both selected paths and the omission ledger exits 1. Omission details are bounded and incomplete reports are marked explicitly. See the [JSON result contract](../../docs/json-results.md) for machine-readable fields.
+
 ## Commands
 
 ```text
@@ -217,6 +221,14 @@ integrity even when the artifact is cached.
 
 `tapid --json why PACKAGE` emits the version 1 JSON envelope with `schema_version: 1`, `operation: "why"`, `outcome`, `project`, `changes`, `warnings`, `errors`, `retry`, and a command-specific `data` object. The `data` object contains `package`, `paths`, `truncated`, `not_found`, and `graph_warnings`. Results are deterministic and bounded to 50 paths, 128 dependency levels, and 10,000 graph visits; `truncated: true` means the search is partial, so `not_found` is false and the command exits successfully even when no path was found. Transitive edge-kind limitations are surfaced in `data.graph_warnings`.
 
+
+`why` also inspects imported npm schema-8/12 locks. Paths retain exact npm
+placement keys, including nested packages and workspace links. Schema 12 uses
+its recorded target/profile and exposes matching placement-keyed omissions;
+schema 8 filters placements for the current host without inventing omission facts.
+Root and member manifest receipts must match. Member queries restrict paths and
+omissions to that member's reachable graph. Inspection does not verify artifacts
+or authorize replay on another target.
 ## Install and lifecycle outcomes
 
 `outdated` compares each direct dependency's declared range and locked version with registry metadata. It reports the newest compatible version and newest available version, with SemVer change labels and direct lockfile pin impact for each. `available-manifest=changed` means the available version requires a different declared range. Peer declarations do not select direct lockfile pins, so their lockfile impact is unchanged even when metadata is unavailable. Missing metadata leaves other impact fields unknown. The command never recovers interrupted transactions or changes the manifest, lockfile, store, or node_modules. A pending transaction stops inspection with recovery guidance. Live registry access is the default. Use `--offline` to forbid registry access; without a fixture, registry versions and impact are unknown, while local workspace versions remain available.
@@ -230,6 +242,8 @@ Lockfile impact describes selecting the shown direct version. An unchanged direc
 `install`, `add`, `remove`, and `update` accept `--dry-run`. They report declaration edits and a resolved dependency graph, including source-qualified package identities, versions, integrity metadata, dependency edges, and the direct roots or parent edges that select each changed package. A version, peer-context, or platform-context change appears as removal of the old identity and addition of the new one. Named update previews preserve unrelated valid pins and report the resolved save requirements, including the default caret policy for `--latest`. Omitting package names refreshes the whole graph.
 
 A dry run never writes project files, creates an activation lock, recovers transactions, reads or writes the package store, downloads package artifacts, or runs lifecycle scripts. Pending recovery stops the preview. Live resolution may request registry metadata; `--registry-fixture` resolves entirely from local fixture metadata. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without checking whether its artifacts are cached. Output states the network permission, package metadata lookup count, and cache/artifact effects explicitly. A resolved graph does not attest artifact availability, archive validity, generated lifecycle outputs, or the success of a later install. Copied file/Git sources and imported npm locks currently require an ordinary install rather than a resolved preview.
+
+When a preview reuses a native recorded selection, it requires the current host target and development profile and reports accepted optional omissions in human output and the JSON envelope's `selection`.
 
 `tapid --json add PACKAGE --dry-run` uses the version 1 command envelope with unchanged project state. `data.preview_kind` is `resolved_graph`; `data.declarations` lists section/name/before/after edits, `data.packages` lists package changes and reasons, `data.root_changes` lists root binding changes, and `data.effects` describes this preview's effects. This is an inspection result, not a saved executable plan. A later command reads current inputs and may resolve different metadata.
 
@@ -349,6 +363,38 @@ Both flags require `tapid.lock` and matching root and workspace manifests. Repla
 With a native lock, `--frozen` can download a missing tree from its pinned HTTPS archive URL. It verifies registry-declared SHA-512 integrity, archive structure, and the locked canonical tree digest. It does not resolve metadata or rewrite the lock. Imported npm locks preserve selections but may record verified tree receipts. Missing URLs or provenance, corrupt stored trees, changed routing, incompatible platforms, and failed verification stop installation. `--offline` forbids downloads, including with `--frozen`.
 
 Ordinary installation also replays a matching lock. Changed manifests retain compatible locked roots and transitive selections while resolving necessary changes. `tapid update` without names explicitly refreshes the graph; named updates preserve unrelated compatible pins. Unsupported or noncanonical locks require a verified backup and deliberate removal before generating a replacement. These are Tapid's supported lock semantics, not the complete npm frozen-lockfile policy.
+
+Recorded-selection locks (ordinary schema 11 and imported schema 12) replay only
+when their recorded OS, CPU, libc and development profile match the current build
+host. Native locks retain exact root/member declaration validation. Matching
+ordinary install, frozen/offline install and native ci preserve accepted omissions;
+missing selected artifacts still fail offline and may be hydrated during frozen
+installation. Imported locks retain their existing ci restriction. Replay does
+not retry omitted branches. Human and JSON install outcomes include the recorded
+target/profile and at most 50 omission records, with explicit incomplete-detail
+counts. Ordinary registry graphs, including workspace members, emit schema
+11 when recording omitted transitive optional declarations. They also accept and
+record confirmed metadata absence, incompatible-platform candidates, and no
+usable matching candidate for optional-only root declarations; a required
+declaration to the same registry/package keeps unavailability fatal, including through
+another alias or workspace member. Root and member omissions retain separate
+origins even when they share a local name. Local workspace links retain their
+original sections and requirements; automatic member roots describe membership.
+Metadata transport errors remain fatal. Existing transitive
+candidate/platform exclusions retain their reasons in the ledger. Selection with
+omissions and overridden workspace declarations retains the effective requirement
+and an `originalRequirement` when they differ. Replay checks the original member
+section and requirement as well as the current root override. Alias overrides
+preserve the actual package name; overrides cannot redirect local workspace links.
+Copied file and Git roots can coexist with these omissions. Their original root
+specifications and resolved package requirements are retained alongside immutable
+source identities; replay still verifies file bytes and copied source bindings.
+Imported installs record optional platform cuts and absent optional placements in schema 12 on first verification,
+preserving exact declaring placements and the target/profile for replay. Initial
+offline imports still emit schema 8. Absent placements use `importedPlacementAbsent`;
+the imported graph does not establish the original failure stage. Artifact/hook
+omission selection and complete optional-failure semantics remain unfinished.
+Preview integration remains unfinished. Status describes recorded omissions without authorizing replay on the current host.
 
 ## Experimental Node.js root-script runner and `.bin` handling
 
@@ -472,9 +518,11 @@ operation even when node_modules is absent. Root and member manifest discovery
 and workspace planning reads are limited to 32 MiB per manifest.
 Discovery also stops before parsing members when it exceeds 128 candidate manifests
 or 4,096 expansion steps, and reports a blocked, truncated inspection. Imported
-npm schema-8 locks use their root and workspace receipt validators; imported
+npm schema-8 and schema-12 locks use their root and workspace receipt validators; imported
 registry routing, platform selection, and ancestor installation layout remain
 explicitly unchecked.
+
+Status includes recorded schema-11/12 selection target, profile, and up to 50 omission records in `data.selection` and human output. `omitted_records` and `details_complete` identify incomplete details. Inspection validates against the recorded target/profile; current-host compatibility remains unchecked.
 
 Snapshot entries identify inspected metadata using SHA-256 or explicit missing
 and unreadable states. Directory and journal entries use metadata identities;

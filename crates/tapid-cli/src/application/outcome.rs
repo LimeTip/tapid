@@ -410,10 +410,61 @@ pub(crate) struct OperationOutcome {
     pub(crate) changed_files: Vec<PathBuf>,
     pub(crate) warnings: Vec<Warning>,
     pub(crate) lifecycle: Option<LifecycleReport>,
+    pub(crate) selection: Option<SelectionReport>,
     pub(crate) omitted_warnings: usize,
     pub(crate) omitted_warning_codes: std::collections::BTreeSet<&'static str>,
 }
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct SelectionReport {
+    pub(crate) target: tapid_lockfile::SelectionTarget,
+    pub(crate) profile: tapid_lockfile::SelectionProfile,
+    pub(crate) omissions: Vec<SelectionOmission>,
+    pub(crate) omitted_records: usize,
+}
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum SelectionOmission {
+    Native(tapid_lockfile::AcceptedOmission),
+    Imported(tapid_lockfile::ImportedOmission),
+}
+impl SelectionOmission {
+    pub(crate) fn declaration(&self) -> (&str, &str, tapid_lockfile::OmissionReason) {
+        match self {
+            Self::Native(fact) => (&fact.name, &fact.requirement, fact.reason),
+            Self::Imported(fact) => (&fact.name, &fact.requirement, fact.reason),
+        }
+    }
+}
 impl OperationOutcome {
+    pub(crate) fn record_selection(&mut self, lock: &tapid_lockfile::Lockfile) {
+        self.selection = lock.selection().map(|facts| SelectionReport {
+            target: facts.target.clone(),
+            profile: facts.profile,
+            omissions: facts
+                .omissions
+                .iter()
+                .take(50)
+                .cloned()
+                .map(SelectionOmission::Native)
+                .collect(),
+            omitted_records: facts.omissions.len().saturating_sub(50),
+        });
+    }
+    pub(crate) fn record_imported_selection(&mut self, lock: &tapid_lockfile::ImportedNpmLockfile) {
+        self.selection = lock.placement_selection().map(|facts| SelectionReport {
+            target: facts.target.clone(),
+            profile: facts.profile,
+            omissions: facts
+                .omissions
+                .iter()
+                .take(50)
+                .cloned()
+                .map(SelectionOmission::Imported)
+                .collect(),
+            omitted_records: facts.omissions.len().saturating_sub(50),
+        });
+    }
     pub(crate) fn lifecycle_warning(&mut self, warning: Warning) {
         if self.warnings.len() < 1024 {
             self.warnings.push(warning);
@@ -430,6 +481,7 @@ impl OperationOutcome {
             changed_files: Vec::new(),
             warnings: Vec::new(),
             lifecycle: None,
+            selection: None,
             omitted_warnings: 0,
             omitted_warning_codes: Default::default(),
         }

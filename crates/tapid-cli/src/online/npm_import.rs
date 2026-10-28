@@ -27,20 +27,28 @@ pub(crate) fn fetch_imported(
     let manifest = fs::read_to_string(project.join("package.json"))
         .map_err(|e| OperationalError::from_source(ErrorKind::Manifest, e))?;
     let current_digest = root_digest(project)?;
-    imported
-        .validate_replay(&manifest, &current_digest)
-        .map_err(|source| {
-            let mut error = OperationalError::from_source(ErrorKind::LockManifestMismatch, source);
-            if imported.root_manifest_digest() != current_digest {
-                error = error.with_diagnostic(DiagnosticContext::comparison(
-                    "root_manifest_digest",
-                    Some("sha256"),
-                    imported.root_manifest_digest(),
-                    &current_digest,
-                ));
-            }
-            error.at_manifest(&project.join("package.json"))
-        })?;
+    let validation = if imported.placement_selection().is_some() {
+        imported.validate_replay_with_selection(
+            &manifest,
+            &current_digest,
+            &selection_target(),
+            tapid_lockfile::SelectionProfile::Development,
+        )
+    } else {
+        imported.validate_replay(&manifest, &current_digest)
+    };
+    validation.map_err(|source| {
+        let mut error = OperationalError::from_source(ErrorKind::LockManifestMismatch, source);
+        if imported.root_manifest_digest() != current_digest {
+            error = error.with_diagnostic(DiagnosticContext::comparison(
+                "root_manifest_digest",
+                Some("sha256"),
+                imported.root_manifest_digest(),
+                &current_digest,
+            ));
+        }
+        error.at_manifest(&project.join("package.json"))
+    })?;
     let workspace = workspace_materialization(project, registry_config)?;
     imported
         .validate_workspace_manifests(&imported_workspace_manifests(project, &workspace)?)
@@ -51,6 +59,14 @@ pub(crate) fn fetch_imported(
     let selected = graph
         .selected_paths(std::env::consts::OS, std::env::consts::ARCH, current_libc())
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
+    if imported.placement_selection().is_none() {
+        imported
+            .record_platform_selection(
+                selection_target(),
+                tapid_lockfile::SelectionProfile::Development,
+            )
+            .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
+    }
     for path in &selected {
         let package = &graph.packages[path];
         let identity = DiagnosticPackage {

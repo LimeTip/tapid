@@ -16,7 +16,10 @@ fn why_result(
     project: &std::path::Path,
 ) -> (Value, u8) {
     let outcome = OperationOutcome::unchanged(project);
-    let not_found = report.paths.is_empty() && !report.truncated;
+    let not_found = report.paths.is_empty()
+        && report.omissions.is_empty()
+        && report.imported_omissions.is_empty()
+        && !report.truncated;
     let mut result = envelope(
         "why",
         if report.truncated {
@@ -29,10 +32,33 @@ fn why_result(
     result["data"] = json!({
         "package": &report.package,
         "paths": &report.paths,
+        "omissions": if report.imported_omissions.is_empty() { json!(&report.omissions) } else { json!(&report.imported_omissions) },
+        "selection": &report.selection,
         "truncated": report.truncated,
         "not_found": not_found,
         "graph_warnings": &report.warnings,
     });
+    let mut truncated = Vec::new();
+    super::status_text(
+        &mut result["data"]["omissions"],
+        "/data/omissions",
+        &mut truncated,
+    );
+    super::status_text(
+        &mut result["data"]["selection"],
+        "/data/selection",
+        &mut truncated,
+    );
+    if !truncated.is_empty() {
+        result["outcome"] = json!("partial");
+        result["data"]["truncated"] = json!(true);
+        let fields = result["truncated_fields"]
+            .as_array_mut()
+            .expect("envelope truncation list");
+        fields.extend(truncated.into_iter().map(Value::String));
+        fields.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        fields.dedup();
+    }
     (result, u8::from(not_found))
 }
 
@@ -62,6 +88,9 @@ mod tests {
             warnings: Vec::new(),
             package: "missing".into(),
             paths: Vec::new(),
+            omissions: Vec::new(),
+            imported_omissions: Vec::new(),
+            selection: None,
             truncated: true,
         };
         let (result, status) = why_result(&report, Path::new("project"));

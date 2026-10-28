@@ -39,7 +39,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 .and_then(|input| {
                     if serde_json::from_str::<serde_json::Value>(&input)
                         .ok()
-                        .is_some_and(|v| v["lockfileVersion"] == 8)
+                        .is_some_and(|v| v["lockfileVersion"] == 8 || v["lockfileVersion"] == 12)
                     {
                         tapid_lockfile::ImportedNpmLockfile::from_json(&input)
                             .map(|_| ())

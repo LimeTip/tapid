@@ -33,8 +33,9 @@ use routing::transport_for_route;
 use routing::{artifact_transport_for_package, registry_for_requirement};
 
 mod platform;
-pub(crate) use platform::current_libc;
+mod selection;
 use platform::current_platform_matches;
+pub(crate) use platform::{current_libc, selection_target};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -172,6 +173,14 @@ struct FixturePackage {
     peer_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "optionalPeerDependencies")]
     optional_peer_dependencies: BTreeSet<String>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: BTreeMap<String, String>,
+    #[serde(default)]
+    os: Vec<String>,
+    #[serde(default)]
+    cpu: Vec<String>,
+    #[serde(default)]
+    libc: Vec<String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -245,6 +254,7 @@ pub(crate) fn workspace_requirement(
 #[derive(Clone)]
 pub(crate) struct WorkspaceRegistryDependency {
     pub member_key: String,
+    pub section: tapid_resolver::EntryPointSection,
     pub manifest_name: String,
     pub registry: PackageSource,
     pub package: PackageName,
@@ -272,6 +282,7 @@ pub(crate) struct WorkspacePeerDependency {
 }
 
 pub(crate) struct WorkspaceMaterialization {
+    pub manifests: BTreeMap<String, PackageManifest>,
     pub links: WorkspaceLinkPlan,
     pub locked: Vec<LockedWorkspacePackage>,
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
@@ -319,6 +330,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     let mut packages = Vec::new();
     let mut locked = Vec::new();
     let mut members = BTreeMap::new();
+    let mut manifests = BTreeMap::new();
     let mut locked_by_name = BTreeMap::new();
     let mut registry_dependencies = Vec::new();
     let mut peer_dependencies = Vec::new();
@@ -386,6 +398,10 @@ pub(crate) fn workspace_materialization_from_discovered(
         locked.push(
             LockedWorkspacePackage::new(source.clone(), &digest(&manifest_bytes).to_string())
                 .map_err(|error| error.to_string())?,
+        );
+        manifests.insert(
+            LockfilePackageKey::workspace(source.clone()).to_string(),
+            manifest.clone(),
         );
         packages.push(WorkspacePackage {
             root: relative.to_path_buf(),
@@ -460,10 +476,19 @@ pub(crate) fn workspace_materialization_from_discovered(
                 provider,
             });
         }
-        for dependency_map in [
-            manifest.dependencies(),
-            manifest.dev_dependencies(),
-            manifest.optional_dependencies(),
+        for (section, dependency_map) in [
+            (
+                tapid_resolver::EntryPointSection::Dependencies,
+                manifest.dependencies(),
+            ),
+            (
+                tapid_resolver::EntryPointSection::DevDependencies,
+                manifest.dev_dependencies(),
+            ),
+            (
+                tapid_resolver::EntryPointSection::OptionalDependencies,
+                manifest.optional_dependencies(),
+            ),
         ] {
             for (name, range) in dependency_map {
                 let Some((source, version)) = members.get(name) else {
@@ -502,6 +527,7 @@ pub(crate) fn workspace_materialization_from_discovered(
                     let package = requirement.package_name(&local_package).clone();
                     let registry = registry_for_requirement(registry_config, name, &requirement)?;
                     registry_dependencies.push(WorkspaceRegistryDependency {
+                        section,
                         member_key: locked[package_index].key(),
                         manifest_name: local_package.to_string(),
                         registry,
@@ -529,6 +555,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     }
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
+        manifests,
         links,
         locked,
         members,
@@ -742,6 +769,7 @@ pub(crate) fn resolved_workspace_registry_dependencies(
 }
 
 struct WorkspaceRootResolution {
+    entry_points: Vec<(Dependency, tapid_resolver::EntryPoint)>,
     roots: Vec<Dependency>,
     direct_root_identities: BTreeSet<(PackageSource, PackageName)>,
     workspace_root_keys: Vec<String>,
@@ -773,6 +801,7 @@ fn workspace_root_resolution(
 ) -> Result<WorkspaceRootResolution, String> {
     let overrides = manifest_overrides(manifest)?;
     let mut roots = Vec::new();
+    let mut entry_points = Vec::new();
     let mut direct_root_identities = BTreeSet::new();
     let mut registry_dependencies = Vec::with_capacity(workspace.registry_dependencies.len());
     let mut local_root_identities = BTreeMap::new();
@@ -860,7 +889,21 @@ fn workspace_root_resolution(
                 ));
             }
             direct_root_identities.insert((registry.clone(), package.clone()));
-            roots.push(Dependency::new(registry, local_package, requirement));
+            let dependency = Dependency::new(registry, local_package, requirement);
+            entry_points.push((
+                dependency.clone(),
+                tapid_resolver::EntryPoint {
+                    workspace: None,
+                    section: match kind {
+                        "optionalDependencies" => {
+                            tapid_resolver::EntryPointSection::OptionalDependencies
+                        }
+                        "devDependencies" => tapid_resolver::EntryPointSection::DevDependencies,
+                        _ => tapid_resolver::EntryPointSection::Dependencies,
+                    },
+                },
+            ));
+            roots.push(dependency);
         }
     }
     for dependency in &workspace.registry_dependencies {
@@ -870,10 +913,15 @@ fn workspace_root_resolution(
             local_name,
             format!("registry:{}|{}", dependency.registry, dependency.package),
         )?;
-        let requirement = overrides
+        let mut requirement = overrides
             .get(&dependency.package)
             .cloned()
             .unwrap_or_else(|| dependency.requirement.clone());
+        if dependency.requirement.is_alias() && !requirement.is_alias() {
+            requirement = format!("npm:{}@{}", dependency.package, requirement.raw)
+                .parse::<Requirement>()
+                .map_err(|error| error.to_string())?;
+        }
         roots.push(Dependency::new(
             dependency.registry.clone(),
             dependency
@@ -882,6 +930,13 @@ fn workspace_root_resolution(
                 .map_err(|error: tapid_core::DomainError| error.to_string())?,
             requirement.clone(),
         ));
+        entry_points.push((
+            roots.last().expect("workspace root").clone(),
+            tapid_resolver::EntryPoint {
+                workspace: Some(dependency.member_key.clone()),
+                section: dependency.section,
+            },
+        ));
         let mut resolved_dependency = dependency.clone();
         resolved_dependency.requirement = requirement;
         registry_dependencies.push(resolved_dependency);
@@ -889,6 +944,7 @@ fn workspace_root_resolution(
     workspace_root_keys.sort();
     workspace_root_keys.dedup();
     Ok(WorkspaceRootResolution {
+        entry_points,
         roots,
         direct_root_identities,
         workspace_root_keys,
@@ -911,6 +967,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
+        workspace_manifests,
+        omissions,
         candidate_exclusions,
         metadata_lookups: _,
         resolution,
@@ -1214,6 +1272,15 @@ pub(crate) fn resolve_and_fetch_with_lock(
             .collect(),
     )
     .map_err(OperationalError::from)?;
+    selection::record_registry_selection(
+        &mut lock,
+        manifest,
+        &workspace_manifests,
+        &resolution,
+        &records,
+        registry_config,
+        omissions,
+    )?;
     let instance_keys = instances
         .iter()
         .map(|instance| {

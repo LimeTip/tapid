@@ -31,11 +31,18 @@ Once the applicable packages are verified in the selected store, replay needs no
 tapid install --offline --frozen
 ```
 
-`tapid ci` requires an ordinary verified-tree lock and rejects imported schema 8 locks before mutation. Use `tapid install --frozen` for imported locks, whose verification receipts can change during installation.
+`tapid ci` requires an ordinary verified-tree lock and rejects imported schema 8 and 12 locks before mutation. Use `tapid install --frozen` for imported locks, whose verification receipts can change during installation.
 
 A plain `tapid install` also preserves an imported graph. Explicit dependency mutations such as `add`, `remove`, and `update` use Tapid's ordinary resolver and write an ordinary Tapid lock. Those operations can change selections and retain the ordinary resolver's narrower peer semantics. `outdated` currently requires an ordinary verified-tree lock rather than an imported lock.
 
 ## Supported subset
+
+First verification also records absent optional providers as placement-keyed
+`importedPlacementAbsent` omissions in schema 12. Root, workspace, and selected
+nested package declarations retain their exact local alias and requirement.
+This states what the pinned npm graph contains; it does not infer why npm omitted
+the provider. Replay preserves these facts without consulting metadata. Required
+missing providers still fail graph validation.
 
 The importer accepts v3 `packages` entries for registry tarballs with canonical, credential-free HTTPS URLs, a conventional package/version tarball path, and one canonical padded SHA-512 integrity value. It supports nested duplicate versions, npm aliases with explicit actual package names, already selected ancestor peer providers, and distinct peer contexts when the resulting Tapid instance graph can represent them. It retains ordinary npm descriptive metadata, including license, engines, funding, deprecation, bin metadata, and install-script flags. Retaining engines metadata does not add runtime engine enforcement.
 
@@ -51,7 +58,7 @@ The importer does not reproduce npm's physical hoisting layout. Tapid's managed 
 
 ## Optional packages and platforms
 
-The imported lock keeps all selected platform variants and their npm `os`, `cpu`, and `libc` constraints. Each install selects the applicable graph for the current platform without choosing another version. Incompatible optional branches are skipped. A required incompatible package fails, including a required child of an otherwise applicable optional package. Tapid aborts instead of installing that optional parent with a missing required dependency. A platform switch can require another frozen install to fetch the previously unverified variants. Offline replay fails if those verified trees are unavailable.
+The imported lock keeps all selected platform variants and their npm `os`, `cpu`, and `libc` constraints. First verification selects the applicable graph for the current platform without choosing another version and records accepted platform cuts in schema 12. Matching replay preserves those decisions and requires the same target and development profile. Incompatible optional branches are skipped. A required incompatible package fails, including a required child of an otherwise applicable optional package. Tapid aborts instead of installing that optional parent with a missing required dependency. A platform switch after recording cuts requires an explicit fresh import before verification for the new target. Offline replay fails if those verified trees are unavailable.
 
 Tapid differs from `npm ci` when an applicable optional package fails download, integrity, extraction, or identity verification. Tapid aborts the whole install instead of silently accepting that failure. It also disables dependency scripts, which can make native or generated-code packages unusable even when their selected versions agree with npm. The fixture uses a deliberately unsupported OS to check deterministic optional omission on every test platform.
 

@@ -52,6 +52,12 @@ Schema 9 adds ordered `derivedHooks` records with exact recipe keys, verified ou
 
 `ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements, root and member-level links to declared workspace members, separate member registry entry points with local or hoisted placements, member manifest digests, and constraints. It records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, or schema 9 with approved lifecycle outputs. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. `graph()` returns a shared `Arc<ImportedNpmGraph>` cached after validation; the cache is never serialized, and deserialized data is validated before caching. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).
 
+`ImportedNpmLockfile::workspace_bindings(parent)` exposes declared local-link
+placements using the same npm lookup as import validation. The empty parent
+denotes the root; other parents must be workspace placements. Physical links
+without a matching declaration are excluded. Registry entry points remain
+separate, preserving their existing selection contract.
+
 Schema 10 adds immutable copied package sources. File source identities pin a
 root-relative archive path and SHA-256; Git identities pin a canonical HTTPS
 repository, full commit, and archive SHA-256. `LockfilePackageSource::Copied`
@@ -59,3 +65,76 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+Schema 11 is an ordinary-lock persistence building block for recorded selection
+facts. `LockedSelection` records the effective OS/CPU/libc, development or
+production profile, and canonically ordered optional-declaration cuts. Origins
+identify the root, an exact workspace key, or an exact package key; local names,
+requirements, exact registry origins, and known removed target keys retain aliases
+and instance context.
+The required `declarations` array retains selected dependency declarations by
+origin, original dependency section, local name, requirement and exact target
+key. Required and optional declarations sharing a binding remain separate records.
+Root bindings cover registry roots; all workspace members are membership roots.
+Explicit root declarations targeting local members need no registry binding.
+Declaration records cover every explicit root declaration,
+workspace and package dependency edge. The supported `workspace:*`, `workspace:^`
+and `workspace:~` declarations require exact local workspace targets; they cannot
+authorize registry fallback. Records are sorted and unique by
+origin/section/name; duplicate, missing, dangling and mismatched facts fail
+validation. Package development declarations are rejected because they are not
+installed transitive dependencies. Peer-provider contexts retain their existing
+separate key contract; this array does not replace peer validation.
+The initial reason allowlist contains confirmed metadata absence, no usable
+candidate, and incompatible platform. Archive, integrity, authentication and
+containment failures cannot be represented as accepted reasons.
+
+`set_selection` validates before changing the lock. Readers and writers reject
+legacy-schema ledgers, missing schema 11 facts, duplicate declarations, dangling
+origins, selected-edge conflicts, and mismatched known target identities. Existing
+schemas remain readable without invented reasons. Imported schema 8 remains a
+separate placement contract and rejects these ordinary-lock fields. Schema 11
+replay through `validate_replay` still fails explicitly. The opt-in
+`validate_replay_with_selection` checks exact target/profile facts, validates the
+ledger, and retains manifest-digest and integrity-provenance checks;
+the CLI emits this schema for ordinary registry graphs, including workspace
+members and local links, when optional metadata/candidate omissions are recorded.
+Overridden workspace registry declarations retain an optional `originalRequirement`
+alongside the effective `requirement`. For workspace origins it must differ from
+the effective requirement and preserve package identity.
+Local workspace targets cannot carry it. CLI replay compares both the original
+member declaration and the current effective root override. Copied root declarations
+also retain `originalRequirement`: the original file or Git specification, alongside
+the resolved npm package requirement and exact immutable source-qualified target.
+The lockfile validates the bounded specification and effective package identity;
+CLI replay parses the original specification and checks the target with the existing
+copied-source binding and file-digest validators. Copied sources remain selected;
+this does not authorize omitting failed copied artifacts. This persistence API alone
+does not establish complete optional-dependency failure support.
+
+Imported schema 12 provides a separate `ImportedSelection` persistence building
+block. `placementSelection` records target/profile and ordered cuts identified by
+exact declaring npm placement (the empty string denotes the root). Each local
+name and requirement must match that placement's retained optional declaration;
+root, workspace, and nested placements remain distinct. Compatible selected or hoisted
+providers, workspace links, unknown origins, duplicate cuts, and unsafe facts are
+rejected. Existing placements may carry incompatible-platform cuts only when
+target-aware traversal excludes them and their constraints reject the target. `set_placement_selection` validates atomically. Shared target validation
+and the existing narrow reason enum are reused from ordinary selection facts.
+The ledger represents absent placements and verified optional platform cuts;
+it does not remove npm placements or record artifact/hook failures. Schema 8
+rejects the new ledger, schema 12 requires it, and `validate_replay` explicitly
+rejects schema 12. `validate_replay_with_selection` checks exact target/profile facts and the
+ledger before existing imported manifest validation. Neither opt-in API performs
+CLI manifest declaration matching, artifact hydration, or omission reporting.
+Normal CLI imports still emit schema 8. The CLI now opts into both recorded replay
+APIs for the current build-host target and development profile. It retains
+ordinary root/member declaration checks, imported manifest/placement checks,
+selected artifact verification and bounded omission reporting. These replay paths
+do not add new accepted failure reasons. First verification records platform cuts
+with `record_platform_selection`; required reachability is validated before the
+ledger changes. The same operation records absent optional providers as
+`importedPlacementAbsent` at root, selected package, and workspace origins.
+Only this reason is accepted for absent imported providers: the pinned npm lock
+does not establish metadata absence or candidate failure. Ordinary schema 11
+rejects this import-only reason.

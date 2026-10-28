@@ -35,3 +35,23 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+Selected graphs retain `ResolvedDeclaration` facts: the exact declaring package
+(or root entry), local name, parsed requirement, exact target and dependency or
+peer kind. Existing resolver inputs declare required dependencies; the online
+adapter restores optional dependency kinds after candidate normalization. The
+online adapter also captures root and workspace sections before merging root
+constraints, retaining exact workspace keys and separate required and
+optional declarations when they share a selected binding. Copied entry points
+retain their prepared exact source identity. These facts are not yet persisted
+as an omission/replay contract.
+
+`Resolution::prune_unavailable` is a pure graph operation for already classified
+failures. It checks declaration coverage against the selected graph, propagates
+required-child failures backwards, cuts optional declarations, removes only
+unreachable instances, and validates retained peer providers. Missing optional
+peers remain allowed. It returns sorted causal cuts and removed identities without
+reselecting versions. Inconsistent provenance, required entry-point failure and
+missing required peer providers fail closed. This operation does not classify
+transport errors, authorize omission during installation, or persist omissions;
+those install/replay contracts remain the consumer's responsibility.

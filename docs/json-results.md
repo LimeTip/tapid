@@ -4,6 +4,22 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 
 ## Coverage
 
+Install outcomes add top-level `selection`, null for older lock schemas. For
+recorded selections it contains `target`, `profile`, `omissions`,
+`omitted_records` and `details_complete`. At most 50 persisted omission records
+are returned in lock order. Ordinary records retain exact origin/registry/target
+identity; workspace override records also include `originalRequirement` when it
+differs from the effective `requirement`. Imported records retain `declaringPlacement`. Reasons use the lockfile
+allowlist. `details_complete` is false when records or scalar text are shortened;
+`truncated_fields` identifies shortened scalars. Omission details do not convert
+failed artifact verification or failed replay into success. These fields report
+existing ledger facts; ordinary registry selection generates them for accepted
+metadata/candidate omissions, including graphs with copied file and Git roots.
+Imported first verification also generates placement-keyed incompatible-platform
+omissions and absent optional placements (`importedPlacementAbsent`). The latter
+records absence in the pinned npm graph without claiming a metadata, candidate,
+download, or hook failure. Initial import remains schema 8.
+
 | Command | Global `--json` |
 | --- | --- |
 | `install`, alias `i` | Install or replay result; resolved dependency preview with `--dry-run` |
@@ -53,7 +69,21 @@ Successful `update` results include `data.graph_changes`, an array of changed pa
 
 `explain` successful `data` contains `package`, `version`, `registry`, `source`, `metadata_fetched_at`, `metadata_read_at`, `source_timestamp`, `source_timestamp_status`, `published_at`, `freshness`, `artifact`, `registry_integrity`, `byte_integrity`, `registry_signatures`, `provenance`, `publisher_identity`, `vulnerabilities`, `malware_analysis`, `human_review`, and `limitations`; shortened display values are listed in the envelope's `truncated_fields`. The nested fields are `registry_integrity.status/value`, `byte_integrity.status/actual/scope/checked_at`, `registry_signatures.status/count`, `provenance.status/reference/fetched`, `publisher_identity.status`, `vulnerabilities.status/reason`, `malware_analysis.status`, and `human_review.status`. Reported claims are not treated as verified evidence, and freshness is `unknown`. The serializer does not emit `data.not_found`: an operational error, including unavailable or invalid requested metadata, uses the standard `failure` envelope with `data: null`, a typed `errors` entry, and exit status 1. With `--artifact-file`, a byte mismatch is a failure result with populated evidence data and `INTEGRITY_MISMATCH`; a match remains `success`. `--registry-metadata` records a local snapshot source rather than contacting the registry.
 
-`why` data contains `package`, deterministic `paths`, `truncated`, `not_found`, and `graph_warnings`. Each path contains `steps` with package identity, incoming dependency name and kind, and source kind (`registry`, `workspace`, or `copied`). A confirmed missing match is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. If traversal reaches a safety bound before finding a path, the envelope outcome is `partial`, `data.truncated` is true, `data.not_found` is false, and the command exits 0. Operational errors use the standard `failure` envelope and typed `errors` entry.
+`why` data contains `package`, deterministic `paths`, `omissions`, `selection`, `truncated`, `not_found`, and `graph_warnings`. Each path contains `steps` with package identity, incoming dependency name and kind, and source kind (`registry`, `workspace`, or `copied`). For ordinary locks, `selection` describes the recorded `target` and `profile` when present and is null for legacy locks. `omissions` contains matching accepted optional declaration cuts with `origin`, local `name`, effective `requirement`, optional workspace `originalRequirement`, `registry`, optional exact `target`, and stable `reason` (`metadataAbsent`, `noUsableCandidate`, or `incompatiblePlatform`). Recorded transitive declaration sections also label selected edges as `dependencies`, `devDependencies`, or `optionalDependencies`; a required declaration takes precedence when sections share the exact same edge. Legacy edges without declaration facts retain the generic `dependency` label and graph warning. Queries match either the local alias or the actual package name. Workspace queries limit omissions to the selected member and its reachable graph. At most 50 matching omission records are returned, with additional matches setting `truncated`. An omission is a successful explanation even when no selected path exists; it does not establish a failed descendant's independent failure or authorize replay on the current host. Inspection uses the recorded target without network access.
+
+For imported npm locks, `why` path step `key` values are npm placement paths rather
+than ordinary package keys. Distinct placements remain distinct even when package
+names and versions match. Schema-12 `data.selection` describes the recorded target
+and profile; `data.omissions` uses imported records (`declaringPlacement`, `name`,
+`requirement`, `reason`). The empty declaring placement denotes the project root.
+Imported reasons are `incompatiblePlatform` and `importedPlacementAbsent`.
+Schema 8 uses the current host for platform filtering and has no recorded omissions.
+Selected aliases and omitted aliases match either their local or actual package name.
+Workspace edges retain their declaration sections, including `peerDependencies`
+and `optionalPeerDependencies` for peer-only declarations.
+The same path/visit/omission bounds and read-only guarantees apply.
+
+A confirmed match missing from both selected paths and accepted omissions is an unchanged successful operation envelope with `data.not_found: true`, but the command exits 1 to preserve its CLI no-match contract. If traversal or omission reporting reaches a safety bound, the envelope outcome is `partial`, `data.truncated` is true, `data.not_found` is false, and the command exits 0. Operational errors use the standard `failure` envelope and typed `errors` entry.
 
 ## Package cache results
 
@@ -115,6 +145,8 @@ Each package entry contains `key`, `source`, `name`, `version`, `integrity`, `de
 Each reason contains `graph` of `before` or `after`, `relation` of `direct` for a graph root or `dependency` for a parent edge, `parent` as the parent package key or null for roots, `dependency` as the incoming name, and `requirement` as an available requirement or null. These are selection edges in the indicated graph, not API compatibility claims. Existing lockfile transitive edges do not preserve their original dependency kind or declared range; unavailable ranges remain null rather than presenting reconstructed exact pins as declared requirements.
 
 `effects` contains `network_allowed`, `metadata_source`, `metadata_lookups`, `artifact_requests`, `cache_reads`, `cache_writes`, `project_writes`, `recovery`, and `scripts`. `network_allowed` describes permission to fetch registry metadata, not proof that a request occurred. `metadata_source` is `registry`, `fixture`, or `lockfile`; `metadata_lookups` counts package metadata retrievals, not individual HTTP requests. Successful metadata is reused by source and actual package name within one graph operation; reuse by another consumer does not increment the count. A matching online lock can produce zero lookups even when network access is allowed. Fixtures and offline/frozen inspection forbid registry access. `artifact_requests` is always 0, and the remaining effect flags are always false. Cache fields refer to the package store, not reading the project's lockfile.
+
+Previews that reuse a native recorded graph retain its bounded omission report in the envelope's `selection`, including `details_complete` and `omitted_records`. Replay requires the current host target and development profile. Freshly resolved previews report the new graph's accepted metadata/platform omissions through the same bounded `selection` fields. These describe graph decisions only; they do not verify artifacts or persist a replay ledger.
 
 Previews do not create an activation lock, recover transactions, access the package store, fetch artifacts, or run scripts. Pending recovery fails without attempting recovery. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without establishing that its artifacts are cached. Previews requiring copied file/Git resolution or imported npm locks fail explicitly. Artifact availability, archive validity, lifecycle outputs, and later installation success remain unverified. A later command reads current inputs and may resolve different metadata.
 
@@ -298,7 +330,7 @@ inspection failures. `data.assessment` is `no_local_blockers` or `blocked`;
 These describe local preflight only. They do not establish that installation,
 lock replay, or script execution will succeed.
 
-Status data contains `manifest_lock_agreement`, `workspace`, `installation`,
+Status data contains `selection`, `manifest_lock_agreement`, `workspace`, `installation`,
 `recovery`, `recovery_guidance`, `registries`, `blockers`, `truncated`, `snapshot`,
 `verification_depth`, `checks_not_performed`, and `capabilities`. Manifest/lock
 agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`,
@@ -307,7 +339,12 @@ agreement is `match`, `mismatch`, or `unknown`. Installation states are `absent`
 when registry configuration or workspace discovery fails. Root binding checks
 require valid registry configuration; workspace checks also require discovery.
 A confirmed mismatch remains conclusive when other checks cannot run.
-Imported npm schema-8 locks use their own parser and root/workspace receipt
+`data.selection` is null without recorded facts; otherwise it contains the recorded
+target/profile, at most 50 omissions, `omitted_records`, and `details_complete`.
+Inspection checks schema 11/12 against the recorded target/profile, without
+authorizing current-host replay. Human output uses the same omission records.
+Shortened selection strings also set `details_complete` to false.
+Imported npm schema-8/12 locks use their own parser and root/workspace receipt
 validators. Their registry routing, platform selection, and ancestor installation
 layout checks are listed as unperformed.
 The shared store is not inspected. Blockers contain stable `code`

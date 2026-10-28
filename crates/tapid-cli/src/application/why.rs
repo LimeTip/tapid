@@ -1,3 +1,5 @@
+mod imported;
+
 use crate::{
     application::{
         lifecycle::resolve_workspace,
@@ -29,7 +31,16 @@ pub(crate) struct WhyReport {
     pub(crate) warnings: Vec<String>,
     pub(crate) package: String,
     pub(crate) paths: Vec<WhyPath>,
+    pub(crate) omissions: Vec<tapid_lockfile::AcceptedOmission>,
+    pub(crate) imported_omissions: Vec<tapid_lockfile::ImportedOmission>,
+    pub(crate) selection: Option<WhySelection>,
     pub(crate) truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WhySelection {
+    pub(crate) target: tapid_lockfile::SelectionTarget,
+    pub(crate) profile: tapid_lockfile::SelectionProfile,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +75,7 @@ struct Root {
 #[derive(Default)]
 struct SearchState {
     paths: Vec<WhyPath>,
+    visited_nodes: BTreeSet<String>,
     truncated: bool,
     visits: usize,
 }
@@ -97,8 +109,19 @@ pub(crate) fn explain(
         };
         OperationalError::from_source(kind, error).context("cannot read tapid.lock")
     })?;
+    let wire: serde_json::Value = serde_json::from_str(&lock_bytes)
+        .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+    if matches!(wire["lockfileVersion"].as_u64(), Some(8 | 12)) {
+        return imported::explain(&selection, &root_manifest_bytes, &lock_bytes, &requested);
+    }
     let lock = Lockfile::from_json(&lock_bytes).map_err(OperationalError::from)?;
-    lock.validate_replay(&root_digest)
+    // Inspection describes the recorded target, even on another host. It does
+    // not authorize installing that selection on the current host.
+    lock.selection()
+        .map_or_else(
+            || lock.validate_replay(&root_digest),
+            |facts| lock.validate_replay_with_selection(&root_digest, &facts.target, facts.profile),
+        )
         .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
 
     let roots = if selection.manifest_path == root_manifest_path {
@@ -115,7 +138,7 @@ pub(crate) fn explain(
     let graph = graph(&lock)?;
     let mut state = SearchState::default();
     for root in roots {
-        let Some(source_kind) = graph.nodes.get(&root.key).map(source_kind) else {
+        let Some(source_kind) = graph.nodes.get(&root.key).map(|node| node.source_kind) else {
             continue;
         };
         let first = WhyStep {
@@ -150,9 +173,49 @@ pub(crate) fn explain(
     } else {
         Vec::new()
     };
+    let mut omissions = Vec::new();
+    if let Some(facts) = lock.selection() {
+        for omission in &facts.omissions {
+            // Workspace queries describe that member and its reachable graph.
+            let in_scope = match &omission.origin {
+                tapid_lockfile::OmissionOrigin::Root => {
+                    selection.manifest_path == root_manifest_path
+                }
+                tapid_lockfile::OmissionOrigin::Workspace { key } => {
+                    selection.manifest_path == root_manifest_path
+                        || state.visited_nodes.contains(key)
+                        || key.parse::<LockfilePackageKey>().is_ok_and(|key| {
+                            key.source.workspace().is_some_and(|source| {
+                                selection.root_dir.join(source.path()).join("package.json")
+                                    == selection.manifest_path
+                            })
+                        })
+                }
+                tapid_lockfile::OmissionOrigin::Package { key } => {
+                    selection.manifest_path == root_manifest_path
+                        || state.visited_nodes.contains(key)
+                }
+            };
+            let local: tapid_core::PackageName = omission
+                .name
+                .parse()
+                .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+            let requirement = omission
+                .requirement
+                .parse::<tapid_resolver::Requirement>()
+                .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
+            if in_scope && (local == requested || requirement.package_name(&local) == &requested) {
+                if omissions.len() == MAX_PATHS {
+                    state.truncated = true;
+                    break;
+                }
+                omissions.push(omission.clone());
+            }
+        }
+    }
     let outcome = if state.truncated {
         "partial"
-    } else if state.paths.is_empty() {
+    } else if state.paths.is_empty() && omissions.is_empty() {
         "not_found"
     } else {
         "success"
@@ -166,6 +229,12 @@ pub(crate) fn explain(
         warnings,
         package: requested.to_string(),
         paths: state.paths,
+        omissions,
+        imported_omissions: Vec::new(),
+        selection: lock.selection().map(|facts| WhySelection {
+            target: facts.target.clone(),
+            profile: facts.profile,
+        }),
         truncated: state.truncated,
     })
 }
@@ -327,12 +396,53 @@ pub(super) fn requiring_edges(
     Ok(reasons)
 }
 
+struct WhyNode {
+    name: tapid_core::PackageName,
+    source_kind: &'static str,
+}
+
+impl From<LockfilePackageKey> for WhyNode {
+    fn from(key: LockfilePackageKey) -> Self {
+        Self {
+            source_kind: source_kind(&key),
+            name: key.name,
+        }
+    }
+}
+
 struct WhyGraph {
     edges: BTreeMap<String, Vec<Edge>>,
-    nodes: BTreeMap<String, LockfilePackageKey>,
+    nodes: BTreeMap<String, WhyNode>,
 }
 
 fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
+    let mut declaration_kinds = BTreeMap::new();
+    if let Some(selection) = lock.selection() {
+        for declaration in &selection.declarations {
+            let parent = match &declaration.origin {
+                tapid_lockfile::OmissionOrigin::Root => continue,
+                tapid_lockfile::OmissionOrigin::Package { key }
+                | tapid_lockfile::OmissionOrigin::Workspace { key } => key.as_str(),
+            };
+            let kind = match declaration.section {
+                tapid_lockfile::DeclarationSection::Dependencies => "dependencies",
+                tapid_lockfile::DeclarationSection::DevDependencies => "devDependencies",
+                tapid_lockfile::DeclarationSection::OptionalDependencies => "optionalDependencies",
+            };
+            let entry = declaration_kinds
+                .entry((
+                    parent,
+                    declaration.name.as_str(),
+                    declaration.target.as_str(),
+                ))
+                .or_insert(kind);
+            // Multiple manifest sections can describe one selected edge.
+            // A required declaration takes precedence over an optional one.
+            if kind != "optionalDependencies" {
+                *entry = kind;
+            }
+        }
+    }
     let mut graph: BTreeMap<String, Vec<Edge>> = BTreeMap::new();
     let mut nodes = BTreeMap::new();
     for (key, package) in lock.packages_typed().map_err(OperationalError::from)? {
@@ -345,7 +455,10 @@ fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
                 .map(|(name, target)| Edge {
                     name: name.clone(),
                     target: target.clone(),
-                    kind: "dependency",
+                    kind: declaration_kinds
+                        .get(&(key.to_string().as_str(), name.as_str(), target.as_str()))
+                        .copied()
+                        .unwrap_or("dependency"),
                 })
                 .collect(),
         );
@@ -363,7 +476,10 @@ fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
                 .map(|(name, target)| Edge {
                     name: name.clone(),
                     target: target.clone(),
-                    kind: "dependency",
+                    kind: declaration_kinds
+                        .get(&(key.to_string().as_str(), name.as_str(), target.as_str()))
+                        .copied()
+                        .unwrap_or("dependency"),
                 })
                 .collect(),
         );
@@ -396,7 +512,10 @@ fn graph(lock: &Lockfile) -> Result<WhyGraph, OperationalError> {
     }
     Ok(WhyGraph {
         edges: graph,
-        nodes,
+        nodes: nodes
+            .into_iter()
+            .map(|(path, key)| (path, key.into()))
+            .collect(),
     })
 }
 
@@ -423,10 +542,15 @@ fn search_paths(
         return;
     }
     state.visits += 1;
+    state.visited_nodes.insert(current.to_owned());
     let Some(current_key) = graph.nodes.get(current) else {
         return;
     };
-    if &current_key.name == requested {
+    if &current_key.name == requested
+        || path
+            .last()
+            .is_some_and(|step| step.via.as_deref() == Some(requested.as_str()))
+    {
         if state.paths.len() == MAX_PATHS {
             state.truncated = true;
         } else {
@@ -452,7 +576,7 @@ fn search_paths(
         if !visited.insert(edge.target.clone()) {
             continue;
         }
-        let Some(source_kind) = graph.nodes.get(&edge.target).map(source_kind) else {
+        let Some(source_kind) = graph.nodes.get(&edge.target).map(|node| node.source_kind) else {
             visited.remove(&edge.target);
             continue;
         };
@@ -479,6 +603,173 @@ fn search_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_optional_omission_is_explained_offline_by_alias_or_package() {
+        let project = tapid_test_support::TempProject::new("why-recorded-omission").unwrap();
+        let manifest = br#"{"name":"root","version":"1.0.0","optionalDependencies":{"local":"npm:@vendor/native@^1"}}"#;
+        project.write("package.json", manifest).unwrap();
+        let mut lock = Lockfile::new(&digest_bytes(manifest)).unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: Some("gnu".into()),
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            declarations: vec![],
+            omissions: vec![tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
+                origin: tapid_lockfile::OmissionOrigin::Root,
+                name: "local".into(),
+                requirement: "npm:@vendor/native@^1".into(),
+                registry: "https://registry.npmjs.org".into(),
+                target: None,
+                reason: tapid_lockfile::OmissionReason::MetadataAbsent,
+            }],
+        })
+        .unwrap();
+        let bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", bytes.as_bytes()).unwrap();
+        for name in ["local", "@vendor/native"] {
+            let report = explain(project.path(), None, name).unwrap();
+            let wire = serde_json::to_value(&report).unwrap();
+            assert_eq!(report.outcome, "success");
+            assert!(report.paths.is_empty());
+            assert_eq!(wire["omissions"][0]["name"], "local");
+            assert_eq!(wire["omissions"][0]["reason"], "metadataAbsent");
+            assert_eq!(wire["selection"]["target"]["os"], "linux");
+        }
+        assert_eq!(
+            explain(project.path(), None, "other").unwrap().outcome,
+            "not_found"
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            bytes
+        );
+        project
+            .write("package.json", br#"{"name":"root","version":"2.0.0"}"#)
+            .unwrap();
+        assert!(explain(project.path(), None, "local").is_err());
+    }
+
+    #[test]
+    fn recorded_omission_explanations_are_bounded_without_claiming_absence() {
+        let project = tapid_test_support::TempProject::new("why-omission-bound").unwrap();
+        let mut optional = BTreeMap::new();
+        let mut omissions = Vec::new();
+        for index in 0..=MAX_PATHS {
+            let name = format!("alias-{index:03}");
+            optional.insert(name.clone(), "npm:native@^1");
+            omissions.push(tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
+                origin: tapid_lockfile::OmissionOrigin::Root,
+                name,
+                requirement: "npm:native@^1".into(),
+                registry: "https://registry.npmjs.org".into(),
+                target: None,
+                reason: tapid_lockfile::OmissionReason::NoUsableCandidate,
+            });
+        }
+        let manifest = serde_json::to_vec(&serde_json::json!({"name": "root", "version": "1.0.0", "optionalDependencies": optional})).unwrap();
+        project.write("package.json", &manifest).unwrap();
+        let mut lock = Lockfile::new(&digest_bytes(&manifest)).unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: None,
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            declarations: vec![],
+            omissions,
+        })
+        .unwrap();
+        project
+            .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+            .unwrap();
+        let report = explain(project.path(), None, "native").unwrap();
+        assert_eq!(report.omissions.len(), 50);
+        assert!(report.truncated);
+        assert_eq!(report.outcome, "partial");
+        assert_eq!(report.omissions[0].name, "alias-000");
+        assert_eq!(report.omissions[49].name, "alias-049");
+    }
+
+    #[test]
+    fn workspace_omission_reports_exclude_unrelated_member_declarations() {
+        let project = tapid_test_support::TempProject::new("why-workspace-omissions").unwrap();
+        let root = br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"one":"^1","two":"^1"}}"#;
+        project.write("package.json", root).unwrap();
+        let mut lock = Lockfile::new(&digest_bytes(root)).unwrap();
+        let mut omissions = Vec::new();
+        let mut bindings = BTreeMap::new();
+        let mut declarations = Vec::new();
+        for name in ["one", "two"] {
+            let manifest = serde_json::to_vec(&serde_json::json!({"name": name, "version": "1.0.0", "optionalDependencies": {"native": "^1"}})).unwrap();
+            project
+                .write(format!("packages/{name}/package.json"), &manifest)
+                .unwrap();
+            let source = tapid_lockfile::LocalWorkspaceSource::new(
+                &format!("packages/{name}"),
+                name,
+                "1.0.0",
+            )
+            .unwrap();
+            let package =
+                tapid_lockfile::LockedWorkspacePackage::new(source, &digest_bytes(&manifest))
+                    .unwrap();
+            bindings.insert(name.to_owned(), package.key());
+            declarations.push(tapid_lockfile::RetainedDeclaration {
+                original_requirement: None,
+                origin: tapid_lockfile::OmissionOrigin::Root,
+                section: tapid_lockfile::DeclarationSection::Dependencies,
+                name: name.into(),
+                requirement: "^1".into(),
+                target: package.key(),
+            });
+            omissions.push(tapid_lockfile::AcceptedOmission {
+                original_requirement: None,
+                origin: tapid_lockfile::OmissionOrigin::Workspace { key: package.key() },
+                name: "native".into(),
+                requirement: "^1".into(),
+                registry: "https://registry.npmjs.org".into(),
+                target: None,
+                reason: tapid_lockfile::OmissionReason::IncompatiblePlatform,
+            });
+            lock.insert_workspace_package(package).unwrap();
+        }
+        omissions.sort();
+        lock.set_roots(bindings.values().cloned()).unwrap();
+        lock.set_root_bindings(bindings).unwrap();
+        lock.set_selection(tapid_lockfile::LockedSelection {
+            target: tapid_lockfile::SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: None,
+            },
+            profile: tapid_lockfile::SelectionProfile::Development,
+            declarations,
+            omissions,
+        })
+        .unwrap();
+        project
+            .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+            .unwrap();
+        for member in ["one", "two"] {
+            let report = explain(project.path(), Some(member), "native").unwrap();
+            assert_eq!(report.omissions.len(), 1);
+            let tapid_lockfile::OmissionOrigin::Workspace { key } = &report.omissions[0].origin
+            else {
+                panic!("workspace origin lost")
+            };
+            assert_eq!(
+                key.parse::<LockfilePackageKey>().unwrap().name.to_string(),
+                member
+            );
+        }
+    }
 
     #[test]
     fn peer_edges_retain_all_matching_provider_contexts() {
@@ -586,7 +877,12 @@ mod tests {
         let graph = WhyGraph {
             nodes: graph
                 .keys()
-                .map(|key| (key.clone(), key.parse().unwrap()))
+                .map(|key| {
+                    (
+                        key.clone(),
+                        key.parse::<LockfilePackageKey>().unwrap().into(),
+                    )
+                })
                 .collect(),
             edges: graph,
         };
@@ -641,7 +937,12 @@ mod tests {
         let graph = WhyGraph {
             nodes: graph
                 .keys()
-                .map(|key| (key.clone(), key.parse().unwrap()))
+                .map(|key| {
+                    (
+                        key.clone(),
+                        key.parse::<LockfilePackageKey>().unwrap().into(),
+                    )
+                })
                 .collect(),
             edges: graph,
         };

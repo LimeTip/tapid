@@ -197,6 +197,22 @@ thread_local! {
     pub(super) static RESOLVER_METADATA_PARENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+pub(super) fn apply_overrides(
+    package: &mut PackageRecord,
+    overrides: &BTreeMap<PackageName, Requirement>,
+) {
+    if package.registry.to_string() == NPM {
+        for (name, requirement) in overrides {
+            if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
+                *dependency = overridden_requirement(name, dependency, requirement);
+            }
+            if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
+                *dependency = overridden_requirement(name, dependency, requirement);
+            }
+        }
+    }
+}
+
 fn insert_records<F>(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
@@ -211,16 +227,7 @@ where
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
     for mut package in packages {
-        if package.registry.to_string() == NPM {
-            for (name, requirement) in overrides {
-                if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-                if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-            }
-        }
+        apply_overrides(&mut package, overrides);
         let registry = package.registry.to_string();
         let key = (
             registry.clone(),
@@ -606,7 +613,7 @@ where
             |parent, dependency| registry_for_dependency(parent, dependency),
             &preferred,
         ) {
-            Ok(resolution) => {
+            Ok(mut resolution) => {
                 let mut optional_frontier = BTreeSet::<(PackageSource, PackageName)>::new();
                 for parent in &resolution.selected {
                     let key = (
@@ -649,6 +656,34 @@ where
                     }
                     continue;
                 }
+                // Optional candidates are promoted into the resolver dependency map
+                // only after normalization and routing. Restore that declaration
+                // fact on the exact selected parent, without conflating aliases or
+                // another registry's equal name/version record.
+                for declaration in &mut resolution.declarations {
+                    let Some(parent) = &declaration.parent else {
+                        continue;
+                    };
+                    if declaration.kind != tapid_resolver::DeclarationKind::Required {
+                        continue;
+                    }
+                    let key = (
+                        parent.registry.to_string(),
+                        parent.name.to_string(),
+                        parent.version.to_string(),
+                    );
+                    if normalized
+                        .get(&key)
+                        .and_then(|record| record.as_ref().ok())
+                        .is_some_and(|record| {
+                            record.optional_dependencies.get(&declaration.name)
+                                == Some(&declaration.requirement)
+                        })
+                    {
+                        declaration.kind = tapid_resolver::DeclarationKind::Optional;
+                    }
+                }
+                resolution.declarations.sort();
                 return Ok((resolution, records, candidate_exclusions(&normalized, None)));
             }
             Err(ResolveError::MissingMetadata { packages }) => {
