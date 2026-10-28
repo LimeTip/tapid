@@ -2,7 +2,9 @@
 use crate::application::outcome::{
     ChangeState, OperationFailure, OperationOutcome, RetryAdvice, Warning,
 };
+mod audit;
 mod cache;
+pub(crate) use audit::{audit, audit_value};
 mod dependency;
 mod explain;
 mod outdated;

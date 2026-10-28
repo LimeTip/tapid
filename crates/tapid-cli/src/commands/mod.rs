@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+mod audit;
 mod cache;
 mod ci;
 mod explain;
@@ -55,6 +56,11 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Check the persisted graph for known security reports (provider unavailable).
+    #[command(
+        long_about = "Read and validate the persisted lock graph without installing, resolving, executing packages, recovering transactions or modifying project/store content. Security-provider configuration is not yet available: reports are explicitly not checked and exit 3. No live requests or private identity disclosure occur. This command does not establish a clean audit."
+    )]
+    Audit(audit::Args),
     /// Inspect local project readiness without installing or recovering.
     #[command(
         long_about = "Inspect project/workspace selection, manifest and lock agreement, installation ownership, pending project recovery, registry configuration, and local compatibility blockers. Offline and read-only. Does not verify installed trees, inspect the shared store, assess runner assurance, or exclude concurrent writers. Exit 0 means no local blockers were found; complete compatibility remains unchecked.",
@@ -194,6 +200,7 @@ impl Command {
     fn operation(&self) -> &'static str {
         match self {
             Self::Status(_) => "status",
+            Self::Audit(_) => "audit",
 
             Self::Tool(_) => "tool",
             Self::ToolExec(_) => "__tool-exec",
@@ -229,6 +236,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             command,
             Some(
                 Command::Status(_)
+                    | Command::Audit(_)
                     | Command::Ci(_)
                     | Command::Manifest(_)
                     | Command::Lock(_)
@@ -256,6 +264,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
     }
     match command {
         Some(Command::Status(args)) => status::run(args, json),
+        Some(Command::Audit(args)) => audit::run(args, json),
 
         Some(Command::Tool(args)) => tool::run(args, json),
         Some(Command::ToolExec(args)) => tool::execute(args),

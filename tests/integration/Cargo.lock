@@ -1282,6 +1282,15 @@ version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
+ "tapid-protocol",
+]
+
+[[package]]
+name = "tapid-protocol"
+version = "0.0.6"
+dependencies = [
+ "serde",
+ "tapid-core",
 ]
 
 [[package]]

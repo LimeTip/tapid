@@ -1489,14 +1489,18 @@ dependencies = [
  "serde_json",
  "sha2",
  "tapid-archive",
+ "tapid-attestations",
  "tapid-core",
  "tapid-linker",
  "tapid-lockfile",
  "tapid-manifest",
+ "tapid-policy",
+ "tapid-protocol",
  "tapid-registry-client",
  "tapid-release-client",
  "tapid-resolver",
  "tapid-runner",
+ "tapid-security-provider",
  "tapid-signatures",
  "tapid-store",
  "tapid-test-support",
@@ -1576,6 +1580,7 @@ version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
+ "tapid-protocol",
 ]
 
 [[package]]
@@ -1645,6 +1650,25 @@ dependencies = [
  "tapid-policy",
  "tapid-test-support",
  "toml",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "tapid-security-provider"
+version = "0.0.1"
+dependencies = [
+ "fs4",
+ "libc",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tapid-attestations",
+ "tapid-core",
+ "tapid-protocol",
+ "tapid-signatures",
+ "tapid-test-support",
  "windows-sys 0.52.0",
 ]
 

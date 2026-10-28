@@ -15,6 +15,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
 | `status` | Read-only local project preflight; blockers and pending recovery retain `data` and exit 1 |
+| `audit` | Read-only persisted graph validation; provider unavailable and exit 3, never a clean assessment |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `init` | Creates `package.json` with committed change state; handled failures return a typed error |
@@ -264,6 +265,33 @@ Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `PROJECT_CHANGED
 
 Within schema version 1, existing field types, code meanings, transaction states, and exit semantics remain stable. Additive fields, new error or warning codes, and new command coverage are compatible. Consumers must ignore unknown fields and handle unknown codes conservatively. Removing or renaming fields or changing their meaning requires a new schema version. Schema versioning is independent of Tapid's package version.
 
+## Audit result files
+
+`tapid audit --result-file PATH` delivers the same schema-version-1 `audit`
+envelope as `audit --json`, including operational failures, and preserves human
+terminal output. These two options conflict. Use a fresh filename in an existing
+caller-controlled directory outside the canonical project root. The shared result
+writer exclusively creates the file, rejects existing destinations and final
+symlinks, uses mode `0600` on Unix, and inherits the directory ACL on Windows.
+It holds the same non-inheritable handle, writes one newline-terminated JSON object
+and synchronizes the file. This deliberately writes only the requested result
+outside the audited project; it does not authorize project or package-store writes.
+
+Successful graph inspection records `data.threshold`: `any` (default), `low`,
+`moderate`, `high` or `critical`, selected by `audit --threshold LEVEL`. This is
+an inclusive advisory severity floor; malware and unknown severity always meet
+it. Threshold selection never changes incomplete coverage into success. Audit
+exits 0 below threshold with complete coverage, 1 for complete coverage with
+qualifying findings, 2 for invalid invocation and 3 for incomplete coverage or
+operational failure. Live retrieval requires the explicit provider, trust, consent,
+replay-state and credential-mode inputs documented in the CLI README.
+
+Read after Tapid exits, validate `schema_version` and `operation`, and reject empty,
+partial, missing or malformed records. Delivery errors exit 3 and are reported on
+stderr; failed writes attempt to truncate the destination. An invalid destination
+or argument-parsing failure cannot deliver a result. Other caller-authority
+processes and OS termination remain outside this channel's guarantees.
+
 ## Run child output and receipts
 
 `tapid run SCRIPT --result-file PATH` writes a separate, newline-terminated JSON result while preserving child stdout, stderr, and exit codes. It suppresses the usual stderr receipt and conflicts with `--receipt-json`. Global `--json` still rejects `run` before launch to preserve the package-result stdout guarantee. Legacy `--receipt-json` appends a receipt to arbitrary child stderr and cannot be used as a trusted result channel.
@@ -495,3 +523,34 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+Audit's native and imported graph inventories distinguish `recorded_subjects` from
+`reachable_subjects`. `graph_coverage.roots_recorded` identifies whether persisted
+entry points exist; `graph_coverage.unresolved_peers` counts reachable peer names
+with zero or multiple recorded candidates. These fields do not establish checked
+security coverage. Imported peers target exact validated placements and report
+zero unresolved candidates; audit remains `not_checked` with exit 3 without a provider.
+`graph_coverage.requestable_occurrences` counts incoming-name occurrences
+that can be represented as exact v2 advisory/reported-malware requests, while
+`excluded_occurrences` counts those lacking exact source, peer or platform
+applicability. Multiple aliases for one reachable identity count separately.
+These counts do not imply provider coverage, consent or completed checks.
+Imported workspace sources and platform alternatives that cannot be represented
+exactly are excluded rather than flattened to registry packages or host-filtered.
+
+The internal signed-provider application seam retains exact graph keys with v2
+`evidence` results and per-occurrence `failures` (stable code and precise local
+verification reason), plus `not_checked` counts. Evidence includes the signed
+request, issuer, source revision, report revision, classification, fix versions,
+check time, expiry and explicit status. Incomplete evidence takes exit 3 precedence
+over known findings; complete findings at the threshold exit 1 and complete results
+below it exit 0. Without explicit provider inputs the CLI remains unchecked and exits 3.
+JSON displays at most 100 evidence records, findings and failures each; scalar
+text uses the existing sanitization and 4096-byte bound. Display truncation sets
+`truncated_fields`, incomplete coverage and exit 3. Provider evidence does not
+establish whether transport was live (`live_requests: null` in that case).
+
+Native and imported evidence also includes bounded exact-instance dependency `paths` from the
+shared lock graph traversal and `paths_truncated`. Path display limitations never
+remove an occurrence from security collection; truncated path output makes the
+delivered JSON result partial.

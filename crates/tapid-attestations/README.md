@@ -10,3 +10,9 @@
 Typed artifact-bound claims covering issuer, methodology, scope, issue/expiry, findings, confidence, limitations, and payment disclosure. Claims require canonical RFC 3339 timestamps with an explicit `Z` or numeric offset; issue and expiry are compared as instants before conversion to an unsigned canonical trust envelope. The unsigned envelope remains a transport/canonicalization primitive and is not evidence of signature verification or trust.
 
 `verify_security_evidence` checks bounded security-result JSON, contextual Ed25519 signatures against a dedicated caller-owned issuer keyring, exact request/digest binding, coverage, trust expiry, analysis age and replay state. Its accepted result still requires status evaluation and does not certify safety. Public fixtures run without Cloud or accounts. Trust distribution, persistent replay floors and hosted authorization are caller responsibilities. See [the public v1 contract](../../docs/security-evidence.md).
+
+`verify_security_evidence_v2` retains those verification rules for the separately
+negotiated v2 report schema, including report revisions, explicit withdrawal and
+available fixes. It does not downgrade to v1. Withdrawals remain invalid evidence,
+with replay state supplied and persisted by the caller. Independent offline v1/v2
+fixtures do not establish hosted compatibility or enable live requests.

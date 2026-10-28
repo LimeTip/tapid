@@ -59,3 +59,47 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+`Lockfile::graph()` revalidates the native model through the owning reader and
+indexes exact source-qualified nodes, named dependency edges and recorded roots.
+It retains same-name roots, aliases, workspace identities, and all recorded
+platform/peer contexts without host filtering. Rootless legacy inputs have no
+recorded roots; callers must disclose that missing coverage rather than infer
+registry identities. Imported npm graphs continue to use
+`ImportedNpmLockfile::graph()`, preserving placements and multi-platform
+constraints rather than coercing them into native keys.
+
+`LockedGraph::paths_to()` shares the cycle-safe explanation traversal used by
+`tapid why`, with limits of 50 paths, 128 levels and 10,000 visits and an explicit
+truncation flag. Native peer edges retain all same-origin contextual candidates
+for explanation; they do not prove an exact security-evidence subject. Consumers
+must establish applicability separately. Graph inspection does not load store
+content, recover transactions, resolve versions, or mutate the lock.
+
+`ImportedNpmGraph::paths_to()` uses the same bounded traversal over npm placement
+keys. Callers supply registry or workspace entry points; local workspace links,
+registry dependencies and recorded peer placements remain traversable, including
+optional and platform-specific branches without host selection. A workspace root
+uses its root-relative source path, not the physical link path. Registry entry
+point section kinds remain generic `dependency`; recorded package peer edges
+are labeled `peer`.
+
+Both graph types provide `paths_to_key()` for explaining one exact native key or
+imported placement. Other same-name occurrences do not consume its displayed
+path budget. Paths retain incoming alias names; imported identity, peer targets
+and platform alternatives remain in the original graph rather than being
+coerced into a native identity. Path truncation describes explanation display,
+not security-check coverage or proof of applicability.
+
+`LockedGraph::reachable()` projects native recorded roots without the explanation
+path budget. It retains each exact key and all incoming names, excludes orphan
+records, stops cycles, and includes all candidate peer branches without host
+filtering. Missing roots and peer names with zero or multiple candidates are
+explicit. A unique candidate is still a recorded explanation candidate, not proof
+of provider applicability. This inventory does not establish security coverage.
+
+`ImportedNpmGraph::reachable()` reuses the imported explanation edge projection
+without its display limits. It includes recorded root and workspace entry points,
+local workspace links, aliases and exact peer placements without host filtering.
+The owning reader already rejects unreachable selected entries. Its keys remain imported placements or
+workspace source paths; they are not native package keys.
