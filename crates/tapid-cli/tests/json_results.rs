@@ -797,7 +797,11 @@ fn json_install_replays_imported_npm_selections() {
         let (output, result) = invoke(&project, &args);
         assert!(output.status.success(), "{result}");
         assert_eq!(result["operation"], "install");
-        assert_eq!(result["data"]["package_count"], 4);
+        assert_eq!(
+            result["data"],
+            serde_json::json!({"package_count":4,"replayed":true})
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Lock selections:"));
         assert_eq!(result["outcome"], "success");
     }
 }

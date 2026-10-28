@@ -400,6 +400,7 @@ fn report(
             }
             crate::output::report_warnings(&report.outcome.warnings);
             println!("{action} ({} package(s))", report.package_count);
+            crate::output::install::selection_summary(&report.package_changes);
             ExitCode::SUCCESS
         }
         Err(error) => crate::output::json::failure_or_human(&error, operation, json),
