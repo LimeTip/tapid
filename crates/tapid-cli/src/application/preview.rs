@@ -1,12 +1,10 @@
 //! Read-only dependency inspection. Results are observations, never executable plans.
+mod inputs;
 use super::{
     install::InstallMode,
     outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError},
 };
-use crate::{
-    commands::manifest::read_manifest_typed,
-    online::{self, GraphPackage, GraphSnapshot},
-};
+use crate::online::{self, GraphPackage, GraphSnapshot};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -65,8 +63,11 @@ pub(crate) struct Effects {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct PreviewReport {
+    #[serde(skip_serializing_if = "super::outcome::CandidateExclusions::is_empty")]
+    pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     #[serde(skip)]
     pub outcome: OperationOutcome,
+    starting_state: serde_json::Value,
     preview_kind: &'static str,
     artifacts_prepared: bool,
     target: String,
@@ -95,6 +96,7 @@ pub(crate) fn run(
         mode,
         fixture,
         allow_unverified,
+        || {},
     )
     .map_err(|error| OperationFailure::unchanged(project, error))
 }
@@ -108,7 +110,26 @@ fn inspect(
     mode: InstallMode,
     fixture: Option<&Path>,
     allow_unverified: bool,
+    before_recheck: impl FnOnce(),
 ) -> Result<PreviewReport, OperationalError> {
+    let canonical_project = fs::canonicalize(project)
+        .map_err(|e| OperationalError::from_source(ErrorKind::Project, e))?;
+    let relative_target = if target.is_absolute() {
+        target
+            .strip_prefix(project)
+            .or_else(|_| target.strip_prefix(&canonical_project))
+            .map_err(|_| {
+                OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "preview manifest is outside the project",
+                )
+            })?
+    } else {
+        target
+    };
+    let target_path = canonical_project.join(relative_target);
+    let project = canonical_project.as_path();
+    let target = target_path.as_path();
     if crate::filesystem::lifecycle_journal::has_pending(project)
         .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?
     {
@@ -123,7 +144,8 @@ fn inspect(
     } else {
         project.join(target)
     };
-    if &read_manifest_typed(&target)? != before {
+    let inputs = inputs::Inputs::capture(project, &target)?;
+    if inputs.manifest(&target) != before {
         return Err(OperationalError::new(
             ErrorKind::ProjectChanged,
             "package.json changed while preparing the preview; retry against current inputs",
@@ -132,7 +154,7 @@ fn inspect(
     let manifest = if target == root {
         after.clone()
     } else {
-        read_manifest_typed(&root)?
+        inputs.manifest(&root).clone()
     };
     if !online::copied_root_names(&manifest)?.is_empty() {
         return Err(OperationalError::new(
@@ -140,13 +162,16 @@ fn inspect(
             "resolved previews of copied file/Git dependencies are unsupported; use an ordinary install",
         ));
     }
-    let config = crate::registry::RegistryConfig::load(project)
-        .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
-    let previous = match fs::read_to_string(project.join("tapid.lock")) {
-        Ok(bytes) => Some(Lockfile::from_json(&bytes).map_err(OperationalError::from)?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(OperationalError::from_source(ErrorKind::Lockfile, e)),
-    };
+    let config = &inputs.config;
+    let previous = inputs
+        .lock
+        .as_ref()
+        .map(|bytes| {
+            let text = std::str::from_utf8(bytes)
+                .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+            Lockfile::from_json(text).map_err(OperationalError::from)
+        })
+        .transpose()?;
     let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
     let frozen = matches!(
         mode,
@@ -182,13 +207,21 @@ fn inspect(
     let preserve =
         matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
     let mut updated_manifest = None;
+    let mut candidate_exclusions = super::outcome::CandidateExclusions::default();
 
-    let policy = super::dependency_scripts::load_policy(project)?;
+    let policy = &inputs.policy;
     let matching = if let Some(lock) = &previous {
         matches!(mode, InstallMode::Online)
             && replayable
             && before == after
-            && super::replay::can_replay_online(project, lock, &config, &policy)?
+            && super::replay::can_replay_inspected(
+                project,
+                lock,
+                config,
+                policy,
+                inputs.root_digest(),
+                &inputs.materialize(config, None)?,
+            )?
     } else {
         false
     };
@@ -199,9 +232,9 @@ fn inspect(
                 "a dry-run replay requires tapid.lock",
             )
         })?;
-        lock.validate_replay(&online::root_digest(project)?)
+        lock.validate_replay(inputs.root_digest())
             .map_err(OperationalError::from)?;
-        let workspace = online::workspace_materialization(project, &config)?;
+        let workspace = inputs.materialize(config, None)?;
         if !online::workspace_matches_lock(&workspace, lock) {
             return Err(OperationalError::new(
                 ErrorKind::LockManifestMismatch,
@@ -209,11 +242,11 @@ fn inspect(
             ));
         }
         let dependencies =
-            online::resolved_workspace_registry_dependencies(&manifest, &workspace, &config)?;
+            online::resolved_workspace_registry_dependencies(&manifest, &workspace, config)?;
         super::replay::validate_workspace_dependency_edges(&workspace, &dependencies, lock)?;
-        super::replay::validate_root_bindings(lock, &manifest, &config)?;
+        super::replay::validate_root_bindings(lock, &manifest, config)?;
         online::validate_locked_files(project, lock)?;
-        if !online::validate_locked_routes(lock, &config)? {
+        if !online::validate_locked_routes(lock, config)? {
             return Err(OperationalError::new(
                 ErrorKind::Lockfile,
                 "locked packages target a different platform; regenerate tapid.lock",
@@ -227,18 +260,18 @@ fn inspect(
             "lockfile",
         )
     } else {
-        let (graph, count, saved) = online::resolve_preview_graph(
+        let (graph, count, saved, exclusions) = online::resolve_preview_graph(
             project,
             &manifest,
-            &target,
-            after,
             fixture,
             allow_unverified,
-            &config,
+            config,
             if preserve { previous.as_ref() } else { None },
             update,
+            inputs.materialize(config, Some((&target, after)))?,
         )?;
         updated_manifest = saved;
+        candidate_exclusions = exclusions;
         (
             graph,
             count,
@@ -299,7 +332,11 @@ fn inspect(
             .warnings
             .push(super::outcome::Warning::UnverifiedRegistryArtifactsAllowed);
     }
+    before_recheck();
+    inputs.recheck()?;
     Ok(PreviewReport {
+        starting_state: inputs.receipt(&target, mode, allow_unverified),
+        candidate_exclusions,
         outcome,
         preview_kind: "resolved_graph",
         artifacts_prepared: false,
@@ -391,4 +428,149 @@ fn reasons_by_target(graph: &GraphSnapshot, phase: &'static str) -> BTreeMap<Str
         }
     }
     reasons
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tapid_test_support::TempProject;
+
+    #[test]
+    fn preview_rejects_inputs_changed_before_final_recheck_without_writes() {
+        for mutation in [
+            "root",
+            "selected",
+            "unselected",
+            "added",
+            "removed",
+            "lock",
+            "routing",
+            "valid_routing",
+            "valid_policy",
+            "recovery",
+            "policy",
+            "unreadable",
+        ] {
+            let project = TempProject::new("preview-stale-input").unwrap();
+            project
+                .write(
+                    "package.json",
+                    br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"]}"#,
+                )
+                .unwrap();
+            for name in ["selected", "unselected"] {
+                project
+                    .write(
+                        format!("packages/{name}/package.json"),
+                        format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+                    )
+                    .unwrap();
+            }
+            project
+                .write("registry.json", serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org","name":"unused","version":"1.0.0","integrity":format!("sha512-{}==", "A".repeat(86)),"artifact":"never-download"}]}).to_string().as_bytes())
+                .unwrap();
+            project
+                .write("node_modules/sentinel", b"installed")
+                .unwrap();
+            project.write("store/sentinel", b"cached").unwrap();
+            let target = project.path().join("packages/selected/package.json");
+            let manifest = crate::commands::manifest::read_manifest_typed(&target).unwrap();
+            let result = inspect(
+                project.path(),
+                &target,
+                &manifest,
+                &manifest,
+                InstallMode::Online,
+                Some(&project.path().join("registry.json")),
+                false,
+                || match mutation {
+                    "root" => {
+                        project
+                            .write("package.json", br#"{"name":"changed","version":"1.0.0"}"#)
+                            .unwrap();
+                    }
+                    "selected" | "unselected" => {
+                        project
+                            .write(
+                                format!("packages/{mutation}/package.json"),
+                                format!(r#"{{"name":"{mutation}","version":"2.0.0"}}"#).as_bytes(),
+                            )
+                            .unwrap();
+                    }
+                    "added" => {
+                        project
+                            .write(
+                                "packages/new/package.json",
+                                br#"{"name":"new","version":"1.0.0"}"#,
+                            )
+                            .unwrap();
+                    }
+                    "removed" => {
+                        fs::remove_file(project.path().join("packages/unselected/package.json"))
+                            .unwrap();
+                    }
+                    "lock" => {
+                        project.write("tapid.lock", b"changed lock").unwrap();
+                    }
+                    "routing" => {
+                        project
+                            .write("tapid.toml", b"invalid configuration")
+                            .unwrap();
+                    }
+                    "valid_routing" => {
+                        project
+                            .write(
+                                "tapid.toml",
+                                b"[registries.default]\nurl='https://mirror.example'\n",
+                            )
+                            .unwrap();
+                    }
+                    "valid_policy" => {
+                        project
+                            .write("tapid.lifecycle.toml", b"schema=1\n")
+                            .unwrap();
+                    }
+                    "recovery" => {
+                        project
+                            .write(".tapid-lifecycle-journal.json", b"pending")
+                            .unwrap();
+                    }
+                    "policy" => {
+                        project
+                            .write("tapid.lifecycle.toml", b"changed policy")
+                            .unwrap();
+                    }
+                    "unreadable" => {
+                        fs::remove_file(&target).unwrap();
+                        fs::create_dir(&target).unwrap();
+                    }
+                    _ => unreachable!(),
+                },
+            );
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, ErrorKind::ProjectChanged, "{mutation}: {error}");
+            assert_eq!(
+                fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+                b"installed"
+            );
+            assert_eq!(
+                fs::read(project.path().join("store/sentinel")).unwrap(),
+                b"cached"
+            );
+            assert!(!project.path().join(".tapid-activation.lock").exists());
+            if mutation == "recovery" {
+                assert_eq!(
+                    fs::read(project.path().join(".tapid-lifecycle-journal.json")).unwrap(),
+                    b"pending"
+                );
+            } else {
+                assert!(
+                    !project
+                        .path()
+                        .join(".tapid-lifecycle-journal.json")
+                        .exists()
+                );
+            }
+        }
+    }
 }

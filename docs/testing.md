@@ -14,9 +14,30 @@ Use `tapid-test-support` for integration-test setup:
 
 Never construct test paths from `/tmp`, `/Users`, `C:\\`, the repository path, or a user-specific home. Never use the network or real credentials. Fixture writers reject absolute paths and parent-directory components.
 
+On Unix, the runtime temporary directory must permit executing fixture files.
+Installer, verified-tool, and package-bin tests deliberately launch freshly written scripts
+directly, so a `noexec` temporary mount produces `PermissionDenied` even with the
+correct executable mode. For an isolated worker with a non-executable default
+temporary mount, configure `TMPDIR` before starting Node/Cargo to an absolute,
+private directory on the worker's executable workspace filesystem. For example,
+from the repository root:
+
+```sh
+mkdir -p target/test-tmp
+chmod 700 target/test-tmp
+TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --lib --locked
+```
+
+This selects fixture storage through the existing runtime API; do not replace
+direct executable launches with shell invocations or skip execution assertions.
+If execution is still denied, inspect the worker mount/security policy before
+attributing the failure to executable permissions. This configuration does not
+supply native containment prerequisites or establish native platform support.
+
 ## Development prerequisites and build reuse
 
-Use Git, Rust with rustfmt and Clippy, and Node.js 22.7.0 or later.
+Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,
+24, or 22), following the [repository support policy](../README.md#development).
 Rust owns package-manager behavior and security verification. TypeScript owns
 developer scripts, release orchestration, documentation checks, and website/consumer
 fixtures. Python and uv are not required to develop or test Tapid.
