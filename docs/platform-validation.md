@@ -158,8 +158,16 @@ Readiness failures remain primary even when cancellation also fails; summaries
 retain the secondary cleanup diagnostic without claiming successful cleanup.
 
 The ManagedTree fixture retains its exact policy, commands, selected Node version and
-binary fingerprints, logs and checked result files. Its separate candidate policy
-uses 180 seconds, 4 MiB combined output, 256 kernel tasks and 2 GiB cgroup memory.
+binary fingerprints, logs and checked result files. It also retains host-side
+metadata for the installed `next` shim: link, canonical
+project-contained target, executable mode, recognized Node shebang and applicable
+host mount options. Inspection executes no application fallback and rejects
+resolved out-of-project targets. These observations precede containment and do not
+establish the private mount namespace's permissions. The CLI invocation probe
+installs an offline package through the verified install path and invokes its
+Node-backed bin by command name before the existing outside-secret controls.
+The fixture's separate candidate policy uses 180 seconds, 4 MiB combined output,
+256 kernel tasks and 2 GiB cgroup memory.
 These are provisional ceilings, not native measurements or support evidence.
 The fixture runs in a separate delegated parent so CI can retain memory.peak
 and pids.peak when exposed by the kernel. These inclusive measurements also

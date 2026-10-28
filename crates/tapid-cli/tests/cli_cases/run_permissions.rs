@@ -85,6 +85,89 @@ fn private_node_runtime() -> (tapid_test_support::TempProject, PathBuf) {
     (runtime, node)
 }
 
+#[cfg(unix)]
+fn install_local_tool(project: &tapid_test_support::TempProject) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/npm-aliases.json")).unwrap();
+    let package = fixture["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "@actual/scoped")
+        .unwrap();
+    let bytes = STANDARD
+        .decode(
+            package["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap(),
+        )
+        .unwrap();
+    project.write("vendor/tool.tgz", &bytes).unwrap();
+    let store = tapid_test_support::TempProject::new("run-installed-tool-store").unwrap();
+    let output = run(
+        project.path(),
+        &[
+            "add",
+            "local@file:vendor/tool.tgz",
+            "--store-dir",
+            store.path().to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shim = project.path().join("node_modules/.bin/scoped-tool");
+    assert!(
+        fs::symlink_metadata(&shim)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let target = fs::canonicalize(&shim).unwrap();
+    assert!(target.starts_with(fs::canonicalize(project.path()).unwrap()));
+    assert_ne!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    assert!(
+        fs::read(&target)
+            .unwrap()
+            .starts_with(b"#!/usr/bin/env node\n")
+    );
+    eprintln!(
+        "installed tool: shim={} link={} target={} mode={:o}",
+        shim.display(),
+        fs::read_link(&shim).unwrap().display(),
+        target.display(),
+        fs::metadata(&target).unwrap().permissions().mode()
+    );
+    shim
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_project_bin_executes_with_selected_node_before_containment() {
+    let project = project();
+    let shim = install_local_tool(&project);
+    let (_runtime, node) = private_node_runtime();
+    let output = Command::new(shim)
+        .env_clear()
+        .env("PATH", node.parent().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"alias-bin\n");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_managed_tree_cli_preserves_invocation_environment_and_checked_results() {
@@ -102,9 +185,10 @@ fn linux_managed_tree_cli_preserves_invocation_environment_and_checked_results()
     project
         .write(
             "package.json",
-            br#"{"name":"managed-cli","version":"1.0.0","scripts":{"probe":"tapid-local-probe"}}"#,
+            br#"{"name":"managed-cli","version":"1.0.0","scripts":{"probe":"scoped-tool && tapid-local-probe"}}"#,
         )
         .unwrap();
+    install_local_tool(&project);
     project
         .write(
             "tapid.toml",
@@ -191,7 +275,11 @@ if (process.argv[2] !== 'child') {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let stdout = output
+            .stdout
+            .strip_prefix(b"alias-bin\n")
+            .expect("installed Node-backed bin must execute before the authority probe");
+        let actual: serde_json::Value = serde_json::from_slice(stdout).unwrap();
         assert_eq!(
             actual["node"],
             fs::canonicalize(&node).unwrap().to_str().unwrap()

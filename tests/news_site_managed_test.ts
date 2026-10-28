@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { temporary } from "./script-support.ts";
 import { runManagedNewsSite } from "../scripts/check-managed-news-site.ts";
@@ -17,8 +17,17 @@ const fs = require('node:fs'), http = require('node:http');
 const args = process.argv.slice(2), project = args[args.indexOf('--project-dir') + 1];
 const mode = JSON.parse(fs.readFileSync(project + '/package.json')).mode;
 fs.appendFileSync(project + '/calls', JSON.stringify(args) + '\\n');
-if (args[0] === 'install') process.exit(0);
-if (mode === 'build-failure' && args[1] === 'build') process.exit(37);
+if (args[0] === 'install') {
+ fs.mkdirSync(project + '/node_modules/.bin', {recursive:true});
+ fs.mkdirSync(project + '/node_modules/next', {recursive:true});
+ fs.writeFileSync(project + '/node_modules/next/cli.js', '#!/usr/bin/env node\\n', {mode:0o755});
+ if (mode === 'outside-bin') {
+  fs.writeFileSync(project + '/../outside-tool', 'synthetic outside data');
+  fs.symlinkSync('../../../outside-tool', project + '/node_modules/.bin/next');
+ } else fs.symlinkSync('../next/cli.js', project + '/node_modules/.bin/next');
+ process.exit(0);
+}
+if (['build-failure', 'outside-bin'].includes(mode) && args[1] === 'build') process.exit(37);
 const result = args[args.indexOf('--result-file') + 1];
 function receipt(termination) {
  fs.writeFileSync(result, JSON.stringify({outcome:'completed', receipt:{assurance:'ManagedTree', termination, requested:{filesystem_read:true}, enforced:{filesystem_read:true}, completion:{cleanup_confidence:mode === 'bad-cleanup' ? 'NoCleanupGuarantee' : 'KernelOwnedComplete'}}}));
@@ -70,6 +79,22 @@ test("fixture build failure propagates without running later scripts", () => tem
   const calls = readFileSync(join(report.project, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.equal(calls.length, 2);
   assert.equal(report.status, 'failed');
+  assert.equal(report.local_tool.link, '../next/cli.js');
+  assert.equal(report.local_tool.target, realpathSync(join(report.project, 'node_modules/next/cli.js')));
+  assert.equal(report.local_tool.mode & 0o111, 0o111);
+  assert.equal(report.local_tool.interpreter, '/usr/bin/env node');
+  assert.equal(report.local_tool.scope, 'host-before-containment');
+}));
+
+test("tool diagnostics do not read a target outside the project or mask build failure", () => temporary(async path => {
+  const options = await fixture(path, "outside-bin");
+  await assert.rejects(runManagedNewsSite(options), /build.*37/);
+  const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
+  assert.match(report.local_tool.error, /target escapes project/);
+  assert.equal(report.local_tool.interpreter, undefined);
+  assert.equal(report.local_tool.mode, undefined);
+  assert.match(report.error, /build.*37/);
+  assert.equal(JSON.stringify(report).includes('synthetic outside data'), false);
 }));
 
 test("readiness timeout still cancels and checks cleanup", () => temporary(async path => {

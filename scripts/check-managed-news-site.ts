@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { release } from "node:os";
-import { closeSync, copyFileSync, cpSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, copyFileSync, cpSync, fstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -134,6 +134,34 @@ export async function runManagedNewsSite(options: Options) {
   save();
   try {
     await command("install", ["install", "--project-dir", project]);
+    // Inspect the installed shim without executing an application outside containment.
+    // This is host metadata, not evidence of the private namespace's mount flags.
+    const tool: any = { scope: "host-before-containment", shim: join(project, "node_modules/.bin/next") };
+    summary.local_tool = tool;
+    try {
+      tool.link = readlinkSync(tool.shim);
+      tool.target = realpathSync(tool.shim);
+      const within = relative(realpathSync(project), tool.target);
+      assert.ok(within !== '..' && !within.startsWith('../') && !isAbsolute(within), "installed tool target escapes project");
+      const fd = openSync(tool.target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const metadata = fstatSync(fd);
+        assert.ok(metadata.isFile(), "installed tool target is not a regular file");
+        tool.mode = metadata.mode;
+        const header = Buffer.alloc(128);
+        const count = readSync(fd, header, 0, header.length, 0);
+        tool.interpreter = header.subarray(0, count).toString().split('\n')[0].trim() === '#!/usr/bin/env node'
+          ? '/usr/bin/env node' : 'other';
+      } finally { closeSync(fd); }
+      if (process.platform === 'linux') {
+        tool.mounts = readFileSync('/proc/self/mountinfo', 'utf8').trim().split('\n').flatMap(line => {
+          const fields = line.split(' '), mount = fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+          return tool.target === mount || tool.target.startsWith(mount.endsWith('/') ? mount : mount + '/')
+            ? [{ path: mount, options: fields[5] }] : [];
+        });
+      }
+    } catch (error) { tool.error = String(error); }
+    save();
     await command("build", [...runArgs("build"), "--allow-process-memory-stats"]);
     summary.build = checkedResult(join(evidence, "build.json"), "Exited(0)");
     await command("test", runArgs("test"));
