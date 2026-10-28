@@ -5,6 +5,9 @@ Install Tapid with optional user PATH persistence.
 Without -ConfigurePath, stored and process PATH remain unchanged. The installer
 prints a literal command for activation. -ConfigurePath opts into receipt-backed
 user-scope persistence; future sessions must load the updated environment.
+Each download has a 60-second total deadline across requests, redirects, and body
+reads. Progress does not renew it. Timeout removes partial downloads; separate
+downloads receive separate deadlines.
 .PARAMETER ConfigurePath
 Persist the install directory in user PATH, preserving existing tokens and kind.
 #>
@@ -46,23 +49,87 @@ function Expand-VerifiedArchive([string]$archivePath, [string]$extractRoot) {
 
 function Fail([string]$Message) { throw "tapid installer: $Message" }
 
+# Private construction and deadline seams; installer callers keep the three-argument interface.
+function New-DownloadHandler { return [Net.Http.HttpClientHandler]::new() }
+function Get-DownloadTimeoutMilliseconds { return 60000 }
+
+# PowerShell 5.1 cannot run scriptblock continuations on arbitrary .NET threads.
+# Keep bounded waits and late-result ownership in a small .NET Framework-compatible helper.
+function Initialize-DownloadDeadline {
+    if ('TapidDownloadDeadline' -as [type]) { return }
+    $references = @{}
+    if ($PSVersionTable.PSVersion.Major -le 5) { $references.ReferencedAssemblies = @('System.Net.Http.dll', 'System.dll', 'System.Core.dll') }
+    Add-Type @references -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class TapidDownloadDeadline : IDisposable {
+    readonly Stopwatch clock = Stopwatch.StartNew();
+    readonly CancellationTokenSource cancellation = new CancellationTokenSource();
+    readonly int milliseconds;
+    public TapidDownloadDeadline(int milliseconds) {
+        this.milliseconds = milliseconds;
+        cancellation.CancelAfter(milliseconds);
+    }
+    public CancellationToken Token { get { return cancellation.Token; } }
+    public bool Expired { get { return clock.ElapsedMilliseconds >= milliseconds || cancellation.IsCancellationRequested; } }
+    public void Check() { if (Expired) throw new TimeoutException("tapid installer: download timed out"); }
+    T Await<T>(Task<T> task, bool ownsResult) {
+        try {
+            Check();
+            int remaining = Math.Max(1, milliseconds - (int)clock.ElapsedMilliseconds);
+            // Wait does not rely on the operation honoring cancellation (not all Framework streams do).
+            try { if (!task.Wait(remaining)) throw new TimeoutException("tapid installer: download timed out"); }
+            catch (AggregateException) { return task.GetAwaiter().GetResult(); }
+            Check();
+            return task.GetAwaiter().GetResult();
+        } catch {
+            // A response/stream can arrive after we stop waiting. Observe faults and release
+            // late resources without a PowerShell runspace or access to the destination file.
+            task.ContinueWith(t => {
+                if (t.IsFaulted) { var observed = t.Exception; }
+                else if (t.Status == TaskStatus.RanToCompletion && ownsResult) {
+                    var resource = t.Result as IDisposable;
+                    if (resource != null) { try { resource.Dispose(); } catch { } }
+                }
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            throw;
+        }
+    }
+    public HttpResponseMessage Response(Task<HttpResponseMessage> task) { return Await(task, true); }
+    public Stream Stream(Task<Stream> task) { return Await(task, true); }
+    public int Read(Task<int> task) { return Await(task, false); }
+    public void Cancel() { cancellation.Cancel(); }
+    public void Dispose() { cancellation.Dispose(); }
+}
+'@
+}
+
 function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
     Add-Type -AssemblyName System.Net.Http
-    $handler = [Net.Http.HttpClientHandler]::new()
-    $handler.AllowAutoRedirect = $false
-    $client = [Net.Http.HttpClient]::new($handler)
+    Initialize-DownloadDeadline
+    $deadline = [TapidDownloadDeadline]::new((Get-DownloadTimeoutMilliseconds))
+    $handler = $null
+    $client = $null
     $response = $null
     $source = $null
     $destinationStream = $null
     $downloadError = $null
     $cleanupError = $null
     try {
+        $handler = New-DownloadHandler
+        $handler.AllowAutoRedirect = $false
+        $client = [Net.Http.HttpClient]::new($handler)
         $client.DefaultRequestHeaders.UserAgent.ParseAdd("tapid-installer")
         $currentUri = [Uri]$Uri
         if ($currentUri.Scheme -ne "https") { Fail "download URL must use HTTPS" }
         [int]$redirectCount = 0
         while ($true) {
-            $response = $client.GetAsync($currentUri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $deadline.Check()
+            $response = $deadline.Response($client.GetAsync($currentUri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $deadline.Token))
             $statusCode = [int]$response.StatusCode
             if ($statusCode -in 301, 302, 303, 307, 308) {
                 if ($redirectCount -ge 10) { Fail "download encountered too many redirects" }
@@ -81,23 +148,28 @@ function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
             break
         }
         if ($response.Content.Headers.ContentLength -gt $MaxBytes) { Fail "download exceeds the size limit" }
-        $source = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $source = $deadline.Stream($response.Content.ReadAsStreamAsync())
         $destinationStream = [IO.File]::Create($Path)
         $buffer = [byte[]]::new(65536)
         [long]$total = 0
-        while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        while (($read = $deadline.Read($source.ReadAsync($buffer, 0, $buffer.Length, $deadline.Token))) -gt 0) {
             $total += $read
             if ($total -gt $MaxBytes) { Fail "download exceeds the size limit" }
+            $deadline.Check()
             $destinationStream.Write($buffer, 0, $read)
         }
+        $deadline.Check()
     } catch {
         $downloadError = $_
+        if ($deadline.Expired) { $downloadError = [TimeoutException]::new("tapid installer: download timed out") }
     } finally {
+        try { if ($downloadError) { $deadline.Cancel() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         try { if ($destinationStream) { $destinationStream.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         try { if ($source) { $source.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         try { if ($response) { $response.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
-        try { $client.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
-        try { $handler.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { if ($client) { $client.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { if ($handler) { $handler.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { $deadline.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         if ($downloadError -or $cleanupError) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
     }
     if ($downloadError) { throw $downloadError }
