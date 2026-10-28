@@ -474,7 +474,7 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
             let input = document.replace("name = \"sh\"", &format!("name = \"{name}\""));
             assert!(DependencyLifecyclePolicy::parse(input.as_bytes()).is_ok());
         }
-        for name in ["node", "SH", "CMD", "sh.exe"] {
+        for name in ["node", "SH", "CMD", "sh.exe", "cmd.exe"] {
             let input = document.replace("name = \"sh\"", &format!("name = \"{name}\""));
             assert_eq!(
                 DependencyLifecyclePolicy::parse(input.as_bytes()).unwrap_err(),
@@ -486,7 +486,7 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
 
     #[test]
     fn approvals_reject_tool_names_that_collide_as_windows_executables() {
-        for name in ["SH", "sh.exe", "sh.EXE"] {
+        for name in ["sh", "SH", "sh.exe", "sh.EXE"] {
             let mut input: toml::Value = toml::from_str(&document()).unwrap();
             let tools = input["approvals"][0]["tools"].as_array_mut().unwrap();
             let mut alias = tools[0].clone();
