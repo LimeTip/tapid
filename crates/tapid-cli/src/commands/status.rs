@@ -47,6 +47,9 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             crate::output::json::text(installation["path"].as_str().unwrap_or("?")).0,
             installation["state"].as_str().unwrap_or("unknown")
         );
+        if let Some(profile) = installation.get("profile") {
+            println!("Installed profile: {profile}");
+        }
     }
     println!("Project recovery: {}", report.recovery);
     if let Some(guidance) = report.recovery_guidance {

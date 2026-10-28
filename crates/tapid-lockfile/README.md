@@ -87,8 +87,13 @@ records cannot contain tree receipts, copied sources, or derived outputs.
 Verified records reuse existing package and derived-output validation. Structural
 receipt validation does not authenticate a derived output or authorize activation.
 Offline CLI status recognizes schema 11 and checks the root and workspace
-manifest snapshots with bounded reads. It explicitly reports registry declaration
-bindings, installed-profile validation and source integrity as checks not performed.
+manifest snapshots with bounded reads. For an installed root layout it validates
+the recorded profile against the selection, target, exact closure and activation
+generation. Missing or invalid installed profile metadata is a local blocker;
+an absent installation is reported without inferring a profile. Profile and
+generation metadata participate in snapshot rechecks; detected changes invalidate
+the reported profile. Human and JSON status include the same profile metadata.
+Registry declaration bindings and source integrity remain checks not performed.
 Prune preserves a schema-11 installation's recorded profile, validating its
 selection, target, exact closure and activation generation before replay. Missing
 or stale profile metadata fails before materialization. The generation record

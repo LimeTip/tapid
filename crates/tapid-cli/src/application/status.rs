@@ -328,6 +328,11 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     if changed {
         report.block("SNAPSHOT_CHANGED", &project);
         report.manifest_lock_agreement = "unknown";
+        for installation in &mut report.installation {
+            if installation.get("profile").is_some() {
+                installation["profile"] = json!({"state": "unknown_snapshot_changed"});
+            }
+        }
     }
     report.snapshot =
         json!({"consistency": "not_atomic", "changes_detected": changed, "files": files});
@@ -349,6 +354,13 @@ fn inspect_installation(
     snapshots.insert(path.clone(), (0, fingerprint(&path, 0)));
     let marker = project.join(".tapid-managed");
     snapshots.insert(marker.clone(), (1024, fingerprint(&marker, 1024)));
+    for (name, limit) in [
+        (".tapid-profile.json", 4 * 1024 * 1024),
+        (".tapid-generation", 128),
+    ] {
+        let metadata = path.join(name);
+        snapshots.insert(metadata.clone(), (limit, fingerprint(&metadata, limit)));
+    }
     let valid = validate_managed_node_modules(project).is_ok();
     #[cfg(test)]
     tests::after_ownership_validation(project);
@@ -405,8 +417,27 @@ fn inspect_native_selection(
     };
     report.checks_not_performed.extend([
         "native_selection_registry_routing_and_declaration_bindings",
-        "native_selection_installed_profile_and_source_integrity",
+        "native_selection_source_integrity",
     ]);
+    let profile = if report.installation[0]["state"] == "absent" {
+        json!({"state": "absent"})
+    } else {
+        match crate::filesystem::installed_profile::load_profile(
+            &report.project,
+            &selection,
+            &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        ) {
+            Ok(profile) => {
+                json!({"state": "validated", "includeDev": profile.include_dev, "includeOptional": profile.include_optional})
+            }
+            Err(_) => {
+                let path = report.project.join("node_modules/.tapid-profile.json");
+                report.block("INSTALLED_PROFILE_INVALID", &path);
+                json!({"state": "invalid"})
+            }
+        }
+    };
+    report.installation[0]["profile"] = profile;
     let Ok(root) = manifest_bytes else { return };
     let members = workspace
         .into_iter()
@@ -617,6 +648,94 @@ mod tests {
         if let Some((path, bytes)) = replacement {
             fs::write(path, bytes).unwrap();
         }
+    }
+
+    #[test]
+    fn status_reports_installed_profile_and_rejects_missing_stale_and_forged_records() {
+        use crate::filesystem::{
+            activation::{ActivationLock, activate_node_modules_with_preflight},
+            installed_profile::stage_profile,
+        };
+        let project = TempProject::new("status-installed-profile").unwrap();
+        let manifest = br#"{"name":"root","version":"1.0.0"}"#;
+        project.write("package.json", manifest).unwrap();
+        let selection = tapid_lockfile::NativeSelection::new(
+            "0".into(),
+            "0".into(),
+            digest_bytes(manifest),
+            Default::default(),
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let lock_bytes = selection.to_json().unwrap();
+        project.write("tapid.lock", lock_bytes.as_bytes()).unwrap();
+        let lock = ActivationLock::acquire(project.path()).unwrap();
+        let stage = lock.create_stage(project.path()).unwrap();
+        fs::create_dir_all(stage.join("node_modules")).unwrap();
+        stage_profile(
+            &stage,
+            &selection,
+            tapid_lockfile::InstallProfile::production(),
+            &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            lock.owner_line(),
+        )
+        .unwrap();
+        activate_node_modules_with_preflight(project.path(), &stage, &lock, false, || Ok(()))
+            .unwrap();
+        drop(lock);
+        let report = inspect(project.path(), None);
+        assert_eq!(
+            report.installation[0]["profile"],
+            json!({"state":"validated", "includeDev":false, "includeOptional":true})
+        );
+        let path = project.path().join("node_modules/.tapid-profile.json");
+        let original = fs::read(&path).unwrap();
+        for field in ["generation", "materializedKeys"] {
+            let mut record: Value = serde_json::from_slice(&original).unwrap();
+            record[field] = if field == "generation" {
+                json!("stale")
+            } else {
+                json!(["forged"])
+            };
+            let bytes = serde_json::to_vec(&record).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let report = inspect(project.path(), None);
+            assert!(
+                report
+                    .blockers
+                    .iter()
+                    .any(|b| b.code == "INSTALLED_PROFILE_INVALID")
+            );
+            assert_eq!(report.installation[0]["profile"]["state"], "invalid");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_file(&path).unwrap();
+        let report = inspect(project.path(), None);
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|b| b.code == "INSTALLED_PROFILE_INVALID")
+        );
+        assert!(!path.exists());
+        fs::write(&path, &original).unwrap();
+        let mut replacement: Value = serde_json::from_slice(&original).unwrap();
+        replacement["includeDev"] = json!(true);
+        MANIFEST_REPLACEMENT.with(|pending| {
+            *pending.borrow_mut() = Some((path.clone(), serde_json::to_vec(&replacement).unwrap()))
+        });
+        let _guard = FaultGuard;
+        let report = inspect(project.path(), None);
+        assert!(report.blockers.iter().any(|b| b.code == "SNAPSHOT_CHANGED"));
+        assert_eq!(
+            report.installation[0]["profile"]["state"],
+            "unknown_snapshot_changed"
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock_bytes.as_bytes()
+        );
     }
 
     #[test]
