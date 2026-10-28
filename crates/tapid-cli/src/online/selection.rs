@@ -252,6 +252,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selection_candidate_copied_file_publication_rechecks_accepted_archive() {
+        for stale in [false, true] {
+            let project =
+                tapid_test_support::TempProject::new("selection-copied-publication").unwrap();
+            let text = r#"{"name":"app","version":"1.0.0","dependencies":{"parent":"file:vendor/parent.tgz"}}"#;
+            project.write("package.json", text.as_bytes()).unwrap();
+            let fixture_bytes = include_bytes!("../../tests/fixtures/npm-import/registry.json");
+            let fixture: serde_json::Value = serde_json::from_slice(fixture_bytes).unwrap();
+            let encoded = fixture["packages"][0]["artifact"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("base64:")
+                .unwrap();
+            let archive = STANDARD.decode(encoded).unwrap();
+            project.write("vendor/parent.tgz", &archive).unwrap();
+            let fixture = project.write("registry.json", fixture_bytes).unwrap();
+            project
+                .write("node_modules/sentinel", b"running application")
+                .unwrap();
+            let target = project.path().join("package.json");
+            let mut inputs =
+                crate::application::inputs::Inputs::capture(project.path(), &target).unwrap();
+            let manifest = PackageManifest::parse(text).unwrap();
+            inputs.capture_copied_files(&manifest).unwrap();
+            let resolved = graph::resolve_package_graph(
+                project.path(),
+                &manifest,
+                inputs.materialize(&inputs.config, None).unwrap(),
+                Some(&fixture),
+                false,
+                &inputs.config,
+                None,
+                None,
+                |_| {},
+            )
+            .unwrap();
+            let candidate = resolved.into_selection(inputs.root_digest(), None).unwrap();
+            let key = &candidate.lock.root_bindings()["parent"];
+            let selected = &candidate.lock.packages()[key];
+            assert!(key.starts_with("file:vendor/parent.tgz#sha256-"));
+            assert_eq!(
+                selected.artifact_integrity(),
+                integrity(&archive).to_string()
+            );
+            assert!(selected.source_tree_receipt().is_none());
+            if stale {
+                project
+                    .write("vendor/parent.tgz", b"concurrent archive")
+                    .unwrap();
+            }
+            let result = inputs.publish_selection(&candidate.lock, None);
+            if stale {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::ProjectChanged);
+                assert!(!project.path().join("tapid.lock").exists());
+                assert_eq!(
+                    fs::read(project.path().join("vendor/parent.tgz")).unwrap(),
+                    b"concurrent archive"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+                    candidate.lock.to_json().unwrap()
+                );
+                assert_eq!(
+                    fs::read(project.path().join("vendor/parent.tgz")).unwrap(),
+                    archive
+                );
+            }
+            assert_eq!(
+                fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+                b"running application"
+            );
+            assert_eq!(fs::read(&target).unwrap(), text.as_bytes());
+            assert!(!project.path().join("store").exists());
+        }
+    }
+
+    #[test]
     fn selection_candidate_retains_only_bound_source_receipts_without_hook_outputs() {
         for mismatch in ["none", "integrity", "url", "provenance", "source"] {
             let project =
@@ -419,6 +498,11 @@ mod tests {
             .write("registry.json", fixture.to_string().as_bytes())
             .unwrap();
         let config = crate::registry::RegistryConfig::default();
+        let inputs = crate::application::inputs::Inputs::capture(
+            project.path(),
+            &project.path().join("package.json"),
+        )
+        .unwrap();
         let resolved = graph::resolve_package_graph(
             project.path(),
             &PackageManifest::parse(text).unwrap(),
@@ -459,5 +543,22 @@ mod tests {
         for path in ["tapid.lock", "store", ".tapid-activation.lock"] {
             assert!(!project.path().join(path).exists(), "{path}");
         }
+        // Publish the same validated graph, with no second metadata inspection.
+        // Missing archive fixtures make accidental artifact fetching fail.
+        let expected = lock.to_json().unwrap();
+        inputs.publish_selection(&lock, None).unwrap();
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            text.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+            b"running application"
+        );
+        assert!(!project.path().join("store").exists());
     }
 }

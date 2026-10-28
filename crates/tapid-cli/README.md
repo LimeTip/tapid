@@ -40,8 +40,7 @@ never enters store or installed-layout recovery. Metadata preparation rechecks
 recorded output bytes before the durable decision; publication uses that same
 prepared output set. Selection-only project acquisition settles metadata journals
 and refuses journals or backups requiring activation recovery. The lockfile-only
-command writer remains unavailable while selection assembly and command routing
-are under implementation.
+command writer remains unavailable while command integration is under implementation.
 
 Matching ordinary installs and frozen installs can hydrate native schema-11
 pending receipts from their exact pinned artifacts without resolving metadata.
@@ -55,8 +54,15 @@ The internal selection candidate consumes the resolved graph without artifact
 fetching or store preparation. Fetched installations and candidates share lock
 assembly for dependency edges, aliases, workspace evidence, and roots. Candidates
 retain source-tree receipts only when their source and artifact binding validates;
-lifecycle outputs are not retained. The command writer remains disabled until
-stale-input publication and command routing are complete.
+lifecycle outputs are not retained. Selection publication reuses preview input
+capture for exact root/member manifests, lock bytes, workspace membership,
+effective registry routing, and lifecycle policy. Accepted copied-file inputs
+are captured and rechecked through the existing contained-file reader. Publication
+rechecks sources under metadata-only project exclusion and again before the
+durable decision, then writes the same validated selection through the metadata
+journal without resolving again. A redirected project root is rejected before
+locking its replacement. The command writer remains disabled until command,
+import, copied-source, and result integration are complete.
 
 ## Commands
 

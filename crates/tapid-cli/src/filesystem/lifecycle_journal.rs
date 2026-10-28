@@ -151,7 +151,7 @@ impl LifecycleJournal {
     pub(crate) fn prepare_metadata(
         project: &Path,
         owner: &str,
-        outputs: Vec<(String, Option<Vec<u8>>, Vec<u8>)>,
+        mut outputs: Vec<(String, Option<Vec<u8>>, Vec<u8>)>,
     ) -> Result<Self, String> {
         if !valid_owner(owner) || has_pending(project)? {
             return Err(
@@ -166,6 +166,9 @@ impl LifecycleJournal {
         if outputs.len() > 1024 || total.is_none_or(|total| total > MAX_SNAPSHOT_BYTES) {
             return Err("metadata output set exceeds size limit".into());
         }
+        // Callers provide an output set. Persist its canonical order here so
+        // every writer shares recovery's ordering and duplicate-path rules.
+        outputs.sort_by(|left, right| left.0.cmp(&right.0));
         let record = Record {
             version: 4,
             kind: Some(TransactionKind::Metadata),

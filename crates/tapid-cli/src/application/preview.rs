@@ -1,5 +1,5 @@
 //! Read-only dependency inspection. Results are observations, never executable plans.
-mod inputs;
+use super::inputs;
 use super::{
     install::InstallMode,
     outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError},
