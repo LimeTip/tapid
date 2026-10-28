@@ -218,8 +218,29 @@ without binding, connecting, or resolving a hostname. Host socket creation must
 succeed; contained creation is recorded as successful or permission denied, and
 other provider errors fail the control. Socket creation alone does not establish
 network access or denial. Native results are pending. This baseline does not
-test a capability-free token, enumerate readable registry values, or justify
-removing `registryRead`; those remain closure work before runtime identity.
+enumerate readable registry values or justify removing `registryRead`.
+
+The nonignored runner library control
+`lpac_provider_initialization_compares_registry_read_and_capability_free_tokens`
+adds the capability-free comparison through the same private suspended-launch
+implementation. Production launch entry points still require `registryRead`.
+The control copies the Rust test executable into a disposable `TempProject`,
+proves host socket creation, applies the existing explicit filesystem grants,
+and checks the actual suspended token has exactly one or zero capabilities.
+Both variants retain LPAC access verification and Job assignment before resume,
+bounded output/time, empty-Job confirmation, grant restoration and profile cleanup.
+It reuses the baseline's IPv4/IPv6 provider fixture; only the capability-free
+variant additionally records `WSAEPROVIDERFAILEDINIT` as
+`socket-provider-unavailable`. That diagnostic is a compatibility obstacle,
+not successful socket initialization or an authority-denial acceptance claim.
+Unexpected failures still fail the control. No bind, connection or DNS operation
+is performed, and this low-level probe does not issue a containment receipt or
+exercise the network guard/broker. Native Windows observations remain pending.
+Run through `scripts/dev.ts test -p tapid-runner --lib --locked
+lpac_provider_initialization_compares_registry_read_and_capability_free_tokens -- --show-output`
+on Windows. A successful compile or a zero-test invocation on another platform
+cannot decide whether the capability is removable. Disposable registry-value
+controls, broker closure and complete runtime binding remain implementation work.
 
 ## Private Windows dependency write and key validation
 

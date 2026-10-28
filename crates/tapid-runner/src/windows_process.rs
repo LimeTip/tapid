@@ -8,7 +8,7 @@ struct ProcThreadAttributeList {
     initialized: bool,
     // UpdateProcThreadAttribute retains these pointers until the list is deleted.
     security_capabilities: Box<SECURITY_CAPABILITIES>,
-    _registry_read: super::token::RegistryReadCapability,
+    _registry_read: Option<super::token::RegistryReadCapability>,
     all_application_packages_policy: Box<u32>,
     inherited_handles: Option<Box<[HANDLE]>>,
 }
@@ -17,9 +17,8 @@ impl ProcThreadAttributeList {
     fn for_appcontainer(
         container: &WindowsAppContainer,
         inherited_handles: &[HANDLE],
+        registry_read: Option<super::token::RegistryReadCapability>,
     ) -> Result<Self, ExecutionError> {
-        // Derive before initializing native list storage so failure needs no list cleanup.
-        let registry_read = super::token::RegistryReadCapability::new()?;
         let inherited_handles =
             (!inherited_handles.is_empty()).then(|| inherited_handles.to_vec().into_boxed_slice());
         let attribute_count = if inherited_handles.is_some() { 3 } else { 2 };
@@ -43,8 +42,10 @@ impl ProcThreadAttributeList {
         }
         let security_capabilities = Box::new(SECURITY_CAPABILITIES {
             AppContainerSid: container.sid(),
-            Capabilities: registry_read.entry(),
-            CapabilityCount: 1,
+            Capabilities: registry_read
+                .as_ref()
+                .map_or(null_mut(), |capability| capability.entry()),
+            CapabilityCount: u32::from(registry_read.is_some()),
             Reserved: 0,
         });
         let attributes = Self {
@@ -369,6 +370,7 @@ impl WindowsSuspendedChild {
             environment,
             current_directory,
             None,
+            Some(super::token::RegistryReadCapability::new()?),
         )
     }
 
@@ -387,6 +389,7 @@ impl WindowsSuspendedChild {
             environment,
             current_directory,
             Some(stdio),
+            Some(super::token::RegistryReadCapability::new()?),
         )
     }
 
@@ -397,6 +400,7 @@ impl WindowsSuspendedChild {
         environment: &[u16],
         current_directory: &[u16],
         stdio: Option<&mut WindowsStdioPipes>,
+        registry_read: Option<super::token::RegistryReadCapability>,
     ) -> Result<Self, ExecutionError> {
         if !is_single_nul_terminated(application)
             || !is_single_nul_terminated(command_line)
@@ -418,7 +422,11 @@ impl WindowsSuspendedChild {
         } else {
             &[]
         };
-        let attributes = ProcThreadAttributeList::for_appcontainer(container, handles_to_inherit)?;
+        let attributes = ProcThreadAttributeList::for_appcontainer(
+            container,
+            handles_to_inherit,
+            registry_read,
+        )?;
         let mut mutable_command_line = command_line.to_vec();
         // SAFETY: zero is the documented default for optional STARTUPINFOEXW fields.
         let mut startup = unsafe { zeroed::<STARTUPINFOEXW>() };
@@ -735,3 +743,11 @@ fn is_double_nul_terminated(buffer: &[u16]) -> bool {
                     .is_some_and(|equals| equals > 0)
         })
 }
+
+#[cfg(test)]
+#[path = "../tests/support/windows_provider.rs"]
+mod provider_probe;
+
+#[cfg(test)]
+#[path = "windows_process_tests.rs"]
+mod authority_tests;

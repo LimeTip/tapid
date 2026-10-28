@@ -16,6 +16,8 @@ use tapid_runner::{
 mod windows_acl;
 #[path = "support/windows_node.rs"]
 mod windows_node;
+#[path = "support/windows_provider.rs"]
+mod windows_provider;
 
 fn temporary_project(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -182,54 +184,7 @@ fn windows_socket_provider_initialization_with_registry_read_capability() {
 
 #[test]
 fn windows_socket_provider_probe_helper() {
-    use windows_sys::Win32::Networking::WinSock::{
-        AF_INET, AF_INET6, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM, WSA_FLAG_NO_HANDLE_INHERIT,
-        WSACleanup, WSADATA, WSAEACCES, WSAGetLastError, WSASocketW, WSAStartup, closesocket,
-    };
-    let mode = std::env::var("TAPID_TEST_MARKER").unwrap_or_default();
-    if !matches!(mode.as_str(), "provider-host" | "provider-contained") {
-        return;
-    }
-    // SAFETY: WSADATA is an output structure; successful startup is balanced below.
-    let mut data: WSADATA = unsafe { std::mem::zeroed() };
-    assert_eq!(
-        unsafe { WSAStartup(0x202, &mut data) },
-        0,
-        "provider startup"
-    );
-    println!("provider:startup:ok");
-    for family in [AF_INET, AF_INET6] {
-        // SAFETY: fixed TCP parameters, no protocol pointer or inherited handle.
-        // No bind, connect, DNS lookup, or external network service is used.
-        let socket = unsafe {
-            WSASocketW(
-                family as i32,
-                SOCK_STREAM,
-                IPPROTO_TCP,
-                std::ptr::null(),
-                0,
-                WSA_FLAG_NO_HANDLE_INHERIT,
-            )
-        };
-        if socket == INVALID_SOCKET {
-            // SAFETY: read the error immediately after the failed socket operation.
-            let error = unsafe { WSAGetLastError() };
-            assert_eq!(mode, "provider-contained", "host positive control: {error}");
-            assert_eq!(error, WSAEACCES, "unexpected provider failure");
-            println!("provider:contained:socket-denied:{family}");
-        } else {
-            // SAFETY: close exactly the socket returned above.
-            assert_eq!(unsafe { closesocket(socket) }, 0);
-            let label = if mode == "provider-host" {
-                "host"
-            } else {
-                "contained"
-            };
-            println!("provider:{label}:socket-created:{family}");
-        }
-    }
-    // SAFETY: balances this helper's successful WSAStartup call.
-    assert_eq!(unsafe { WSACleanup() }, 0);
+    windows_provider::probe(&std::env::var("TAPID_TEST_MARKER").unwrap_or_default());
 }
 
 #[test]
