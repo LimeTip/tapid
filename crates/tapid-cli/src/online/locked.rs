@@ -130,11 +130,7 @@ pub(crate) fn prepare_native_locked(
     offline: bool,
     profile: tapid_lockfile::InstallProfile,
 ) -> Result<selection::PreparedNativeProfile, OperationalError> {
-    selection::validate_native_roots(
-        selection,
-        &crate::commands::manifest::read_manifest_typed(&project.join("package.json"))?,
-        config,
-    )?;
+    selection::validate_native_roots(selection, project, config)?;
     with_locked_archive_fetch(config, fixture_path, project, |fetch| {
         selection::prepare_native_replay(selection, config, store, profile, |key, url| {
             if offline {

@@ -1044,6 +1044,7 @@ fn perform_install(
         true,
         activation_lock,
         true,
+        None,
         &mut report_replay_progress,
     )?;
     crate::filesystem::activation::test_crash_at("activation_complete");
@@ -1130,7 +1131,7 @@ pub(crate) fn stage_native_profile(
     activation: &ActivationLock,
     progress: impl FnMut(Progress),
 ) -> Result<PathBuf, OperationalError> {
-    let layout = prepared.layout(profile)?;
+    let layout = prepared.layout(project, profile)?;
     let stage = stage_layout(
         project,
         project,
@@ -1171,6 +1172,7 @@ fn materialize_install(
         false,
         activation_lock,
         preserve_previous,
+        None,
         &mut progress,
     )
 }
@@ -1184,6 +1186,10 @@ fn materialize_with_lock(
     replayed: bool,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
+    profile: Option<(
+        &tapid_lockfile::NativeSelection,
+        tapid_lockfile::InstallProfile,
+    )>,
     mut progress: impl FnMut(Progress),
 ) -> Result<(), OperationalError> {
     let mut stages = Vec::new();
@@ -1213,6 +1219,18 @@ fn materialize_with_lock(
             &mut progress,
         )?;
         stages.push((project_dir.to_owned(), stage, workspace_plan.links));
+        if let Some((selection, profile)) = profile {
+            for (_, stage, _) in &stages {
+                crate::filesystem::installed_profile::stage_profile(
+                    stage,
+                    selection,
+                    profile,
+                    &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                    activation_lock.owner_line(),
+                )
+                .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+            }
+        }
         for (root, stage, links) in &stages {
             if root != project_dir {
                 crate::filesystem::lifecycle_journal::validate_member_root(project_dir, root)

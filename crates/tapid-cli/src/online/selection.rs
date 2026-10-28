@@ -5,23 +5,38 @@ use tapid_lockfile::{
     NativeSelectedPackage, NativeSelection, NativeSourceEvidence,
 };
 
-// Keep unsupported activation contracts ahead of archive access and store
-// recovery, not only ahead of linker planning. Complete selection production
-// remains available independently of materialization.
+// Registry packages cannot depend on local workspaces in this layout contract.
+// Reject that topology before fetching; member declarations are planned separately.
 fn validate_native_profile_layout(selection: &NativeSelection) -> Result<(), OperationalError> {
-    if selection.packages().values().any(|package| {
-        matches!(
-            package.source_evidence,
-            NativeSourceEvidence::Workspace { .. }
-        )
-    }) || selection
-        .materialized_declarations(tapid_lockfile::InstallProfile::default())
-        .any(|edge| edge.workspace.is_some())
-    {
-        return Err(OperationalError::new(
-            ErrorKind::Materialization,
-            "native profile workspace layout integration is required",
-        ));
+    for (key, package) in selection.packages() {
+        let identity: LockfilePackageKey = key.parse()?;
+        if identity.source.registry().is_none() && identity.source.workspace().is_none() {
+            return Err("native profiles require registry or workspace sources".into());
+        }
+        if (!package.peer_providers.is_empty() || !package.dependencies.is_empty())
+            && matches!(
+                package.source_evidence,
+                NativeSourceEvidence::Workspace { .. }
+            )
+        {
+            return Err("native workspace peer evidence is unsupported".into());
+        }
+        for target in package.peer_providers.values() {
+            if matches!(
+                selection.packages()[target].source_evidence,
+                NativeSourceEvidence::Workspace { .. }
+            ) {
+                return Err("native peer providers from workspace sources are unsupported".into());
+            }
+        }
+        for dependency in package.dependencies.values() {
+            if matches!(
+                selection.packages()[&dependency.target].source_evidence,
+                NativeSourceEvidence::Workspace { .. }
+            ) {
+                return Err("native package edges to workspace sources are unsupported".into());
+            }
+        }
     }
     Ok(())
 }
@@ -30,7 +45,7 @@ fn validate_native_profile_layout(selection: &NativeSelection) -> Result<(), Ope
 /// obtaining sources. A matching digest alone does not prove the edge claims.
 pub(super) fn validate_native_roots(
     selection: &NativeSelection,
-    manifest: &PackageManifest,
+    project: &Path,
     config: &crate::registry::RegistryConfig,
 ) -> Result<(), OperationalError> {
     let invalid = || {
@@ -39,42 +54,100 @@ pub(super) fn validate_native_roots(
             "native selection declarations do not match the complete manifest",
         )
     };
-    let edges = selection
-        .materialized_declarations(tapid_lockfile::InstallProfile::default())
-        .collect::<Vec<_>>();
-    let declarations = manifest
-        .effective_install_declarations()
-        .collect::<Vec<_>>();
-    if edges.len() != declarations.len() {
-        return Err(invalid());
-    }
-    for (kind, name, range) in declarations {
-        let (_, local) = dep_parts(name)?;
-        let expected_kind = match kind {
-            tapid_manifest::DependencyKind::Dependencies => NativeDeclarationKind::Required,
-            tapid_manifest::DependencyKind::DevDependencies => NativeDeclarationKind::Dev,
-            tapid_manifest::DependencyKind::OptionalDependencies => NativeDeclarationKind::Optional,
-            tapid_manifest::DependencyKind::PeerDependencies => {
-                unreachable!("effective declaration")
-            }
-        };
-        let edge = edges
+    let manifest = crate::commands::manifest::read_manifest_typed(&project.join("package.json"))?;
+    let workspace = workspace_materialization(project, config)?;
+    let digests = workspace
+        .locked
+        .iter()
+        .map(|member| {
+            let key: LockfilePackageKey = member.key().parse()?;
+            Ok((
+                key.source
+                    .workspace()
+                    .ok_or("missing workspace source")?
+                    .path()
+                    .to_owned(),
+                member.manifest_digest().to_owned(),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, OperationalError>>()?;
+    selection.validate_replay(&root_digest(project)?, &digests)?;
+    for (scope, manifest) in std::iter::once((None, &manifest)).chain(
+        workspace
+            .manifests
             .iter()
-            .find(|edge| {
-                edge.workspace.is_none()
-                    && edge.name == local.as_str()
-                    && std::mem::discriminant(&edge.kind) == std::mem::discriminant(&expected_kind)
-            })
-            .ok_or_else(invalid)?;
-        let key: LockfilePackageKey = edge.target.parse()?;
-        let requirement = range.parse::<Requirement>().map_err(|_| invalid())?;
-        let registry = registry_for_requirement(config, name, &requirement)?;
-        if key.source.package_source().as_ref() != Some(&registry)
-            || &key.name != requirement.package_name(&local)
-            || !requirement.matches_locked_version(&key.version)
-        {
+            .map(|(path, manifest)| (Some(path.as_str()), manifest)),
+    ) {
+        if scope.is_some() && !manifest.peer_dependencies().is_empty() {
+            return Err("native workspace peer evidence is unsupported".into());
+        }
+        let edges = selection
+            .materialized_declarations(tapid_lockfile::InstallProfile::default())
+            .filter(|edge| edge.workspace.as_deref() == scope)
+            .collect::<Vec<_>>();
+        let declarations = manifest
+            .effective_install_declarations()
+            .collect::<Vec<_>>();
+        if edges.len() != declarations.len() {
             return Err(invalid());
         }
+        for (kind, name, range) in declarations {
+            let (_, local) = dep_parts(name)?;
+            let expected_kind = match kind {
+                tapid_manifest::DependencyKind::Dependencies => NativeDeclarationKind::Required,
+                tapid_manifest::DependencyKind::DevDependencies => NativeDeclarationKind::Dev,
+                tapid_manifest::DependencyKind::OptionalDependencies => {
+                    NativeDeclarationKind::Optional
+                }
+                tapid_manifest::DependencyKind::PeerDependencies => {
+                    unreachable!("effective declaration")
+                }
+            };
+            let edge = edges
+                .iter()
+                .find(|edge| {
+                    edge.name == local.as_str()
+                        && std::mem::discriminant(&edge.kind)
+                            == std::mem::discriminant(&expected_kind)
+                })
+                .ok_or_else(invalid)?;
+            let key: LockfilePackageKey = edge.target.parse()?;
+            if let Some((source, version)) = workspace.members.get(name) {
+                if key.source.workspace() != Some(source)
+                    || !workspace_requirement(range, version)?.matches(version)
+                {
+                    return Err(invalid());
+                }
+            } else {
+                let requirement = range.parse::<Requirement>().map_err(|_| invalid())?;
+                let registry = registry_for_requirement(config, name, &requirement)?;
+                if key.source.package_source().as_ref() != Some(&registry)
+                    || &key.name != requirement.package_name(&local)
+                    || !requirement.matches_locked_version(&key.version)
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
+    let expected_members = workspace
+        .locked
+        .iter()
+        .map(LockedWorkspacePackage::key)
+        .collect::<BTreeSet<_>>();
+    let selected_members = selection
+        .packages()
+        .iter()
+        .filter(|(_, package)| {
+            matches!(
+                package.source_evidence,
+                NativeSourceEvidence::Workspace { .. }
+            )
+        })
+        .map(|(key, _)| key.clone())
+        .collect::<BTreeSet<_>>();
+    if selected_members != expected_members {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -131,14 +204,24 @@ impl PreparedNativeProfile {
         lock.set_roots(
             self.selection
                 .materialized_declarations(profile)
+                .filter(|edge| self.sources.contains_key(&edge.target))
                 .map(|edge| &edge.target),
         )?;
-        lock.set_root_bindings(
-            self.selection
-                .materialized_declarations(profile)
-                .map(|edge| (edge.name.clone(), edge.target.clone()))
-                .collect(),
-        )?;
+        if !self
+            .selection
+            .materialized_declarations(tapid_lockfile::InstallProfile::default())
+            .any(|edge| edge.workspace.is_some())
+        {
+            lock.set_root_bindings(
+                self.selection
+                    .materialized_declarations(profile)
+                    .filter(|edge| {
+                        edge.workspace.is_none() && self.sources.contains_key(&edge.target)
+                    })
+                    .map(|edge| (edge.name.clone(), edge.target.clone()))
+                    .collect(),
+            )?;
+        }
         Ok(lock)
     }
     /// Build linker inputs from verified sources without converting the complete
@@ -146,6 +229,7 @@ impl PreparedNativeProfile {
     #[allow(dead_code)]
     pub(crate) fn layout(
         &self,
+        project: &Path,
         profile: tapid_lockfile::InstallProfile,
     ) -> Result<PreparedLayout, OperationalError> {
         let retained = self.selection.materialized_keys(profile)?;
@@ -158,7 +242,18 @@ impl PreparedNativeProfile {
         // Workspace paths must be planned with member generations and local links;
         // never pass them through the registry-only source layout.
         validate_native_profile_layout(&self.selection)?;
-        if self.sources.keys().cloned().collect::<BTreeSet<_>>() != retained {
+        if self.sources.keys().cloned().collect::<BTreeSet<_>>()
+            != retained
+                .iter()
+                .filter(|key| {
+                    !matches!(
+                        self.selection.packages()[*key].source_evidence,
+                        NativeSourceEvidence::Workspace { .. }
+                    )
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        {
             return Err(OperationalError::new(
                 ErrorKind::Materialization,
                 "native profile requires every retained verified source",
@@ -167,7 +262,7 @@ impl PreparedNativeProfile {
         let mut instances = Vec::new();
         let mut keys = BTreeMap::new();
         let mut trees = BTreeMap::new();
-        for encoded in &retained {
+        for encoded in self.sources.keys() {
             let identity: LockfilePackageKey = encoded.parse()?;
             let source = &self.sources[encoded];
             let instance = PackageInstance {
@@ -204,15 +299,89 @@ impl PreparedNativeProfile {
         let root_dependencies = self
             .selection
             .materialized_declarations(profile)
+            .filter(|edge| edge.workspace.is_none() && keys.contains_key(&edge.target))
             .map(|edge| binding(&edge.name, &edge.target))
             .collect::<Result<Vec<_>, _>>()?;
         let mut dependency_edges = Vec::new();
-        for parent in &retained {
+        for parent in self.sources.keys() {
             for (name, target) in self.selection.materialized_dependencies(parent, profile)? {
                 dependency_edges.push(NamedDependencyEdge {
                     parent: keys[parent].clone(),
                     dependency: binding(name, target)?,
                 });
+            }
+        }
+        let mut workspace = WorkspaceInstallPlan::default();
+        let links_for =
+            |scope: Option<&str>, root: &Path| -> Result<WorkspaceLinkPlan, OperationalError> {
+                let mut links = Vec::new();
+                for edge in self
+                    .selection
+                    .materialized_declarations(profile)
+                    .filter(|edge| edge.workspace.as_deref() == scope)
+                {
+                    if let NativeSourceEvidence::Workspace { source } =
+                        &self.selection.packages()[&edge.target].source_evidence
+                    {
+                        let mut plan = plan_workspace_links(
+                            project,
+                            [WorkspacePackage {
+                                root: source.path().into(),
+                                name: edge
+                                    .name
+                                    .parse()
+                                    .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                                version: source
+                                    .version()
+                                    .parse()
+                                    .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                            }],
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let mut link = plan.links.remove(0);
+                        link.target = root
+                            .join("node_modules")
+                            .join(edge.name.split('/').collect::<PathBuf>());
+                        links.push(link);
+                    }
+                }
+                Ok(WorkspaceLinkPlan { links })
+            };
+        workspace.links = links_for(None, project)?;
+        // Every discovered member gets a generation, including members with no
+        // enabled declarations, so transitions clear old development bindings.
+        if self.selection.packages().values().any(|package| {
+            matches!(
+                package.source_evidence,
+                NativeSourceEvidence::Workspace { .. }
+            )
+        }) {
+            let discovered = workspace_materialization(
+                project,
+                &crate::registry::RegistryConfig::load(project)
+                    .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?,
+            )?;
+            for path in discovered.manifests.keys() {
+                let root = project.join(path);
+                let roots = self
+                    .selection
+                    .materialized_declarations(profile)
+                    .filter(|edge| {
+                        edge.workspace.as_deref() == Some(path) && keys.contains_key(&edge.target)
+                    })
+                    .map(|edge| binding(&edge.name, &edge.target))
+                    .collect::<Result<Vec<_>, _>>()?;
+                workspace.members.insert(
+                    root.clone(),
+                    WorkspaceMemberInstall {
+                        input: NamedLayoutInput {
+                            instances: instances.clone(),
+                            root_dependencies: roots,
+                            dependency_edges: dependency_edges.clone(),
+                        },
+                        links: links_for(Some(path), &root)?,
+                    },
+                );
             }
         }
         Ok(PreparedLayout {
@@ -222,7 +391,7 @@ impl PreparedNativeProfile {
                 dependency_edges,
             },
             trees,
-            workspace: WorkspaceInstallPlan::default(),
+            workspace,
         })
     }
 }
@@ -720,7 +889,7 @@ mod tests {
             Err(tapid_store::IngestError::TreeMissing(_))
         ));
         let layout = prepared
-            .layout(tapid_lockfile::InstallProfile::production())
+            .layout(project.path(), tapid_lockfile::InstallProfile::production())
             .unwrap();
         assert_eq!(layout.input.instances.len(), 1);
         assert_eq!(layout.input.root_dependencies.len(), 1);
@@ -989,7 +1158,7 @@ mod tests {
             lifecycle.packages()[&key].tree_digest(),
             replayed.sources[&key].digest.to_string()
         );
-        let layout = replayed.layout(full).unwrap();
+        let layout = replayed.layout(project.path(), full).unwrap();
         assert_eq!(layout.trees[&key], replayed.sources[&key].tree);
         assert_eq!(selection.to_json().unwrap(), before);
         drop(replayed);

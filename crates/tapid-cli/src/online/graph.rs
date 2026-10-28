@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn native_profile_workspace_rejection_precedes_artifact_access_and_store_mutation() {
+    fn native_workspace_missing_artifact_does_not_activate_or_publish() {
         let project = tapid_test_support::TempProject::new("profile-workspace-preflight").unwrap();
         let text = r#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"runtime":"1"}}"#;
         project.write("package.json", text.as_bytes()).unwrap();
@@ -523,12 +523,12 @@ mod tests {
                 tapid_lockfile::InstallProfile::production(),
             )
             .err()
-            .expect("workspace activation must be supported before preparation");
+            .expect("missing workspace registry artifact must fail preparation");
         assert!(
-            error.to_string().contains("workspace layout integration"),
+            error.to_string().contains("cannot read artifact"),
             "{error}"
         );
-        assert!(!store.root().exists());
+        assert!(!store.root().join("trees").exists());
         let selection = resolved
             .native_selection(project.path(), &manifest, &config)
             .unwrap();
@@ -537,15 +537,15 @@ mod tests {
             &config,
             &store,
             tapid_lockfile::InstallProfile::production(),
-            |_, _| panic!("unsupported workspace replay must not access archives"),
+            |_, _| Err("cannot read artifact: deliberately unavailable".into()),
         )
         .err()
-        .expect("unsupported workspace replay must fail preflight");
+        .expect("missing workspace registry artifact must fail replay");
         assert!(
-            error.to_string().contains("workspace layout integration"),
+            error.to_string().contains("cannot read artifact"),
             "{error}"
         );
-        assert!(!store.root().exists());
+        assert!(!store.root().join("trees").exists());
         assert!(!project.path().join("node_modules").exists());
         assert!(!project.path().join("tapid.lock").exists());
     }

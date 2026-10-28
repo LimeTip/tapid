@@ -76,13 +76,18 @@ replay output-list check before activation; removing policy cannot silently
 replace a derived tree with its source tree. Retained hooks use the existing exact
 approval, recipe and store-local attestation verifier before journaled activation;
 replay never executes a missing build. Authenticated replay requires the supported
-Linux toolchain identity. Workspace activation and selection mutation reject pending integration.
+Linux toolchain identity. Selection mutation remains unsupported.
 Fresh profile preparation uses the existing lifecycle store transaction for
 approved hooks and records verified source and derived-output evidence in the
 complete selection. Omitted-only approvals require no archives or tools; failed
 authorization, execution or activation retains project rollback. Hook execution
-requires the supported Linux toolchain and containment backend. This is not
-workspace install-profile support. Unlike `Lockfile`, it
+requires the supported Linux toolchain and containment backend. Native workspace
+profiles validate complete member snapshots and declaration kinds before archive
+access, keep registry bindings and local links scoped to each manifest, and stage
+every member with the root in the existing recovery transaction. Profiles apply
+to all discovered members, including members whose enabled declarations are empty.
+Workspace peer declarations and package edges to workspace sources remain
+unsupported and reject before source preparation. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.
 `new` accepts typed declaration, package, edge and source-evidence inputs;

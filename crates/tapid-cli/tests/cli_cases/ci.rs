@@ -961,3 +961,338 @@ fn fresh_production_install_supports_offline_ci_with_unchanged_selection() {
     );
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
 }
+
+#[test]
+fn native_workspace_profiles_keep_scoped_bindings_and_recover_member_activation() {
+    for point in ["workspace_member_activated", "commit_decision"] {
+        let project = tapid_test_support::TempProject::new("native-workspace-profile").unwrap();
+        let root = br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"member":"workspace:*"}}"#;
+        let member = br#"{"name":"member","version":"1.0.0","dependencies":{"runtime":"npm:shared@1.0.0"},"devDependencies":{"devtool":"npm:shared@1.0.0"}}"#;
+        project.write("package.json", root).unwrap();
+        project
+            .write("packages/member/package.json", member)
+            .unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/npm-import/registry.json")).unwrap();
+        let record = fixture["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "shared" && p["version"] == "1.0.0")
+            .unwrap();
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let key = tapid_lockfile::LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            "shared".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string();
+        let source =
+            tapid_lockfile::LocalWorkspaceSource::new("packages/member", "member", "1.0.0")
+                .unwrap();
+        let local = tapid_lockfile::LockfilePackageKey::workspace(source.clone()).to_string();
+        let selection = serde_json::json!({
+            "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+            "rootManifestDigest":format!("sha256-{:x}",sha2::Sha256::digest(root)),
+            "workspaceManifestDigests":{"packages/member":format!("sha256-{:x}",sha2::Sha256::digest(member))},
+            "declarations":[{"workspace":null,"name":"member","kind":"required","target":local},{"workspace":"packages/member","name":"runtime","kind":"required","target":key},{"workspace":"packages/member","name":"devtool","kind":"dev","target":key}],
+            "packages":{local:{"sourceEvidence":{"state":"workspace","source":source},"dependencies":{},"peerProviders":{}},key:{"sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/shared-1.0.0.tgz","artifactIntegrity":record["integrity"]},"dependencies":{},"peerProviders":{}}}
+        }).to_string();
+        project.write("tapid.lock", selection.as_bytes()).unwrap();
+        let store = project.path().join("store");
+        let args = [
+            "ci",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        let first = run(project.path(), &args);
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/member/package.json")
+                .is_file()
+        );
+        assert!(!project.path().join("node_modules/runtime").exists());
+        assert!(
+            project
+                .path()
+                .join("packages/member/node_modules/runtime/package.json")
+                .is_file()
+        );
+        assert!(
+            project
+                .path()
+                .join("packages/member/node_modules/devtool/package.json")
+                .is_file()
+        );
+        let mut production = args.to_vec();
+        production.push("--production");
+        let crash = run_with_env(project.path(), &production, "TAPID_TEST_CRASH_POINT", point);
+        assert!(!crash.status.success(), "{point} was not reached");
+        let recovery = run_with_env(project.path(), &production, "TAPID_TEST_RECOVER_ONLY", "1");
+        assert!(
+            recovery.status.success(),
+            "{}",
+            String::from_utf8_lossy(&recovery.stderr)
+        );
+        let committed = point == "commit_decision";
+        assert_eq!(
+            project
+                .path()
+                .join("packages/member/node_modules/devtool/package.json")
+                .is_file(),
+            !committed
+        );
+        for base in ["", "packages/member/"] {
+            let profile: serde_json::Value = serde_json::from_slice(
+                &fs::read(
+                    project
+                        .path()
+                        .join(format!("{base}node_modules/.tapid-profile.json")),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(profile["includeDev"], !committed);
+            assert_eq!(
+                fs::read_to_string(
+                    project
+                        .path()
+                        .join(format!("{base}node_modules/.tapid-generation"))
+                )
+                .unwrap(),
+                profile["generation"].as_str().unwrap()
+            );
+        }
+        let installed = run(project.path(), &production);
+        assert!(
+            installed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&installed.stderr)
+        );
+        assert!(
+            !project
+                .path()
+                .join("packages/member/node_modules/devtool")
+                .exists()
+        );
+        let restored = run(project.path(), &args);
+        assert!(
+            restored.status.success(),
+            "{}",
+            String::from_utf8_lossy(&restored.stderr)
+        );
+        assert!(
+            project
+                .path()
+                .join("packages/member/node_modules/devtool/package.json")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            selection.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn fresh_workspace_production_replays_offline_and_rejects_changed_member_evidence() {
+    let project = tapid_test_support::TempProject::new("fresh-workspace-production").unwrap();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"member":"workspace:*"}}"#).unwrap();
+    project.write("packages/member/package.json", br#"{"name":"member","version":"1.0.0","dependencies":{"runtime":"npm:shared@1.0.0"},"devDependencies":{"devtool":"npm:shared@1.0.0"},"optionalDependencies":{"helper":"workspace:*"}}"#).unwrap();
+    project.write("packages/helper/package.json", br#"{"name":"helper","version":"1.0.0","devDependencies":{"build":"npm:shared@1.0.0"}}"#).unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/npm-import/registry.json")).unwrap();
+    for record in fixture["packages"].as_array_mut().unwrap() {
+        record["artifactUrl"] = format!(
+            "https://registry.npmjs.org/{}-{}.tgz",
+            record["name"].as_str().unwrap(),
+            record["version"].as_str().unwrap()
+        )
+        .into();
+    }
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let args = [
+        "install",
+        "--production",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    let installed = run(project.path(), &args);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(
+        project
+            .path()
+            .join("packages/member/node_modules/helper/package.json")
+            .is_file()
+    );
+    assert!(!project.path().join("node_modules/helper").exists());
+    assert!(
+        !project
+            .path()
+            .join("packages/helper/node_modules/build")
+            .exists()
+    );
+    let omitted = run(
+        project.path(),
+        &[
+            "ci",
+            "--production",
+            "--omit",
+            "optional",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        omitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&omitted.stderr)
+    );
+    assert!(
+        !project
+            .path()
+            .join("packages/member/node_modules/helper")
+            .exists()
+    );
+    assert!(
+        project
+            .path()
+            .join("packages/helper/node_modules/.tapid-profile.json")
+            .is_file()
+    );
+    let member_marker = fs::read(project.path().join("packages/member/.tapid-managed")).unwrap();
+    fs::remove_file(project.path().join("packages/member/.tapid-managed")).unwrap();
+    project
+        .write("packages/member/node_modules/KEEP", b"user-owned")
+        .unwrap();
+    let rejected = run(project.path(), &args);
+    assert!(!rejected.status.success());
+    assert_eq!(
+        fs::read(project.path().join("packages/member/node_modules/KEEP")).unwrap(),
+        b"user-owned"
+    );
+    project
+        .write("packages/member/.tapid-managed", &member_marker)
+        .unwrap();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    fs::remove_file(project.path().join("registry.json")).unwrap();
+    let replay = run(
+        project.path(),
+        &[
+            "ci",
+            "--offline",
+            "--production",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert!(
+        !project
+            .path()
+            .join("packages/member/node_modules/devtool")
+            .exists()
+    );
+    let full = run(
+        project.path(),
+        &["ci", "--offline", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(
+        full.status.success(),
+        "{}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    assert!(
+        project
+            .path()
+            .join("packages/member/node_modules/devtool/package.json")
+            .is_file()
+    );
+    assert!(
+        project
+            .path()
+            .join("packages/helper/node_modules/build/package.json")
+            .is_file()
+    );
+    assert!(
+        project
+            .path()
+            .join("packages/member/node_modules/helper/package.json")
+            .is_file()
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    let root_profile = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let member_profile = fs::read(
+        project
+            .path()
+            .join("packages/member/node_modules/.tapid-profile.json"),
+    )
+    .unwrap();
+    // Matching digests alone do not authorize forged member declaration kinds.
+    let mut forged: serde_json::Value = serde_json::from_slice(&lock).unwrap();
+    for declaration in forged["declarations"].as_array_mut().unwrap() {
+        if declaration["name"] == "devtool" {
+            declaration["kind"] = "required".into();
+        }
+    }
+    project
+        .write("tapid.lock", forged.to_string().as_bytes())
+        .unwrap();
+    let rejected = run(project.path(), &args);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("declarations do not match"));
+    project.write("tapid.lock", &lock).unwrap();
+    project
+        .write(
+            "packages/member/package.json",
+            br#"{"name":"member","version":"2.0.0"}"#,
+        )
+        .unwrap();
+    let rejected = run(project.path(), &args);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("workspace membership or member manifest changed")
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        root_profile
+    );
+    assert_eq!(
+        fs::read(
+            project
+                .path()
+                .join("packages/member/node_modules/.tapid-profile.json")
+        )
+        .unwrap(),
+        member_profile
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+}

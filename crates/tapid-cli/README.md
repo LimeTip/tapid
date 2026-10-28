@@ -65,10 +65,13 @@ retain their existing override precedence. These options select materialization,
 not a smaller lockfile. Human and JSON success output report the native profile.
 
 Non-full profiles require a complete native schema-11 selection, or a fresh
-standalone registry install without an existing lock. Existing legacy and imported
-locks reject non-full profiles rather than infer transitive kinds. Native workspace
-activation, selection mutations and execution overrides remain unsupported and
-reject before activation. Profile options conflict with `--dry-run`. Frozen and
+registry install without an existing lock. Existing legacy and imported
+locks reject non-full profiles rather than infer transitive kinds. Profiles apply
+to the root and every discovered workspace member: each scope keeps its own
+registry bindings and enabled local workspace links. Root and member layouts and
+profile metadata recover together. Native workspace peer declarations, package
+edges to workspace sources, selection mutations and execution overrides remain
+unsupported and reject before activation. Profile options conflict with `--dry-run`. Frozen and
 CI replay preserve selection bytes; offline replay additionally requires verified
 source evidence and locally available content. Fresh default-full installs retain
 the existing lock format. Full replay of a schema-11 lock restores omitted kinds.

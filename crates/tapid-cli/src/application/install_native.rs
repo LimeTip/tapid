@@ -16,23 +16,6 @@ pub(super) fn replay(
     fixture: Option<&Path>,
     progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
-    let digest = online::root_digest(project)?;
-    // Member activation is not yet supported here. Never guess a missing member
-    // snapshot, or treat workspace trees as registry artifacts.
-    selection.validate_replay(&digest, &BTreeMap::new())?;
-    for key in selection.packages().keys() {
-        if key
-            .parse::<tapid_lockfile::LockfilePackageKey>()?
-            .source
-            .registry()
-            .is_none()
-        {
-            return Err(OperationalError::new(
-                ErrorKind::InvalidRequest,
-                "native selection replay currently requires registry-only sources",
-            ));
-        }
-    }
     // Only materialized sources reach the shared lifecycle verifier. It checks
     // exact approvals and authenticated cached outputs without executing hooks.
     let config = crate::registry::RegistryConfig::load(project)
@@ -138,7 +121,10 @@ fn activate(
         .set_store_root(store.root())
         .map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
     let mut lock = prepared.lifecycle_sources(&digest, profile)?;
-    let mut layout = prepared.layout(profile)?;
+    let mut layout = prepared.layout(project, profile)?;
+    journal
+        .set_member_roots(layout.workspace.members.keys())
+        .map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
     let mut snapshots = Vec::new();
     // Replay authenticates existing outputs without executing hooks; fresh
     // preparation stages approved outputs in the source store transaction.
@@ -179,6 +165,11 @@ fn activate(
         }
         prepared.selection.record_verified_sources(evidence)?;
     }
+    // Lifecycle preparation can replace source trees with authenticated outputs.
+    // Every scoped input must use those same verified instances.
+    for member in layout.workspace.members.values_mut() {
+        member.input.instances = layout.input.instances.clone();
+    }
     let selection = &prepared.selection;
     session.mutated = true;
     if !replayed {
@@ -194,36 +185,24 @@ fn activate(
         .publish_for_lifecycle(&journal.coordinator_path())?;
     crate::filesystem::activation::test_crash_at("store_published");
     layout.rebase(&publication);
-    let stage = stage_layout(
+    let package_count = layout.input.instances.len();
+    let member_roots = layout.workspace.members.keys().cloned().collect::<Vec<_>>();
+    materialize_with_lock(
         project,
-        project,
-        &layout.input,
-        &layout.trees,
-        &layout.workspace.links,
+        layout.input,
+        layout.trees,
+        layout.workspace,
         true,
         activation,
+        true,
+        Some((selection, profile)),
         &mut progress,
     )?;
-    let activation_result = (|| {
-        crate::filesystem::installed_profile::stage_profile(
-            &stage,
-            selection,
-            profile,
-            &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-            activation.owner_line(),
-        )
-        .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
-        crate::filesystem::activation::activate_node_modules_with_preflight(
-            project,
-            &stage,
-            activation,
-            true,
-            || Ok(()),
-        )
-        .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))
-    })();
-    let _ = fs::remove_dir_all(&stage);
-    activation_result?;
+    session.outcome.changed_files.extend(
+        member_roots
+            .into_iter()
+            .map(|member| member.join("node_modules")),
+    );
     session
         .outcome
         .changed_files
@@ -242,5 +221,5 @@ fn activate(
     journal
         .finish()
         .map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
-    Ok((layout.input.instances.len(), replayed))
+    Ok((package_count, replayed))
 }
