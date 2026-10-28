@@ -495,3 +495,21 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Local packing
+
+`tapid --json pack [directory] --dry-run [--output path]` and creation with required
+`--output path` use schema version 1, operation `pack`. Preview is unchanged;
+creation is committed; post-activation staging cleanup failure is
+`committed_cleanup_pending`. Handled failures have `data: null` while retaining
+completed activation state.
+
+Successful data contains `name`, `version`, `preview`, optional lossless native
+`destination`, complete ordered `files` (`path`, `size`, `sha256`, numeric `mode`),
+`file_count`, `content_bytes`, `archive` (`size`, `sha256`),
+`selection_policy_version: 1`, `gitignore_not_used`, and
+`snapshot.consistency: "not_atomic"`. Inventory paths retain exact accepted spelling
+without truncation or sanitization. They are package-relative; the tar encoder adds
+`package/`. `gitignore_not_used` reports a root `.gitignore` without root `.npmignore`;
+`.gitignore` never filters selection. Preview digests describe captured bytes for that
+invocation only, not a snapshot or authorization for a later creation.

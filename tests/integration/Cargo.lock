@@ -1288,8 +1288,11 @@ dependencies = [
 name = "tapid-publish"
 version = "0.0.5"
 dependencies = [
+ "flate2",
  "sha2",
  "tapid-core",
+ "tapid-manifest",
+ "tar",
 ]
 
 [[package]]

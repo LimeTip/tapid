@@ -1493,6 +1493,7 @@ dependencies = [
  "tapid-linker",
  "tapid-lockfile",
  "tapid-manifest",
+ "tapid-publish",
  "tapid-registry-client",
  "tapid-release-client",
  "tapid-resolver",
@@ -1590,9 +1591,13 @@ dependencies = [
 name = "tapid-publish"
 version = "0.0.5"
 dependencies = [
+ "flate2",
+ "serde_json",
  "sha2",
  "tapid-core",
+ "tapid-manifest",
  "tapid-test-support",
+ "tar",
 ]
 
 [[package]]

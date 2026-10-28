@@ -6,7 +6,9 @@ mod cache;
 mod dependency;
 mod explain;
 mod outdated;
+mod pack;
 mod preview;
+pub(crate) use pack::pack;
 mod tools;
 mod why;
 

@@ -197,3 +197,19 @@ checkouts model worktree consumers of the same cache; they do not invoke Git.
 These are deterministic contract tests, not measurements of an external agent's
 reasoning or model tool selection. Existing transaction and containment tests
 remain responsible for their broader platform and attack-path coverage.
+
+## npm archive interoperability
+
+The native test matrix provisions integrity-locked npm 10.9.2 with scripts disabled
+in `tests/npm-pack-interop`, then runs the required named lane on each platform:
+
+```sh
+npm ci --prefix tests/npm-pack-interop --ignore-scripts --no-audit --no-fund
+TAPID_TEST_NODE="$(node -p 'process.execPath')" node --experimental-strip-types scripts/dev.ts test -p tapid-publish --test npm_interop --locked -- --ignored
+```
+
+The explicit lane fails if provisioning or absolute Node configuration is missing.
+Ordinary capability tests do not require this fixture. Runtime assertions use isolated
+homes/configuration/cache/temp paths and offline scripts-disabled npm inspection and
+installation. They verify metadata, installed bytes, require/import behavior, bin
+mode where supported, and absent lifecycle markers without registry publication.
