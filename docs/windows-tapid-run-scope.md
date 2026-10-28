@@ -148,3 +148,85 @@ The service holds each Job until a fresh kernel accounting query proves it empty
 The native TCP/UDP IPv4/IPv6 bind regression reproduces the old gap. Wire, source-image substitution, held-handle rights and pipe-recovery controls pass before installation. Native service/WFP acceptance, crash controls, full runner rerun and final consumer acceptance are pending administrator installation approval. The Windows CI workflow now provisions the guard before tests, runs an isolated metadata-removal/rollback control, and uninstalls the idle guard afterward; those native CI results remain pending. This section does not claim strict bind denial has been verified on the device yet.
 
 The integrated dependency-hook branch retains LPAC startup and its exact enabled `registryRead` runtime capability. Broker recipients and guard registration share the same token-capability check: zero entries or that single non-network SID are accepted; additional, duplicate, disabled or network capability entries are rejected. Existing held-process, exact AppContainer/Job and WFP checks remain required. The merged native Windows acceptance must run at the integrated commit; cross-target compilation does not establish it.
+
+## Candidate evidence checker (issue #157)
+
+`scripts/windows-project-script-acceptance.ts` checks a supplied version-1 dossier:
+
+```text
+node --experimental-strip-types scripts/windows-project-script-acceptance.ts evidence/report.json
+```
+
+Exit 0 means the supplied dossier is structurally complete, **not** that Tapid
+has authenticated an operator's assertions or accepted a Windows configuration.
+Exit 1 includes individual missing/invalid requirements. The checker does not
+modify the report or its attachments. Do not use synthetic test records as native
+evidence. Actual CLI result files use `schema_version: 1`, `operation: "run"`,
+`outcome: "completed"`, `error: null` and a separate enforcement `receipt`.
+
+The report contains:
+
+- `schemaVersion: 1`, `source: {commit, clean}` (a clean 40-digit source SHA).
+- `platform: {os: "win32", edition, build, architecture}`; do not substitute
+  Server evidence for Windows 11 Pro VM126/build 26300.
+- `identities` entries `cli`, `workloadNode`, `compatibility`, `guard`, each with
+  `sha256` and `description`; `developmentNode`, `rust`, and
+  `officialNodeProvenance` identify the separate tooling and workload runtime.
+- `attachments: [{path, sha256}]`, with relative paths confined to the dossier
+  directory, including after symlink resolution. Hashes detect changes after
+  collection; they do not authenticate the producer.
+- `commands` entries named `install`, `build`, `test`, `start`, each with `argv`,
+  `exit`, `durationMs`, separate `stdout`/`stderr` attachment paths, and a
+  `receipt` attachment for each run command. Spawn errors, signals, timeouts,
+  nonzero exits and malformed result files prevent completeness, except that
+  start may return the CLI cancellation exit 130 with a matching `Cancelled`
+  receipt after real console Ctrl+C.
+- `controls: [{id, status, commit, cliSha256, attachments}]`; each mandatory ID
+  below must occur exactly once with `status: "pass"` and matching candidate
+  identities. Use `fail` and `unavailable` for unsuccessful/unexecuted controls.
+- `readiness: {body: "TAPID_NEWS_SITE_ACCEPTANCE_V1", durationMs}` and
+  `cleanup: {method: "console-ctrl-c", confirmed: true, durationMs}`. These
+  fields need supporting native logs, not a Node process-kill assertion.
+
+The exported command collector executes argv without a shell, preserves streams
+in exclusive new files, and records exit/spawn/timeout failures. It is a building
+block, not yet the integrated Windows workload collector. Its emergency timeout
+kill is unsuccessful evidence and does not implement graceful console Ctrl+C or
+prove descendant cleanup. Restricted workload receipts never replace separate
+ManagedTree controls; ManagedTree receipts require kernel-owned complete cleanup.
+
+### Executable-control inventory
+
+Names below locate reusable controls; their presence is not a current pass.
+All control groups require native, exact-candidate execution and retained logs.
+A group must cover its full row; running one listed test cannot stand in for
+unimplemented assertions in that group.
+
+| Mandatory ID | Existing control or remaining implementation |
+| --- | --- |
+| `workload.build`, `workload.test`, `workload.start` | Existing Ubuntu `news-site-consumer` CI; **missing** integrated Windows collector, readiness and actual-CLI console cancellation |
+| `workload.resolution` | `native resolver replays publication drift then honors fixture pin`; **missing** integrated selected-runtime/local-tool/forwarded-argument assertions |
+| `network.allow` | `windows_network_grant_runs_stock_node_loopback_tcp`, `windows_network_grant_runs_stock_node_udp_and_controlled_dns`, descendant-channel tests in `windows_network.rs`; ordinary-user exact-target execution required |
+| `network.deny` | `windows_network_denial_blocks_native_loopback_connect_in_root_and_descendant`, `windows_network_denial_blocks_native_bind_in_root_and_descendant`; audit paired IPv4/IPv6 positive endpoints before marking complete |
+| `prerequisites.reject` | `windows_network_policy_without_selected_node_component_fails_closed_before_spawn`, CLI result-file prelaunch tests; **missing** isolated missing/untrusted guard CLI marker/receipt assertions |
+| `filesystem.exact-file` | CLI native ordinary-project write controls; audit replacement/sibling denials |
+| `filesystem.subtree` | `windows_appcontainer_can_modify_existing_file_in_declared_subtree`, `windows_private_write_tree_creates_and_reopens_files_without_outside_authority`; audit granted-root deletion denial |
+| `filesystem.escape` | Outside-project read/write, missing-target, junction and hard-link rejection tests in `windows_containment.rs`; audit traversal, parents/siblings and disposable home/temp controls |
+| `filesystem.restoration` | `windows_missing_executable_failure_restores_project_dacl`, `windows_ctrl_c_cancels_execution_and_restores_project_dacl`; audit ordinary/nonzero completion and exact-file revocation |
+| `environment.descendants` | `windows_node_preserves_argv_environment_exit_and_readonly_boundaries`, `run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config`; audit secret sentinel and controlled PATH |
+| `handles.denied` | **Missing inventory proof** of unrelated inherited-handle denial; add a disposable Rust control if existing assertions do not cover it |
+| `managed.completion`, `managed.failure` | `windows_managed_tree_executes_with_checked_appcontainer_and_job_evidence`; **missing** full ordinary/nonzero descendant cleanup assertions |
+| `managed.ctrl-c` | `windows_ctrl_c_cancels_execution_and_restores_project_dacl`; actual CLI console integration still required |
+| `limits.timeout` | `windows_appcontainer_timeout_terminates_the_managed_job`, `windows_node_timeout_reaps_descendant_before_restoring_project_dacl` |
+| `limits.output` | `windows_appcontainer_enforces_the_combined_output_limit`; audit descendant combined output |
+| `limits.processes`, `limits.memory` | Existing Job setup tests are insufficient observed-limit evidence; **missing** complete-tree process/memory enforcement controls |
+| `compatibility.addons` | `windows_native_addon_launch_preserves_stock_node_metadata`; audit normal later `LoadLibrary*` path |
+| `compatibility.bypass` | Native denial tests and `windows_standard_node_ipc_and_ancestor_metadata_preserve_denied_authority`; excluded propagation/mitigation paths remain explicitly bounded |
+
+This implementation adds no native acceptance result or support row. The primary
+Windows 11 Pro target, historical Home evidence, later physical-device selection,
+hosted Server and ARM64 evidence remain distinct. Existing standard-user network
+grants and the administrator-installed denial guard supersede earlier blanket
+network rejection descriptions above. Invocation flags are now delivered; they
+remain bounded by backend prerequisites and policy ceilings. CanonicalPath,
+trusted-host replacement and scoped ACL limitations remain unchanged.
