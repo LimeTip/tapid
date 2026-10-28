@@ -277,6 +277,7 @@ pub(crate) struct WorkspacePeerDependency {
 }
 
 pub(crate) struct WorkspaceMaterialization {
+    pub manifests: BTreeMap<String, PackageManifest>,
     pub links: WorkspaceLinkPlan,
     pub locked: Vec<LockedWorkspacePackage>,
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
@@ -321,6 +322,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     if root != canonical_project {
         return Err("resolved workspace root does not match install project root".into());
     }
+    let mut manifests = BTreeMap::new();
     let mut packages = Vec::new();
     let mut locked = Vec::new();
     let mut members = BTreeMap::new();
@@ -369,6 +371,7 @@ pub(crate) fn workspace_materialization_from_discovered(
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("/");
+        manifests.insert(relative_posix.clone(), manifest.clone());
         let version = manifest.version().clone();
         let source =
             LocalWorkspaceSource::new(&relative_posix, member.name(), &version.to_string())
@@ -526,6 +529,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     }
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
+        manifests,
         links,
         locked,
         members,
@@ -906,6 +910,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
+        workspace_manifests: _,
         candidate_exclusions,
         metadata_lookups: _,
         resolution,

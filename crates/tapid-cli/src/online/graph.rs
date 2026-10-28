@@ -2,6 +2,7 @@ use super::*;
 use crate::application::lifecycle::UpdateRequest;
 
 pub(super) struct ResolvedGraph {
+    pub workspace_manifests: BTreeMap<String, PackageManifest>,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,
@@ -42,6 +43,7 @@ pub(super) fn resolve_package_graph(
         .map(|name| dep_parts(name).map(|(_, name)| name))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let WorkspaceMaterialization {
+        manifests: workspace_manifests,
         links: workspace_links,
         locked: workspace_locked,
         members: _,
@@ -351,6 +353,7 @@ pub(super) fn resolve_package_graph(
         })
         .transpose()?;
     Ok(ResolvedGraph {
+        workspace_manifests,
         candidate_exclusions,
         updated_manifest,
         metadata_lookups,
@@ -384,6 +387,93 @@ pub(super) fn workspace_registry_target<'a>(
 mod tests {
     use super::*;
     use crate::application::lifecycle::{SavePolicy, plan_update};
+
+    #[test]
+    fn native_selection_preserves_workspace_declaration_kinds_and_targets() {
+        let project = tapid_test_support::TempProject::new("graph-profile-workspace").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"devDependencies":{"tool":"1"},"optionalDependencies":{"member":"workspace:*"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        project.write("packages/member/package.json", br#"{"name":"member","version":"1.0.0","dependencies":{"runtime":"npm:actual@1"},"devDependencies":{"tool":"1"},"optionalDependencies":{"extra":"1","helper":"workspace:*"}}"#).unwrap();
+        project
+            .write(
+                "packages/helper/package.json",
+                br#"{"name":"helper","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        let fixture = serde_json::json!({"packages": (["tool", "actual", "extra"].map(|name| serde_json::json!({
+            "registry": NPM, "name": name, "version":"1.0.0",
+            "integrity":integrity(name.as_bytes()).to_string(),
+            "artifact":format!("https://registry.npmjs.org/{name}.tgz")
+        }))) });
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        let selection = resolved
+            .native_selection(project.path(), &manifest, &config)
+            .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&selection.to_json().unwrap()).unwrap();
+        let packages = wire["packages"].as_object().unwrap();
+        let key = |name: &str| {
+            packages
+                .keys()
+                .find(|key| key.parse::<LockfilePackageKey>().unwrap().name.as_str() == name)
+                .unwrap()
+                .clone()
+        };
+        let edges = wire["declarations"].as_array().unwrap();
+        for (workspace, name, kind, target) in [
+            (None, "tool", "dev", key("tool")),
+            (None, "member", "optional", key("member")),
+            (
+                Some("packages/member"),
+                "runtime",
+                "required",
+                key("actual"),
+            ),
+            (Some("packages/member"), "tool", "dev", key("tool")),
+            (Some("packages/member"), "extra", "optional", key("extra")),
+            (Some("packages/member"), "helper", "optional", key("helper")),
+        ] {
+            assert!(
+                edges
+                    .iter()
+                    .any(|edge| edge["workspace"].as_str() == workspace
+                        && edge["name"] == name
+                        && edge["kind"] == kind
+                        && edge["target"] == target),
+                "{workspace:?} {name}: {edges:?}"
+            );
+        }
+        assert_eq!(
+            selection
+                .materialized_keys(tapid_lockfile::InstallProfile {
+                    include_dev: false,
+                    include_optional: false
+                })
+                .unwrap(),
+            [key("actual")].into_iter().collect()
+        );
+        assert_eq!(
+            wire["workspaceManifestDigests"]["packages/member"],
+            digest(&fs::read(project.path().join("packages/member/package.json")).unwrap())
+                .to_string()
+        );
+        assert!(!project.path().join("node_modules").exists());
+    }
 
     #[test]
     fn native_selection_rejects_legacy_seeded_dependency_kinds() {

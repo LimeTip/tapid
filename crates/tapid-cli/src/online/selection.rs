@@ -15,9 +15,13 @@ impl graph::ResolvedGraph {
         config: &crate::registry::RegistryConfig,
     ) -> Result<NativeSelection, OperationalError> {
         let invalid = |message: &str| OperationalError::new(ErrorKind::Resolution, message);
-        if !self.workspace_locked.is_empty() || !self.workspace_links.links.is_empty() {
+        if self
+            .workspace_manifests
+            .values()
+            .any(|manifest| !manifest.peer_dependencies().is_empty())
+        {
             return Err(invalid(
-                "native selection producer does not yet support workspaces",
+                "native selection producer does not yet support workspace peer evidence",
             ));
         }
         let mut keys = BTreeMap::new();
@@ -123,40 +127,75 @@ impl graph::ResolvedGraph {
                     .insert(name.to_string(), keys[provider].clone());
             }
         }
+        let mut workspace_digests = BTreeMap::new();
+        let mut workspace_targets = BTreeMap::new();
+        for member in &self.workspace_locked {
+            let key = member.key();
+            let identity: LockfilePackageKey = key.parse()?;
+            let source = identity
+                .source
+                .workspace()
+                .ok_or_else(|| invalid("missing workspace source"))?
+                .clone();
+            workspace_digests.insert(
+                source.path().to_owned(),
+                member.manifest_digest().to_owned(),
+            );
+            workspace_targets.insert(identity.name.to_string(), key.clone());
+            packages.insert(
+                key,
+                NativeSelectedPackage {
+                    source_evidence: NativeSourceEvidence::Workspace { source },
+                    dependencies: BTreeMap::new(),
+                    peer_providers: BTreeMap::new(),
+                },
+            );
+        }
         let mut declarations = Vec::new();
-        for (kind, name, range) in manifest.effective_install_declarations() {
-            let requirement = range
-                .parse::<Requirement>()
-                .map_err(|error| invalid(&error.to_string()))?;
-            let registry = registry_for_requirement(config, name, &requirement)?;
-            let (_, local) = dep_parts(name)?;
-            let target = self
-                .resolution
-                .root_bindings
-                .get(&(registry, local.clone()))
-                .ok_or_else(|| invalid("missing accepted declaration binding"))?;
-            let kind = match kind {
-                tapid_manifest::DependencyKind::Dependencies => NativeDeclarationKind::Required,
-                tapid_manifest::DependencyKind::DevDependencies => NativeDeclarationKind::Dev,
-                tapid_manifest::DependencyKind::OptionalDependencies => {
-                    NativeDeclarationKind::Optional
-                }
-                tapid_manifest::DependencyKind::PeerDependencies => {
-                    unreachable!("effective install declaration")
-                }
-            };
-            declarations.push(NativeDeclaration {
-                workspace: None,
-                name: local.to_string(),
-                kind,
-                target: keys[target].clone(),
-            });
+        for (workspace, manifest) in std::iter::once((None, manifest)).chain(
+            self.workspace_manifests
+                .iter()
+                .map(|(path, manifest)| (Some(path.clone()), manifest)),
+        ) {
+            for (kind, name, range) in manifest.effective_install_declarations() {
+                let (_, local) = dep_parts(name)?;
+                let target = if let Some(key) = workspace_targets.get(name) {
+                    key.clone()
+                } else {
+                    let requirement = range
+                        .parse::<Requirement>()
+                        .map_err(|error| invalid(&error.to_string()))?;
+                    let registry = registry_for_requirement(config, name, &requirement)?;
+                    let target = self
+                        .resolution
+                        .root_bindings
+                        .get(&(registry, local.clone()))
+                        .ok_or_else(|| invalid("missing accepted declaration binding"))?;
+                    keys[target].clone()
+                };
+                let kind = match kind {
+                    tapid_manifest::DependencyKind::Dependencies => NativeDeclarationKind::Required,
+                    tapid_manifest::DependencyKind::DevDependencies => NativeDeclarationKind::Dev,
+                    tapid_manifest::DependencyKind::OptionalDependencies => {
+                        NativeDeclarationKind::Optional
+                    }
+                    tapid_manifest::DependencyKind::PeerDependencies => {
+                        unreachable!("effective install declaration")
+                    }
+                };
+                declarations.push(NativeDeclaration {
+                    workspace: workspace.clone(),
+                    name: local.to_string(),
+                    kind,
+                    target,
+                });
+            }
         }
         NativeSelection::new(
             "0".to_owned(),
             "0".to_owned(),
             root_digest(project)?,
-            BTreeMap::new(),
+            workspace_digests,
             declarations,
             packages,
         )
