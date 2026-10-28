@@ -48,6 +48,50 @@ test("bounded process caps decoded UTF-8 output at a character boundary", async 
   });
 });
 
+for (const trigger of ["timeout", "output-limit", "close"]) {
+  test(`bounded process rejects signal errors during ${trigger}`, {
+    skip: process.platform === "win32",
+  }, async () => {
+    await temporary(async (path) => {
+      const helper = new URL("../scripts/check-doc-examples.ts", import.meta.url).href;
+      const program = trigger === "close" ? ""
+        : trigger === "timeout" ? "setTimeout(()=>{},3000)"
+        : "process.stdout.write('overflow');setTimeout(()=>{},3000)";
+      // Isolate the OS-boundary mock from other asynchronous process tests.
+      write(join(path, "probe.mjs"), `
+        import assert from 'node:assert/strict';
+        import {boundedProcess} from ${JSON.stringify(helper)};
+        const originalKill = process.kill.bind(process);
+        let signals = 0;
+        let group;
+        process.kill = (pid, signal) => {
+          signals++;
+          group = pid;
+          throw Object.assign(new Error('fixture signal denied'), {code: 'EPERM'});
+        };
+        try {
+          await assert.rejects(boundedProcess([
+            process.execPath, '-e', ${JSON.stringify(program)}
+          ], {cwd: process.cwd(), env: {}, timeout: ${trigger === "timeout" ? 0.1 : 2}, output_limit: 1}),
+            {code: 'EPERM', message: 'fixture signal denied'});
+          assert.equal(signals, 1);
+        } finally {
+          // The simulated denial leaves the fixture alive; clean it up using
+          // the real OS operation without hiding the observed rejection.
+          if (group) try { originalKill(group, 'SIGKILL'); } catch (error) {
+            if (error.code !== 'ESRCH') throw error;
+          }
+        }
+      `);
+      const probe = spawnSync(process.execPath, ["--experimental-strip-types", "probe.mjs"], {
+        cwd: path, encoding: "utf8", timeout: 5000,
+      });
+      assert.ifError(probe.error);
+      assert.equal(probe.status, 0, probe.stderr);
+    });
+  });
+}
+
 test("bounded process does not retain discarded output buffers", {
   skip: process.platform === "win32",
 }, async () => {
