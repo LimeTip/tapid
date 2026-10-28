@@ -202,13 +202,15 @@ mod tests {
     struct Fake {
         body: Vec<u8>,
         url: String,
+        status: u16,
+        content_type: Option<String>,
     }
     impl HttpTransport for Fake {
         fn get(&self, url: &str) -> Result<HttpResponse, TransportError> {
             assert_eq!(url, self.url);
             Ok(HttpResponse {
-                status: 200,
-                content_type: Some("application/json; charset=utf-8".into()),
+                status: self.status,
+                content_type: self.content_type.clone(),
                 body: self.body.clone(),
             })
         }
@@ -217,7 +219,51 @@ mod tests {
         Fake {
             body: body.to_vec(),
             url: url.into(),
+            status: 200,
+            content_type: Some("application/json; charset=utf-8".into()),
         }
+    }
+
+    #[test]
+    fn jsr_fetch_applies_shared_json_response_validation() {
+        let origin: RegistryOrigin = "https://jsr.io".parse().unwrap();
+        let body = br#"{"scope":"std","name":"path","versions":{}}"#;
+        for content_type in [None, Some("text/plain")] {
+            let mut response = fake(body, "https://jsr.io/@std/path/meta.json");
+            response.content_type = content_type.map(str::to_owned);
+            assert!(matches!(
+                JsrRegistry::new(response, origin.clone()).fetch("@std/path"),
+                Err(RegistryClientError::Metadata(
+                    MetadataError::UnsupportedContentType(_)
+                ))
+            ));
+        }
+        for status in [204, 404, 503] {
+            let mut response = fake(body, "https://jsr.io/@std/path/meta.json");
+            response.status = status;
+            assert!(matches!(
+                JsrRegistry::new(response, origin.clone()).fetch("@std/path"),
+                Err(RegistryClientError::Metadata(MetadataError::HttpStatus(actual))) if actual == status
+            ));
+        }
+        for body in [b"{".as_slice(), b"[]", b"null"] {
+            assert!(matches!(
+                JsrRegistry::new(
+                    fake(body, "https://jsr.io/@std/path/meta.json"),
+                    origin.clone()
+                )
+                .fetch("@std/path"),
+                Err(RegistryClientError::Metadata(MetadataError::InvalidJson(_)))
+            ));
+        }
+        let mut response = fake(body, "https://jsr.io/@std/path/meta.json");
+        response.content_type = Some("APPLICATION/vnd.example+JSON; charset=utf-8".into());
+        assert!(
+            JsrRegistry::new(response, origin)
+                .fetch("@std/path")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

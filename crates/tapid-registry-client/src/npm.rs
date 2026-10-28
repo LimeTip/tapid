@@ -1130,4 +1130,43 @@ mod tests {
             ))
         ));
     }
+
+    #[test]
+    fn npm_fetch_applies_shared_json_response_validation() {
+        let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();
+        let body = br#"{"name":"foo","versions":{}}"#;
+        for content_type in [None, Some("text/plain")] {
+            let mut response = fake(body, "https://registry.npmjs.org/foo");
+            response.content_type = content_type.map(str::to_owned);
+            assert!(matches!(
+                NpmRegistry::new(response, origin.clone()).fetch("foo"),
+                Err(RegistryClientError::Metadata(
+                    MetadataError::UnsupportedContentType(_)
+                ))
+            ));
+        }
+        for status in [204, 503] {
+            let mut response = fake(body, "https://registry.npmjs.org/foo");
+            response.status = status;
+            assert!(matches!(
+                NpmRegistry::new(response, origin.clone()).fetch("foo"),
+                Err(RegistryClientError::Metadata(MetadataError::HttpStatus(actual))) if actual == status
+            ));
+        }
+        for body in [b"{".as_slice(), b"[]", b"null"] {
+            assert!(matches!(
+                NpmRegistry::new(fake(body, "https://registry.npmjs.org/foo"), origin.clone())
+                    .fetch("foo"),
+                Err(RegistryClientError::Metadata(MetadataError::InvalidJson(_)))
+            ));
+        }
+        let mut response = fake(body, "https://registry.npmjs.org/foo");
+        response.content_type = Some("APPLICATION/vnd.example+JSON; charset=utf-8".into());
+        assert!(
+            NpmRegistry::new(response, origin)
+                .fetch("foo")
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

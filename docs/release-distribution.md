@@ -640,6 +640,10 @@ machine-wide installation, public availability, or production support.
 Unix release installation requires a POSIX shell, HTTPS-capable `curl`, `tar` with
 gzip support, `shasum` or `sha256sum`, and standard filesystem/text utilities.
 Windows installation requires PowerShell with .NET HTTP support and `tar.exe`.
+Each PowerShell download has one two-minute deadline shared by redirect requests
+and asynchronous response-body reads and file writes. Timeout disposes transport
+resources and attempts to remove partial downloads; HTTPS, redirect-count and byte limits
+remain enforced before release verification.
 The PowerShell detector uses PowerShell 7 (`pwsh`) and .NET process APIs. None of
 these prerequisites establishes minimum binary OS/libc support. The shell
 detector also requires the standard `od` utility for exact byte comparison.

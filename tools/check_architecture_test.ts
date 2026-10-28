@@ -24,6 +24,8 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "tapid-architecture-"));
   const init = await run("git", ["init", "--quiet", root]);
   assertEquals(init.code, 0, init.stderr);
+  await write(root, "Cargo.toml", '[package]\nname = "architecture-fixture"\nversion = "0.1.0"\nedition = "2021"\n[lib]\npath = "fixture.rs"\n');
+  await write(root, "fixture.rs", "");
   return root;
 }
 
@@ -50,6 +52,54 @@ async function withFixture(body: (root: string) => Promise<void>) {
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test("architecture checker rejects renamed capability dependencies on the CLI", () => withFixture(async (root) => {
+  await write(root, "Cargo.toml", '[workspace]\nmembers = ["capability", "cli"]\nresolver = "2"\n');
+  await write(root, "capability/Cargo.toml", '[package]\nname = "tapid-manifest"\nversion = "0.1.0"\n[dependencies]\nfrontend = { package = "tapid", path = "../cli" }\n');
+  await write(root, "capability/src/lib.rs", "");
+  await write(root, "cli/Cargo.toml", '[package]\nname = "tapid"\nversion = "0.1.0"\n');
+  await write(root, "cli/src/lib.rs", "");
+  const result = await check(root);
+  assertEquals(result.code, 1, result.stdout + result.stderr);
+  assert(result.stdout.includes("tapid-manifest -> tapid (renamed frontend)"));
+  assert(result.stdout.includes("capabilities must not depend on the CLI"));
+}));
+
+for (const fixtureCase of [
+  { owner: "tapid-manifest", dependency: "tapid", rule: "capabilities must not depend on the CLI" },
+  { owner: "tapid-store", dependency: "tapid-test-support", rule: "test-support is permitted only as a dev dependency" },
+  { owner: "tapid-core", dependency: "tapid-manifest", rule: "tapid-core permits only pure domain dependencies" },
+  { owner: "tapid-core", dependency: "reqwest", rule: "tapid-core permits only pure domain dependencies" },
+]) {
+  for (const kind of ["dependencies", "build-dependencies", "dev-dependencies"]) {
+    for (const target of [false, true]) {
+      test(`architecture dependency rules: ${fixtureCase.owner} -> ${fixtureCase.dependency}, ${kind}, target=${target}`, () => withFixture(async (root) => {
+        await write(root, "Cargo.toml", '[workspace]\nmembers = ["owner", "dependency"]\nresolver = "2"\n');
+        const section = target ? `target.'cfg(windows)'.${kind}` : kind;
+        await write(root, "owner/Cargo.toml", `[package]\nname = "${fixtureCase.owner}"\nversion = "0.1.0"\n[${section}]\nalias = { package = "${fixtureCase.dependency}", path = "../dependency" }\n`);
+        await write(root, "owner/src/lib.rs", "");
+        await write(root, "dependency/Cargo.toml", `[package]\nname = "${fixtureCase.dependency}"\nversion = "0.1.0"\n`);
+        await write(root, "dependency/src/lib.rs", "");
+        const result = await check(root);
+        assertEquals(result.code, kind === "dev-dependencies" ? 0 : 1, result.stdout + result.stderr);
+        if (kind !== "dev-dependencies") {
+          assert(result.stdout.includes(`${fixtureCase.owner} -> ${fixtureCase.dependency} (renamed alias)`));
+          assert(result.stdout.includes(fixtureCase.rule));
+          assert(result.stdout.includes(kind === "build-dependencies" ? "[build" : "[normal"));
+          if (target) assert(result.stdout.includes("cfg(windows)"));
+        }
+      }));
+    }
+  }
+}
+
+test("architecture checker fails closed when Cargo metadata cannot be acquired", () => withFixture(async (root) => {
+  await write(root, "Cargo.toml", "invalid manifest");
+  const result = await check(root);
+  assertEquals(result.code, 2);
+  assert(result.stderr.includes("Architecture check could not run"));
+  assert(!result.stdout.includes("Architecture check passed"));
+}));
 
 test("architecture checker rejects unrelated CLI arguments", async () => {
   const result = await run(process.execPath, [

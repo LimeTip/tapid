@@ -860,6 +860,58 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compressed_input_limit_precedes_parsing_and_staging_creation() {
+        let project = tapid_test_support::TempProject::new("compressed-input-limit").unwrap();
+        let destination = project.path().join("tree");
+        // Deliberately invalid framing proves the byte limit wins before parsing.
+        for format in [ArchiveFormat::Tar, ArchiveFormat::TarGz] {
+            let error = extract_to(
+                &[b'!'; 17],
+                format,
+                &destination,
+                ArchiveLimits {
+                    max_archive_bytes: 16,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, ExtractError::ArchiveTooLarge), "{error}");
+            assert!(!destination.exists());
+        }
+    }
+
+    #[test]
+    fn reserved_archive_metadata_rejection_cleans_preceding_extracted_files() {
+        let project = tapid_test_support::TempProject::new("reserved-archive-metadata").unwrap();
+        let destination = project.path().join("tree");
+        let mut builder = tar::Builder::new(Vec::new());
+        for path in ["package/first", ".tapid-executable-modes"] {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(2);
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, path, b"ok".as_slice())
+                .unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        for (input, format) in [
+            (bytes.as_slice(), ArchiveFormat::Tar),
+            (compressed.as_slice(), ArchiveFormat::TarGz),
+        ] {
+            let error =
+                extract_to(input, format, &destination, ArchiveLimits::default()).unwrap_err();
+            assert!(
+                matches!(error, ExtractError::InvalidArchive(ref message) if message.contains("reserved Tapid metadata")),
+                "{error}"
+            );
+            assert!(!destination.exists());
+        }
+    }
     /// Hidden GNU/PAX metadata must exhaust the same bound for tar and tar.gz,
     /// and failed validation cleans staging under normal filesystem conditions.
     #[test]

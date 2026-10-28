@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { mkdtemp, writeFile, rm, copyFile, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, copyFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checksumLines, releaseRecord } from './release.ts';
@@ -102,6 +102,66 @@ test('attestation binds every asset byte, numeric ID, notes and publication plan
     await assert.rejects(()=>attestCandidate(api,f.directory,f.notes,f.plan,tag,commit,123));
   } finally {await f.cleanup();}
 });
+for (const signed of [false,true]) {
+  test(`${signed ? 'signed' : 'unsigned'} installer regeneration cleans temporary files on success and failure`,async()=>{
+    const f=await fixture();
+    const temporary=await mkdtemp(join(tmpdir(),'tapid-candidate-cleanup-'));
+    try {
+      const moduleUrl=new URL('./candidate.ts',import.meta.url).href;
+      for(const fail of [false,true]) {
+        const script=`
+          import {attestCandidate,attestUnsignedCandidate} from ${JSON.stringify(moduleUrl)};
+          const release=${JSON.stringify(f.release)};
+          const api={repository:${JSON.stringify(repository)},tag:async()=>({object:${JSON.stringify(object)},commit:${JSON.stringify(commit)}}),isOnMain:async()=>true,releases:async()=>[release],release:async()=>release};
+          const templates=${fail ? JSON.stringify({'install.sh':'missing bootstrap markers','install.ps1':'missing bootstrap markers'}) : 'undefined'};
+          try {
+            ${signed ? 'await attestCandidate(api' : 'await attestUnsignedCandidate('}
+              ${signed ? ',' : ''}${JSON.stringify(f.directory)},${JSON.stringify(f.notes)},${JSON.stringify(f.plan)},
+              ${signed ? '' : JSON.stringify(repository)+','}${JSON.stringify(tag)},${JSON.stringify(commit)},${signed ? '123' : JSON.stringify(object)},templates);
+            if (${fail}) throw Error('expected regeneration failure');
+          } catch(error) {
+            if (!${fail} || !error.message.includes('bootstrap marker')) throw error;
+          }
+        `;
+        await promisify(execFile)(process.execPath,['--experimental-strip-types','--input-type=module','--eval',script],{
+          env:{...process.env,TMPDIR:temporary,TMP:temporary,TEMP:temporary},
+        });
+        assert.deepEqual(await readdir(temporary),[],'regenerated archives/installers must be removed');
+      }
+    }finally{await f.cleanup();await rm(temporary,{recursive:true,force:true});}
+  });
+  for (const [name,diagnostic] of [
+    ['tapid-0.0.12-aarch64-apple-darwin.tar.gz',/archive checksum mismatch/],
+    ['SHA256SUMS',/archive checksum mismatch/],
+    ['tapid-release-v1.tsv',/release record mismatch/],
+    ['install.sh',/generated installer mismatch/],
+    ['install.ps1',/generated installer mismatch/],
+  ] as const) {
+    test(`${signed ? 'signed' : 'unsigned'} attestation rejects same-size ${name} mutation`,async()=>{
+      const f=await fixture();try{
+        const bytes=await readFile(join(f.directory,name));
+        bytes[0]^=1;
+        await writeFile(join(f.directory,name),bytes);
+        const {api}=adapter(f.release);
+        await assert.rejects(()=>signed
+          ? attestCandidate(api,f.directory,f.notes,f.plan,tag,commit,123)
+          : attestUnsignedCandidate(f.directory,f.notes,f.plan,repository,tag,commit,object),diagnostic);
+      }finally{await f.cleanup();}
+    });
+  }
+  for (const extra of [false,true]) {
+    test(`${signed ? 'signed' : 'unsigned'} attestation rejects ${extra ? 'extra' : 'missing'} files`,async()=>{
+      const f=await fixture();try{
+        if(extra) await writeFile(join(f.directory,'unexpected.txt'),'extra');
+        else await rm(join(f.directory,'install.sh'));
+        const {api}=adapter(f.release);
+        await assert.rejects(()=>signed
+          ? attestCandidate(api,f.directory,f.notes,f.plan,tag,commit,123)
+          : attestUnsignedCandidate(f.directory,f.notes,f.plan,repository,tag,commit,object),signed ? /unexpected files/ : /exactly ten files/);
+      }finally{await f.cleanup();}
+    });
+  }
+}
 test('draft approval is invalidated by asset ID or notes changes', async () => {
   const f=await fixture(); try {
     const mock=adapter(f.release);const c=await attestCandidate(mock.api,f.directory,f.notes,f.plan,tag,commit,123);

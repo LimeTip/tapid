@@ -153,6 +153,22 @@ export function validateUnsignedCandidate(value: unknown): UnsignedCandidate {
   validateCandidate({...value,schema:'tapid-release-candidate-v1',release_id:1,assets:synthetic});
   return value as UnsignedCandidate;
 }
+// Local consistency is identical for signed and unsigned candidates. Provider
+// identity, signature-sidecar requirements and authorization stay with callers.
+async function verifyCandidateContents(directory:string,repo:string,tag:string,templates?:InstallerTemplates):Promise<void> {
+  const base=`https://github.com/${repo}/releases/download/${tag}`;
+  if(await smallFile(join(directory,'SHA256SUMS'))!==await checksumLines(directory,tag.slice(1))) throw Error('archive checksum mismatch');
+  if(await smallFile(join(directory,'tapid-release-v1.tsv'))!==await releaseRecord(directory,tag.slice(1),base)) throw Error('release record mismatch');
+  const regenerated=await mkdtemp(join(tmpdir(),'tapid-installers-'));
+  try {
+    for(const target of TARGETS) {
+      const name=`tapid-${tag.slice(1)}-${target}.tar.gz`;
+      await copyFile(join(directory,name),join(regenerated,name));
+    }
+    await renderInstallers(regenerated,tag.slice(1),base,templates);
+    for(const name of ['install.sh','install.ps1']) if(await smallFile(join(directory,name))!==await smallFile(join(regenerated,name))) throw Error('generated installer mismatch');
+  }finally{await rm(regenerated,{recursive:true,force:true});}
+}
 export async function attestUnsignedCandidate(directory:string,notes:string,plan:string,repo:string,tag:string,commit:string,tagObject:string,templates?:InstallerTemplates):Promise<UnsignedCandidate> {
   source(tag,commit);repository(repo);
   const names=expectedAssets(tag).filter(name=>!name.endsWith('.sig'));
@@ -160,15 +176,7 @@ export async function attestUnsignedCandidate(directory:string,notes:string,plan
   if(JSON.stringify(local)!==JSON.stringify(names)) throw Error('unsigned candidate must contain exactly ten files');
   const assets=[];
   for(const name of names) assets.push({name,...await fileDigest(join(directory,name),limit(name))});
-  const base=`https://github.com/${repo}/releases/download/${tag}`;
-  if(await smallFile(join(directory,'SHA256SUMS'))!==await checksumLines(directory,tag.slice(1))) throw Error('archive checksum mismatch');
-  if(await smallFile(join(directory,'tapid-release-v1.tsv'))!==await releaseRecord(directory,tag.slice(1),base)) throw Error('release record mismatch');
-  const regenerated=await mkdtemp(join(tmpdir(),'tapid-installers-'));
-  try {
-    for(const name of names.filter(n=>n.endsWith('.tar.gz'))) await copyFile(join(directory,name),join(regenerated,name));
-    await renderInstallers(regenerated,tag.slice(1),base,templates);
-    for(const name of ['install.sh','install.ps1']) if(await smallFile(join(directory,name))!==await smallFile(join(regenerated,name))) throw Error('generated installer mismatch');
-  }finally{await rm(regenerated,{recursive:true,force:true});}
+  await verifyCandidateContents(directory,repo,tag,templates);
   return validateUnsignedCandidate({schema:'tapid-release-unsigned-candidate-v1',repository:repo,tag,commit,tag_object:tagObject,title:tag,notes_sha256:digest(await smallFile(notes)),plan_sha256:digest(await smallFile(plan)),assets});
 }
 export async function validateUnsignedFiles(directory:string,notes:string,plan:string,input:UnsignedCandidate,templates?:InstallerTemplates):Promise<string> {
@@ -257,15 +265,7 @@ export async function attestCandidate(api: ReleaseAdapter,directory: string,note
     if(bytes.size!==asset.size) throw Error(`provider size mismatch: ${name}`);
     assets.push({id:asset.id,name,size:bytes.size,sha256:bytes.sha256});
   }
-  const base=`https://github.com/${api.repository}/releases/download/${tag}`;
-  if(await smallFile(join(directory,'SHA256SUMS'))!==await checksumLines(directory,tag.slice(1))) throw Error('archive checksum mismatch');
-  if(await smallFile(join(directory,'tapid-release-v1.tsv'))!==await releaseRecord(directory,tag.slice(1),base)) throw Error('release record mismatch');
-  const regenerated=await mkdtemp(join(tmpdir(),'tapid-installers-'));
-  try {
-    for(const name of names.filter(n=>n.endsWith('.tar.gz'))) await copyFile(join(directory,name),join(regenerated,name));
-    await renderInstallers(regenerated,tag.slice(1),base,templates);
-    for(const name of ['install.sh','install.ps1']) if(await smallFile(join(directory,name))!==await smallFile(join(regenerated,name))) throw Error('generated installer mismatch');
-  } finally {await rm(regenerated,{recursive:true,force:true});}
+  await verifyCandidateContents(directory,api.repository,tag,templates);
   const candidate: Candidate={schema:'tapid-release-candidate-v1',repository:api.repository,tag,commit,tag_object:selected.tag_object,release_id:releaseId,title:tag,notes_sha256:digest(body),plan_sha256:digest(await smallFile(plan)),assets};
   return validateCandidate(candidate);
 }
