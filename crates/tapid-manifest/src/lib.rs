@@ -5,6 +5,7 @@
 mod error;
 mod lifecycle;
 mod model;
+mod overrides;
 mod parse;
 mod workspace;
 
@@ -13,7 +14,7 @@ pub use lifecycle::{
     DependencyLifecyclePlan, dependency_lifecycle_commands, dependency_lifecycle_hooks,
     dependency_lifecycle_plan,
 };
-pub use model::{BinTarget, DependencyKind, PackageBin, PackageManifest};
+pub use model::{BinTarget, DependencyKind, OverrideDeclaration, PackageBin, PackageManifest};
 pub use workspace::{Workspace, WorkspaceMember};
 
 /// Maximum bytes read from each root or member manifest during workspace discovery.
@@ -26,6 +27,55 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn parses_nested_overrides_and_preserves_dependency_edits() {
+        let input = r#"{"name":"app","version":"1.0.0","overrides":{"child":"^2","@scope/parent@^1":{"@scope/child":"2.1.0"}}}"#;
+        let manifest = PackageManifest::parse(input).unwrap();
+        let updated = manifest.with_dependency("other", "^1").unwrap();
+        let original: serde_json::Value = serde_json::from_str(input).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&updated.to_json()).unwrap();
+        assert_eq!(output["overrides"], original["overrides"]);
+        assert_eq!(PackageManifest::parse(&updated.to_json()).unwrap(), updated);
+    }
+
+    #[test]
+    fn rejects_duplicate_override_declarations() {
+        for fields in [
+            r#""overrides":{},"overrides":{}"#,
+            r#""overrides":{"child":"1","child":"2"}"#,
+            r#""overrides":{"parent":{"child":"1","child":"2"}}"#,
+            r#""overrides":{"parent":{"child":{".":"1",".":"2"}}}"#,
+            r#""overrides":{"child":"1","ch\u0069ld":"2"}"#,
+        ] {
+            let input = format!(r#"{{"name":"app","version":"1.0.0",{fields}}}"#);
+            let error = PackageManifest::parse(&input).unwrap_err();
+            assert!(error.to_string().contains("duplicate"), "{error}");
+        }
+        // Unrelated package metadata does not become override policy.
+        PackageManifest::parse(r#"{"name":"app","version":"1.0.0","metadata":{"x":1,"x":2}}"#)
+            .unwrap();
+    }
+
+    #[test]
+    fn preserves_passive_nested_override_syntax() {
+        let input = r#"{"name":"package","version":"1.0.0","overrides":{"parent@*":{".":"$parent","child@^1":{"grandchild":"npm:other@2"}}}}"#;
+        let manifest = PackageManifest::parse(input).unwrap();
+        let output: serde_json::Value = serde_json::from_str(&manifest.to_json()).unwrap();
+        let original: serde_json::Value = serde_json::from_str(input).unwrap();
+        assert_eq!(output["overrides"], original["overrides"]);
+    }
+
+    #[test]
+    fn nested_override_type_errors_report_the_observed_type() {
+        let input = r#"{"name":"app","version":"1.0.0","overrides":{"parent":{"child":false}}}"#;
+        let error = PackageManifest::parse(input).unwrap_err();
+        let diagnostic = error.diagnostic(input);
+        assert_eq!(diagnostic.field, Some("overrides"));
+        assert_eq!(diagnostic.key.as_deref(), Some("child"));
+        assert_eq!(diagnostic.expected, "string_or_object");
+        assert_eq!(diagnostic.observed, "boolean");
+    }
 
     #[test]
     fn parses_supported_metadata() {
@@ -44,7 +94,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.overrides()["postcss"], "8.5.28");
+        assert_eq!(
+            manifest.overrides()["postcss"],
+            OverrideDeclaration::Replacement("8.5.28".into())
+        );
         let updated = manifest.with_dependency("next", "15.5.27").unwrap();
         let value: serde_json::Value = serde_json::from_str(&updated.to_json()).unwrap();
         assert_eq!(value["overrides"]["postcss"], "8.5.28");
@@ -57,7 +110,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.overrides()["typescript@*"], "$typescript");
+        assert_eq!(
+            manifest.overrides()["typescript@*"],
+            OverrideDeclaration::Replacement("$typescript".into())
+        );
         let value: serde_json::Value = serde_json::from_str(&manifest.to_json()).unwrap();
         assert_eq!(value["overrides"]["typescript@*"], "$typescript");
     }

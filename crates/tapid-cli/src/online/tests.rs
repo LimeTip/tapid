@@ -463,6 +463,19 @@ fn artifact_progress_is_emitted_at_bounded_completion_checkpoints() {
 }
 
 #[test]
+fn manifest_overrides_rejects_nested_rules_until_contextual_resolution_is_available() {
+    let manifest = PackageManifest::parse(
+        r#"{"name":"root","version":"1.0.0","overrides":{"parent":{"child":"2"}}}"#,
+    )
+    .unwrap();
+    let error = manifest_overrides(&manifest).unwrap_err();
+    assert!(
+        error.contains("unsupported nested override selector 'parent'"),
+        "{error}"
+    );
+}
+
+#[test]
 fn manifest_overrides_rejects_version_qualified_selectors() {
     let manifest = PackageManifest::parse(
         r#"{"name":"root","version":"1.0.0","overrides":{"typescript@*":"$typescript"}}"#,

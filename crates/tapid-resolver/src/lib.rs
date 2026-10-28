@@ -9,6 +9,9 @@ use std::{
 use tapid_core::{PackageName, PackageSource, PackageVersion, PeerContext};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
+mod overrides;
+pub use overrides::{OverrideMatch, OverridePolicy, OverrideRule};
+
 #[cfg(test)]
 thread_local! {
     static REQUIREMENT_BASE_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -538,6 +541,8 @@ pub struct ResolutionPreferences {
 /// Exact package identities, root selections, and parent-to-child edges for a graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
+    /// Matched declarations with original and effective edge requirements.
+    pub override_matches: Vec<OverrideMatch>,
     /// Every exact package identity selected in deterministic order.
     pub selected: Vec<RegistryPackageId>,
     /// Exact identities selected for direct manifest dependencies.
@@ -573,6 +578,20 @@ pub struct RequirementOrigin {
 /// Structured deterministic failures from requirement parsing and graph selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
+    InvalidOverride {
+        rule: String,
+    },
+    OverrideConflict {
+        parent: Box<RegistryPackageId>,
+        binding: PackageName,
+        dependency: PackageName,
+        rules: Vec<String>,
+    },
+    OverrideTopology {
+        parent: Box<RegistryPackageId>,
+        bindings: Vec<PackageName>,
+        rules: Vec<String>,
+    },
     MetadataLimitExceeded,
     InvalidRequirement(String),
     UnsupportedRange(String),
@@ -669,8 +688,32 @@ pub fn resolve_graph_with_preferences<F>(
     ds: &[Dependency],
     metadata: &[RegistryMetadata],
     options: ResolutionOptions,
+    registry_for_dependency: F,
+    preferred: &ResolutionPreferences,
+) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+{
+    resolve_graph_with_policy(
+        ds,
+        metadata,
+        options,
+        registry_for_dependency,
+        preferred,
+        &OverridePolicy::default(),
+    )
+}
+
+/// Resolve edge ranges with a compiled policy, preserving source and alias identity.
+/// Different incoming bindings may share an exact identity only when their
+/// complete effective outgoing requirement maps agree.
+pub fn resolve_graph_with_policy<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
     mut registry_for_dependency: F,
     preferred: &ResolutionPreferences,
+    policy: &OverridePolicy,
 ) -> Result<Resolution, ResolveError>
 where
     F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
@@ -690,6 +733,10 @@ where
             .iter()
             .map(|item| (&item.registry, item.packages.as_slice())),
     )?;
+    bytes = bytes.saturating_add(policy.bytes);
+    if bytes > 64 * 1024 * 1024 {
+        return Err(ResolveError::MetadataLimitExceeded);
+    }
     if ds.len() > 100_000 {
         return Err(ResolveError::MetadataLimitExceeded);
     }
@@ -772,24 +819,105 @@ where
                 "conflicting root binding for {local_name}"
             )));
         }
-        queue.push(id);
+        queue.push((id, local_name));
     }
 
     let mut dependencies = BTreeSet::new();
     let mut expanded = BTreeSet::new();
-    while let Some(parent) = queue.pop() {
-        if !expanded.insert(parent.clone()) {
+    let mut outgoing =
+        BTreeMap::<RegistryPackageId, (PackageName, BTreeMap<PackageName, Requirement>)>::new();
+    let mut override_matches = Vec::new();
+    let mut policy_work = 0usize;
+    while let Some((parent, binding)) = queue.pop() {
+        if !expanded.insert((parent.clone(), binding.clone())) {
             continue;
         }
-        let package_dependencies = selected_packages
+        if expanded.len() > 1_000_000 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
+        bytes = bytes
+            .saturating_add(parent.registry.as_str().len())
+            .saturating_add(parent.name.as_str().len())
+            .saturating_add(binding.as_str().len());
+        if bytes > 64 * 1024 * 1024 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
+        let original_dependencies = &selected_packages
             .get(&parent)
             .expect("selected package metadata")
-            .dependencies
-            .clone();
+            .dependencies;
+        let mut package_dependencies = BTreeMap::new();
+        let mut dependency_registries = BTreeMap::new();
+        for (dependency, original) in original_dependencies {
+            policy_work = policy_work.saturating_add(1);
+            if policy_work > 1_000_000 {
+                return Err(ResolveError::MetadataLimitExceeded);
+            }
+            bytes = bytes
+                .saturating_add(dependency.as_str().len())
+                .saturating_add(original.retained_bytes());
+            if bytes > 64 * 1024 * 1024 {
+                return Err(ResolveError::MetadataLimitExceeded);
+            }
+            let registry =
+                registry_for_dependency(&parent.registry, original.package_name(dependency))
+                    .map_err(ResolveError::RegistryRouting)?;
+            let (effective, rules) = if registry.registry().is_some() {
+                policy.apply(
+                    &parent,
+                    &binding,
+                    dependency,
+                    original,
+                    &mut policy_work,
+                    &mut bytes,
+                )?
+            } else {
+                (original.clone(), Vec::new())
+            };
+            dependency_registries.insert(dependency.clone(), registry);
+            if !rules.is_empty() {
+                override_matches.push(OverrideMatch {
+                    parent: parent.clone(),
+                    binding: binding.clone(),
+                    dependency: dependency.clone(),
+                    original: original.clone(),
+                    effective: effective.clone(),
+                    rules,
+                });
+            }
+            package_dependencies.insert(dependency.clone(), effective);
+        }
+        if let Some((previous_binding, previous)) = outgoing.get(&parent) {
+            if previous.len() != package_dependencies.len()
+                || previous.iter().any(|(name, range)| {
+                    package_dependencies
+                        .get(name)
+                        .is_none_or(|other| !overrides::same_range(range, other))
+                })
+            {
+                let mut bindings = vec![previous_binding.clone(), binding];
+                bindings.sort();
+                let rules = override_matches
+                    .iter()
+                    .filter(|matched| matched.parent == parent)
+                    .flat_map(|matched| matched.rules.iter().cloned())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                return Err(ResolveError::OverrideTopology {
+                    parent: Box::new(parent),
+                    bindings,
+                    rules,
+                });
+            }
+            continue;
+        }
+        outgoing.insert(parent.clone(), (binding, package_dependencies.clone()));
         for (dependency, requirement) in package_dependencies {
             let actual_name = requirement.package_name(&dependency).clone();
-            let registry = registry_for_dependency(&parent.registry, &actual_name)
-                .map_err(ResolveError::RegistryRouting)?;
+            let registry = dependency_registries
+                .remove(&dependency)
+                .expect("routed original dependency");
             let requirements = BTreeSet::from([requirement]);
             let child_package = match select_package(
                 &registry,
@@ -824,8 +952,8 @@ where
             });
             if selected.insert(child.clone()) {
                 selected_packages.insert(child.clone(), child_package);
-                queue.push(child);
             }
+            queue.push((child, dependency));
         }
     }
 
@@ -900,6 +1028,7 @@ where
     }
 
     Ok(Resolution {
+        override_matches,
         selected: selected.into_iter().collect(),
         roots,
         root_bindings,

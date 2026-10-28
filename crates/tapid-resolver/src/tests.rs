@@ -5,6 +5,289 @@ fn req(s: &str) -> Requirement {
 }
 
 #[test]
+fn targeted_override_changes_only_matching_parent() {
+    let source = "https://registry.npmjs.org";
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("a", "1.0.0", &[("child", "1")]),
+            package("b", "1.0.0", &[("child", "1")]),
+            package("child", "1.0.0", &[]),
+            package("child", "2.0.0", &[]),
+        ],
+    )];
+    let policy = OverridePolicy::new(vec![OverrideRule {
+        id: "a/child".into(),
+        parent: Some(("a".parse().unwrap(), None)),
+        dependency: "child".parse().unwrap(),
+        replacement: req("2"),
+    }])
+    .unwrap();
+    let resolution = resolve_graph_with_policy(
+        &[dep(source, "a", "1"), dep(source, "b", "1")],
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+        &policy,
+    )
+    .unwrap();
+    let versions = resolution
+        .dependencies
+        .iter()
+        .map(|edge| (edge.parent.name.as_str(), edge.child.version.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(versions["a"], "2.0.0");
+    assert_eq!(versions["b"], "1.0.0");
+    assert_eq!(
+        metadata[0].packages[0].dependencies[&"child".parse().unwrap()].raw,
+        "1"
+    );
+    assert_eq!(resolution.override_matches.len(), 1);
+    assert_eq!(resolution.override_matches[0].rules, ["a/child"]);
+}
+
+fn override_rule(
+    id: &str,
+    parent: Option<(&str, Option<&str>)>,
+    child: &str,
+    replacement: &str,
+) -> OverrideRule {
+    OverrideRule {
+        id: id.into(),
+        parent: parent.map(|(name, range)| (name.parse().unwrap(), range.map(req))),
+        dependency: child.parse().unwrap(),
+        replacement: req(replacement),
+    }
+}
+
+#[test]
+fn targeted_override_precedence_uses_selected_parent_version() {
+    let source = "https://registry.npmjs.org";
+    let mut metadata = vec![registry(
+        source,
+        vec![
+            package("a", "1.0.0", &[("child", "1")]),
+            package("a", "2.0.0", &[("child", "1")]),
+            package("b", "1.0.0", &[("child", "1")]),
+            package("child", "1.0.0", &[]),
+            package("child", "2.0.0", &[]),
+            package("child", "3.0.0", &[]),
+            package("child", "4.0.0", &[]),
+        ],
+    )];
+    let rules = vec![
+        override_rule("flat", None, "child", "2"),
+        override_rule("parent", Some(("a", None)), "child", "3"),
+        override_rule("version", Some(("a", Some("^1"))), "child", "4"),
+    ];
+    for reverse in [false, true] {
+        let mut rules = rules.clone();
+        if reverse {
+            rules.reverse();
+            metadata[0].packages.reverse();
+        }
+        let policy = OverridePolicy::new(rules).unwrap();
+        // Supply the second a version through an immediate local binding named a.
+        let mut complete = metadata.clone();
+        complete[0]
+            .packages
+            .push(package("holder", "1.0.0", &[("a", "2")]));
+        let resolution = resolve_graph_with_policy(
+            &[
+                dep(source, "a", "1"),
+                dep(source, "b", "1"),
+                dep(source, "holder", "1"),
+            ],
+            &complete,
+            Default::default(),
+            |parent, _| Ok(parent.clone()),
+            &Default::default(),
+            &policy,
+        )
+        .unwrap();
+        let versions = resolution
+            .dependencies
+            .iter()
+            .filter(|edge| edge.dependency.as_str() == "child")
+            .map(|edge| {
+                (
+                    (edge.parent.name.as_str(), edge.parent.version.to_string()),
+                    edge.child.version.to_string(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(versions[&("a", "1.0.0".into())], "4.0.0");
+        assert_eq!(versions[&("a", "2.0.0".into())], "3.0.0");
+        assert_eq!(versions[&("b", "1.0.0".into())], "2.0.0");
+    }
+}
+
+#[test]
+fn targeted_override_bounds_retained_context_evidence() {
+    let source = "https://registry.npmjs.org";
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("parent", "1.0.0", &[("child", "1")]),
+            package("child", "2.0.0", &[]),
+        ],
+    )];
+    let policy = OverridePolicy::new(vec![override_rule(
+        &"x".repeat(1024 * 1024),
+        None,
+        "child",
+        "2",
+    )])
+    .unwrap();
+    let roots = (0..70)
+        .map(|index| dep(source, &format!("alias-{index}"), "npm:parent@1"))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        resolve_graph_with_policy(
+            &roots,
+            &metadata,
+            Default::default(),
+            |parent, _| Ok(parent.clone()),
+            &Default::default(),
+            &policy
+        ),
+        Err(ResolveError::MetadataLimitExceeded)
+    ));
+}
+
+#[test]
+fn targeted_override_conflicts_only_at_winning_precedence() {
+    let source = "https://registry.npmjs.org";
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("a", "1.0.0", &[("child", "1")]),
+            package("child", "2.0.0", &[]),
+            package("child", "3.0.0", &[]),
+        ],
+    )];
+    let resolve = |rules| {
+        resolve_graph_with_policy(
+            &[dep(source, "a", "1")],
+            &metadata,
+            Default::default(),
+            |parent, _| Ok(parent.clone()),
+            &Default::default(),
+            &OverridePolicy::new(rules).unwrap(),
+        )
+    };
+    let mut rules = vec![
+        override_rule("flat1", None, "child", "1"),
+        override_rule("flat2", None, "child", "2"),
+        override_rule("selected1", Some(("a", Some("^1"))), "child", "2.0.0"),
+        override_rule("selected2", Some(("a", Some(">=1"))), "child", "=2.0.0"),
+    ];
+    assert!(resolve(rules.clone()).is_ok());
+    rules[3].replacement = req("3");
+    let error = resolve(rules.clone()).unwrap_err();
+    assert!(
+        matches!(&error, ResolveError::OverrideConflict { rules, .. } if rules == &["selected1", "selected2"])
+    );
+    rules.reverse();
+    assert_eq!(resolve(rules).unwrap_err(), error);
+}
+
+#[test]
+fn targeted_override_rejects_divergent_alias_contexts_even_with_same_selected_child() {
+    let source = "https://registry.npmjs.org";
+    let metadata = vec![registry(
+        source,
+        vec![
+            package("actual", "1.0.0", &[("child", "^1")]),
+            package("holder", "1.0.0", &[("@scope/target", "npm:actual@1")]),
+            package("child", "1.5.0", &[]),
+        ],
+    )];
+    let policy = OverridePolicy::new(vec![override_rule(
+        "target/child",
+        Some(("@scope/target", None)),
+        "child",
+        ">=1 <2",
+    )])
+    .unwrap();
+    let error = resolve_graph_with_policy(
+        &[
+            dep(source, "other", "npm:actual@1"),
+            dep(source, "holder", "1"),
+        ],
+        &metadata,
+        Default::default(),
+        |parent, _| Ok(parent.clone()),
+        &Default::default(),
+        &policy,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ResolveError::OverrideTopology { bindings, .. }
+        if bindings.iter().map(PackageName::as_str).collect::<Vec<_>>() == ["@scope/target", "other"])
+    );
+}
+
+#[test]
+fn targeted_override_shares_equivalent_alias_contexts_and_terminates_cycles() {
+    let source = "https://registry.npmjs.org";
+    let metadata = vec![registry(
+        source,
+        vec![
+            package(
+                "actual",
+                "1.0.0",
+                &[("again", "npm:actual@1"), ("local", "npm:@real/child@^1")],
+            ),
+            package("@real/child", "1.0.0", &[]),
+            package("@real/child", "2.0.0", &[]),
+        ],
+    )];
+    let policy = OverridePolicy::new(
+        ["first", "second", "again"]
+            .iter()
+            .map(|name| override_rule(name, Some((name, None)), "local", "2"))
+            .collect(),
+    )
+    .unwrap();
+    let resolution = resolve_graph_with_policy(
+        &[
+            dep(source, "first", "npm:actual@1"),
+            dep(source, "second", "npm:actual@1"),
+        ],
+        &metadata,
+        Default::default(),
+        |parent, target| {
+            assert!(target.as_str() == "actual" || target.as_str() == "@real/child");
+            Ok(parent.clone())
+        },
+        &Default::default(),
+        &policy,
+    )
+    .unwrap();
+    assert_eq!(resolution.selected.len(), 2);
+    assert_eq!(resolution.override_matches.len(), 3);
+    assert!(
+        resolution
+            .override_matches
+            .iter()
+            .all(|matched| matched.effective.raw == "npm:@real/child@2")
+    );
+    assert_eq!(
+        resolution
+            .dependencies
+            .iter()
+            .find(|edge| edge.dependency.as_str() == "local")
+            .unwrap()
+            .child
+            .name
+            .as_str(),
+        "@real/child"
+    );
+}
+
+#[test]
 fn npm_aliases_validate_actual_names_and_ranges() {
     let local: PackageName = "local".parse().unwrap();
     for (spec, target) in [

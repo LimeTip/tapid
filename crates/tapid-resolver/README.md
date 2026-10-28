@@ -35,3 +35,23 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+`resolve_graph_with_policy` additionally accepts a compiled `OverridePolicy`.
+Rules replace immediate registry dependency ranges by local child name, optionally
+restricted to an incoming local parent binding and selected parent version range.
+Version-qualified parent rules precede parent-only rules, which precede flat
+rules. Different parsed replacements at the winning precedence fail with
+`OverrideConflict`; diagnostic spelling is excluded from range comparison.
+Aliases retain their actual targets and routing uses the original target.
+Copied parents and copied child sources are excluded. Peer requirements remain
+unchanged. Existing resolution entry points use an empty policy.
+
+The existing traversal registers every reachable exact-package/local-binding
+context, including bindings discovered after expansion. Equivalent outgoing maps
+share the package; differing effective maps fail with `OverrideTopology`, even
+when candidates would select the same child version. Contexts are deduplicated
+for cycles. Context visits and edge/rule work are bounded at 1,000,000; retained
+policy text and context evidence share the 64 MiB input budget. Successful
+results retain matched rule identifiers and original/effective requirements.
+This resolver interface does not activate nested declarations in the CLI;
+manifest compilation and consumer migration remain separate integration work.

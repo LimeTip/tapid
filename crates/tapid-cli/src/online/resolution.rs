@@ -856,6 +856,11 @@ pub(crate) fn manifest_overrides(
 ) -> Result<BTreeMap<PackageName, Requirement>, String> {
     let mut overrides = BTreeMap::new();
     for (name, range) in manifest.overrides() {
+        let tapid_manifest::OverrideDeclaration::Replacement(range) = range else {
+            return Err(format!(
+                "unsupported nested override selector '{name}': targeted resolution is not supported"
+            ));
+        };
         if name.starts_with("jsr:") {
             return Err(format!(
                 "unsupported override target '{name}': npm registry package names only are supported"
