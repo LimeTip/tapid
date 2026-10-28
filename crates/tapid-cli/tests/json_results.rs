@@ -16,6 +16,20 @@ fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_
         jsonschema::validator_for(&schema).unwrap()
     });
     assert!(ENVELOPE.is_valid(&value), "envelope schema drift: {value}");
+    if value["data"]["preview_kind"] == "resolved_graph" {
+        static PREVIEW: std::sync::LazyLock<jsonschema::Validator> =
+            std::sync::LazyLock::new(|| {
+                let schema = serde_json::from_str(include_str!(
+                    "../schemas/cli/dependency-preview.v1.schema.json"
+                ))
+                .unwrap();
+                jsonschema::validator_for(&schema).unwrap()
+            });
+        assert!(
+            PREVIEW.is_valid(&value["data"]),
+            "preview schema drift: {value}"
+        );
+    }
     (output, value)
 }
 

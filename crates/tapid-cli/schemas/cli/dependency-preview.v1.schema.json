@@ -256,6 +256,243 @@
       "items": {
         "type": "string"
       }
+    },
+    "starting_state": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "root_manifest",
+        "selected_manifest",
+        "workspace",
+        "lock",
+        "registry",
+        "lifecycle_policy",
+        "operation",
+        "target",
+        "consistency",
+        "exclusions"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "root_manifest": {
+          "$ref": "#/$defs/source_identity"
+        },
+        "selected_manifest": {
+          "$ref": "#/$defs/source_identity"
+        },
+        "workspace": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_identity"
+          }
+        },
+        "lock": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "absent"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "state",
+                "digest"
+              ],
+              "properties": {
+                "state": {
+                  "const": "present"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256-[0-9a-f]{64}$"
+                }
+              }
+            }
+          ]
+        },
+        "registry": {
+          "type": "object",
+          "required": [
+            "identity_kind",
+            "routing"
+          ],
+          "properties": {
+            "identity_kind": {
+              "const": "semantic_configuration"
+            },
+            "routing": {
+              "type": "object",
+              "required": [
+                "origins",
+                "routes",
+                "default_origin",
+                "jsr_origin",
+                "credential_environment_names"
+              ],
+              "properties": {
+                "origins": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "routes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "scope",
+                      "origin",
+                      "credential_environment_name"
+                    ],
+                    "properties": {
+                      "scope": {
+                        "type": "string"
+                      },
+                      "origin": {
+                        "type": "string"
+                      },
+                      "credential_environment_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "default_origin": {
+                  "type": "string"
+                },
+                "jsr_origin": {
+                  "type": "string"
+                },
+                "credential_environment_names": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "lifecycle_policy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "absent_default_deny"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "state",
+                "identity_kind",
+                "digest"
+              ],
+              "properties": {
+                "state": {
+                  "const": "present"
+                },
+                "identity_kind": {
+                  "const": "exact_source"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256-[0-9a-f]{64}$"
+                }
+              }
+            }
+          ]
+        },
+        "operation": {
+          "type": "object",
+          "required": [
+            "mode",
+            "update",
+            "allow_unverified_registry_artifacts"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "online",
+                "refresh",
+                "offline",
+                "frozen",
+                "ci",
+                "ci_offline",
+                "update"
+              ]
+            },
+            "update": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "named",
+                    "selection",
+                    "save_policy"
+                  ],
+                  "properties": {
+                    "named": {
+                      "type": "boolean"
+                    },
+                    "selection": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "save_policy": {
+                      "enum": [
+                        "exact",
+                        "caret",
+                        "tilde",
+                        null
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "allow_unverified_registry_artifacts": {
+              "type": "boolean"
+            }
+          }
+        },
+        "target": {
+          "type": "string"
+        },
+        "consistency": {
+          "const": "rechecked_non_atomic_observation"
+        },
+        "exclusions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Optional additive v1 evidence from rechecked inputs, not an atomic snapshot, saved execution plan or runtime assurance."
     }
   },
   "$defs": {
@@ -293,6 +530,26 @@
           "additionalProperties": {
             "type": "string"
           }
+        }
+      }
+    },
+    "source_identity": {
+      "type": "object",
+      "required": [
+        "identity_kind",
+        "path",
+        "digest"
+      ],
+      "properties": {
+        "identity_kind": {
+          "const": "exact_source"
+        },
+        "path": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256-[0-9a-f]{64}$"
         }
       }
     }

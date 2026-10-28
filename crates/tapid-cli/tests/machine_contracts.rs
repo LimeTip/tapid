@@ -751,6 +751,12 @@ fn dependency_preview_schema_covers_read_only_resolution() {
     ))
     .unwrap();
     assert!(validator.is_valid(&example));
+    let mut legacy = example.clone();
+    legacy.as_object_mut().unwrap().remove("starting_state");
+    assert!(
+        validator.is_valid(&legacy),
+        "older v1 payloads remain valid"
+    );
     let (output, preview) = invoke(
         &project,
         &[
@@ -771,6 +777,13 @@ fn dependency_preview_schema_covers_read_only_resolution() {
         ("/packages", json!([{}])),
         ("/packages/0/after/dependencies", json!([])),
         ("/packages/0/reasons/0/graph", json!("launch")),
+        ("/starting_state/consistency", json!("atomic")),
+        ("/starting_state/root_manifest/digest", json!(false)),
+        ("/starting_state/lock/state", json!("verified")),
+        (
+            "/starting_state/operation/allow_unverified_registry_artifacts",
+            json!("false"),
+        ),
     ] {
         let mut broken = preview["data"].clone();
         *broken.pointer_mut(pointer).unwrap() = invalid;

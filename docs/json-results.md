@@ -102,6 +102,7 @@ Ordinary install and mutating lifecycle results contain `data.package_count` and
 | `preview_kind` | `"resolved_graph"` |
 | `artifacts_prepared` | Always `false` |
 | `target` | Current OS/architecture/libc inspection target, with `unspecified` when libc is unavailable |
+| `starting_state` | Rechecked manifest, lock, routing and lifecycle-policy input evidence; a non-atomic observation that excludes credentials, artifact bytes, installed state and runtime assurance |
 | `declarations` | Declaration edits with `section`, `name`, `before`, and `after`; absent requirements are null |
 | `packages` | Package records and graph changes described below |
 | `root_changes` | Changed graph root bindings with `name`, `before`, and `after`; absent bindings are null, present bindings are package keys |
@@ -109,6 +110,12 @@ Ordinary install and mutating lifecycle results contain `data.package_count` and
 | `limitations` | Presentation strings describing unavailable evidence and preview limits |
 
 Declarations follow dependency-section order: `dependencies`, `devDependencies`, `optionalDependencies`, then `peerDependencies`, with names sorted within each section. Packages sort by canonical package key; root changes sort by binding name. Empty change lists are arrays, not null.
+
+The preview schema describes `starting_state` when present, including its own
+`schema_version: 1` and `consistency: "rechecked_non_atomic_observation"`.
+It remains optional for compatibility with earlier version 1 previews. Exact-source
+digests identify observed input bytes; they do not establish compatibility or
+authorize executing a saved plan.
 
 Each package entry contains `key`, `source`, `name`, `version`, `integrity`, `dependencies`, `change`, `before`, `after`, and `reasons`. A package record contains the first six fields. `dependencies` maps local dependency names to selected package keys. `integrity` contains available integrity metadata or null; it does not attest artifact bytes. `before` and `after` contain the corresponding record or null when absent. The top-level record describes the after state when present, otherwise the before state. Canonical keys distinguish source, name, version, peer context, and platform context.
 

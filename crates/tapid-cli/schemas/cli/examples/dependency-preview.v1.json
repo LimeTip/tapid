@@ -18,5 +18,50 @@
   },
   "limitations": [
     "Metadata-only observation; artifacts and lifecycle outputs are not verified."
-  ]
+  ],
+  "starting_state": {
+    "schema_version": 1,
+    "root_manifest": {
+      "identity_kind": "exact_source",
+      "path": "package.json",
+      "digest": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "selected_manifest": {
+      "identity_kind": "exact_source",
+      "path": "package.json",
+      "digest": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "workspace": [],
+    "lock": {
+      "state": "absent"
+    },
+    "registry": {
+      "identity_kind": "semantic_configuration",
+      "routing": {
+        "origins": [],
+        "routes": [],
+        "default_origin": "https://registry.npmjs.org",
+        "jsr_origin": "https://npm.jsr.io",
+        "credential_environment_names": []
+      }
+    },
+    "lifecycle_policy": {
+      "state": "absent_default_deny"
+    },
+    "operation": {
+      "mode": "online",
+      "update": null,
+      "allow_unverified_registry_artifacts": false
+    },
+    "target": "linux/x86_64/gnu",
+    "consistency": "rechecked_non_atomic_observation",
+    "exclusions": [
+      "credential values",
+      "mutable registry metadata",
+      "artifact availability and bytes",
+      "installed and store state",
+      "hook outputs",
+      "runtime assurance"
+    ]
+  }
 }
