@@ -1657,10 +1657,14 @@ dependencies = [
 name = "tapid-security-provider"
 version = "0.0.1"
 dependencies = [
+ "fs4",
+ "libc",
  "serde_json",
+ "sha2",
  "tapid-attestations",
  "tapid-protocol",
  "tapid-signatures",
+ "tapid-test-support",
 ]
 
 [[package]]

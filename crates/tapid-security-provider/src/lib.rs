@@ -6,3 +6,8 @@ pub use retrieval::{Disclosure, RetrievalError, retrieve, retrieve_recorded};
 
 mod collection;
 pub use collection::{CollectionInput, CollectionLimit, SecurityCollection, collect_recorded};
+
+#[cfg(unix)]
+mod replay;
+#[cfg(unix)]
+pub use replay::ReplayStore;

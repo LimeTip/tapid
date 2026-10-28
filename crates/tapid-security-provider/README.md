@@ -19,8 +19,9 @@ replay-state writer succeeds. It passes the issuer, entire request, verified
 sequence and envelope digest to the writer. The writer must atomically compare
 against current state and durably publish the new floor, rejecting concurrent
 rollback or equivocation. Writer failures return `StateUnavailable`; denied
-disclosure and invalid evidence never invoke the writer. This interface does
-not itself provide a durable filesystem store or make an in-memory writer durable.
+disclosure and invalid evidence never invoke the writer. An in-memory writer does
+not provide durability; the Unix adapter below supplies a durable filesystem
+implementation.
 
 `collect_recorded` evaluates exact requests in input order and retains successful
 reports alongside per-request failures. It admits at most 1,000 inputs and reads
@@ -39,9 +40,28 @@ because another request failed. The caller must still enforce graph completeness
 and policy thresholds. Transport timeouts and collection deadlines remain the
 adapter's responsibility; this synchronous interface cannot interrupt a blocked read.
 
-This is the retrieval foundation, not a complete audit service. Durable replay
-persistence, credentials, cache, deadline enforcement and live transport remain
-unimplemented. Callers must supply trusted replay floors and persist accepted
+This is the retrieval foundation, not a complete audit service. Credentials,
+cache bodies, deadline enforcement and live transport remain unimplemented.
+Callers must supply trusted replay floors and persist accepted
 sequence/digest state before using evidence for policy. A verified response alone
-does not establish collection completeness. No project, store, artifact or
-transaction operation is performed here. See [security evidence](../../docs/security-evidence.md).
+does not establish collection completeness. No project, verified-package store,
+artifact or transaction operation is performed here. See [security evidence](../../docs/security-evidence.md).
+
+On Unix, `ReplayStore` supplies the durable callback for `retrieve_recorded`:
+`load(issuer, request)` returns the optional sequence/digest floor, and `record`
+compares again under a permanent cross-process file lock before publishing.
+The caller must supply a trusted, stable, owned parent directory. The adapter
+creates a mode-0700 state directory and mode-0600 files, rejects symlinks,
+hard-linked or malformed floors, and hashes the issuer plus entire validated
+request into filenames. It stores no envelope bodies or plaintext inventory.
+Directory identity and permissions are rechecked on operations. This protects
+against other users, not a malicious process running as the same user or local
+state deletion/backup rollback.
+
+Floor updates sync a staging file, atomically rename it over the floor, and sync
+the directory before returning. Interrupted staging never replaces the old floor;
+a retry discards it under the lock. Errors withhold evidence, even if publication
+may already have happened. Equal-sequence retries still sync publication. Cache
+body eviction must never delete this directory. There is no eviction API.
+Windows persistence, CLI configuration and live provider activation remain
+unimplemented; the Unix adapter alone does not enable network requests.

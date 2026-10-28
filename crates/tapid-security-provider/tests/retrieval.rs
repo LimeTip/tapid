@@ -668,3 +668,66 @@ fn collection_completeness_requires_current_full_signed_coverage_and_recording()
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn retrieval_commits_a_durable_floor_before_returning_evidence() {
+    use tapid_security_provider::{ReplayStore, retrieve_recorded};
+    let home = tapid_test_support::TempHome::new("recorded-security").unwrap();
+    let root = home.path().join("floors");
+    let store = ReplayStore::open(&root).unwrap();
+    let request = request();
+    let keys = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &keys,
+        valid_until: 3000,
+    };
+    let freshness = EvidenceFreshness {
+        now: 1100,
+        max_age: 500,
+        minimum_sequence: 0,
+        previous_digest: None,
+    };
+    let evidence = retrieve_recorded(
+        &request,
+        &Disclosure::Exact(&request),
+        &trust,
+        &freshness,
+        &mut |_| Ok(Cursor::new(ENVELOPE)),
+        &mut |issuer, request, sequence, digest| store.record(issuer, request, sequence, digest),
+    )
+    .unwrap();
+    assert_eq!(
+        ReplayStore::open(&root)
+            .unwrap()
+            .load(trust.issuer, &request)
+            .unwrap(),
+        Some((
+            evidence.result().sequence,
+            evidence.envelope_digest().to_owned()
+        ))
+    );
+    // A concurrent advance after the verifier's freshness snapshot must still
+    // withhold the older signed response at the recording gate.
+    store
+        .record(
+            trust.issuer,
+            &request,
+            evidence.result().sequence + 1,
+            evidence.envelope_digest(),
+        )
+        .unwrap();
+    assert!(matches!(
+        retrieve_recorded(
+            &request,
+            &Disclosure::Exact(&request),
+            &trust,
+            &freshness,
+            &mut |_| Ok(Cursor::new(ENVELOPE)),
+            &mut |issuer, request, sequence, digest| store
+                .record(issuer, request, sequence, digest)
+        ),
+        Err(RetrievalError::StateUnavailable)
+    ));
+}
