@@ -421,6 +421,7 @@ fn hosted_claims_and_publication_use_the_same_closed_v1_contract() {
         "scopes":["read_private", "submit_analysis"], "issuedAt":1000, "expiresAt":2000,
         "credentialId":"credential-1"});
     let parsed: AccountAuthorization = serde_json::from_value(claims.clone()).unwrap();
+    assert_eq!(parsed.validate(), Ok(()));
     let previous: previous_consumer::AccountAuthorization =
         serde_json::from_value(json!(parsed)).unwrap();
     assert_eq!(json!(previous), claims);
@@ -428,10 +429,12 @@ fn hosted_claims_and_publication_use_the_same_closed_v1_contract() {
         "evidenceDigest":"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "expectedSequence":3});
     let parsed: EvidencePublicationRequest = serde_json::from_value(publication.clone()).unwrap();
+    assert_eq!(parsed.validate(), Ok(()));
     let previous: previous_consumer::Publication = serde_json::from_value(json!(parsed)).unwrap();
     assert_eq!(json!(previous), publication);
     let error = json!({"version":"tapid-security-v1", "code":"credential_revoked", "retryAfterSeconds":null});
     let parsed: SecurityErrorResponse = serde_json::from_value(error.clone()).unwrap();
+    assert_eq!(parsed.validate(), Ok(()));
     let previous: previous_consumer::ErrorResponse = serde_json::from_value(json!(parsed)).unwrap();
     assert_eq!(json!(previous), error);
     let mut invalid = claims;
@@ -498,4 +501,146 @@ fn every_present_platform_value_obeys_the_wire_byte_limit() {
     request.subject.platform.cpu = None;
     request.subject.platform.libc = None;
     assert_eq!(request.validate(), Ok(()));
+}
+
+#[test]
+fn signed_withdrawal_advances_replay_state_without_becoming_a_favorable_scan() {
+    let ring = keys();
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &ring,
+        valid_until: 3000,
+    };
+    let favorable = sign(envelope(&result()));
+    let original = verify_security_evidence(&favorable, &request(), &trust, &freshness()).unwrap();
+    let mut withdrawn = result();
+    withdrawn.sequence = original.result().sequence + 1;
+    withdrawn.status = SecurityStatus::InvalidEvidence;
+    withdrawn.coverage.clear();
+    withdrawn.findings.clear();
+    withdrawn.limitations = vec!["withdrawn: incorrect scanner rules".into()];
+    let bytes = sign(envelope(&withdrawn));
+    let prior = EvidenceFreshness {
+        minimum_sequence: original.result().sequence,
+        previous_digest: Some(original.envelope_digest()),
+        ..freshness()
+    };
+    let accepted = verify_security_evidence(&bytes, &request(), &trust, &prior).unwrap();
+    assert_eq!(accepted.result().status, SecurityStatus::InvalidEvidence);
+    let updated = EvidenceFreshness {
+        minimum_sequence: accepted.result().sequence,
+        previous_digest: Some(accepted.envelope_digest()),
+        ..freshness()
+    };
+    assert_eq!(
+        verify_security_evidence(&favorable, &request(), &trust, &updated).unwrap_err(),
+        SecurityReason::Replay
+    );
+    assert_eq!(
+        verify_security_evidence(&bytes, &request(), &trust, &updated)
+            .unwrap()
+            .result()
+            .status,
+        SecurityStatus::InvalidEvidence
+    );
+    withdrawn
+        .limitations
+        .push("different content at same sequence".into());
+    assert_eq!(
+        verify_security_evidence(&sign(envelope(&withdrawn)), &request(), &trust, &updated)
+            .unwrap_err(),
+        SecurityReason::Replay
+    );
+}
+
+#[test]
+fn issuer_key_rotation_allows_overlap_and_rejects_retired_key() {
+    // RFC 8032 test vector 2; public fixture material only.
+    let retained = TrustedKey {
+        key_id: "fixture-2".into(),
+        algorithm: "ed25519".into(),
+        public_key: hex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"),
+    };
+    let mut overlap = keys();
+    overlap.insert(retained.clone()).unwrap();
+    let mut retired = KeyRing::new();
+    retired.insert(retained).unwrap();
+    let old = sign(envelope(&result()));
+    let mut fresh = result();
+    fresh.sequence += 1;
+    fresh.checked_at += 10;
+    fresh.issued_at += 10;
+    let new = serde_json::to_vec(
+        &envelope(&fresh)
+            .sign(
+                "fixture-2",
+                &hex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    for ring in [&overlap, &retired] {
+        let trust = SecurityTrust {
+            issuer: "fixture.example",
+            keys: ring,
+            valid_until: 3000,
+        };
+        assert!(verify_security_evidence(&new, &request(), &trust, &freshness()).is_ok());
+    }
+    let trust = SecurityTrust {
+        issuer: "fixture.example",
+        keys: &overlap,
+        valid_until: 3000,
+    };
+    assert!(verify_security_evidence(&old, &request(), &trust, &freshness()).is_ok());
+    let trust = SecurityTrust {
+        keys: &retired,
+        ..trust
+    };
+    assert_eq!(
+        verify_security_evidence(&old, &request(), &trust, &freshness()).unwrap_err(),
+        SecurityReason::UntrustedKey
+    );
+}
+
+#[test]
+fn hosted_json_rejects_unknown_duplicate_and_malformed_fields() {
+    use tapid_protocol::{AccountAuthorization, EvidencePublicationRequest, SecurityErrorResponse};
+    for body in [
+        r#"{"version":"tapid-security-v1","code":"unknown"}"#,
+        r#"{"version":"tapid-security-v1","code":"unavailable","extra":true}"#,
+        r#"{"version":"tapid-security-v1","code":"unavailable","code":"not_found"}"#,
+        r#"{"version":"tapid-security-v1","code":"unavailable","retryAfterSeconds":-1}"#,
+        r#"{"version":"tapid-security-v1","code":"unavailable","retryAfterSeconds":1.5}"#,
+    ] {
+        assert!(serde_json::from_str::<SecurityErrorResponse>(body).is_err());
+    }
+    for body in [
+        r#"{"version":"tapid-security-v1","code":"unavailable"}"#,
+        r#"{"version":"tapid-security-v1","code":"unavailable","retryAfterSeconds":null}"#,
+    ] {
+        assert_eq!(
+            serde_json::from_str::<SecurityErrorResponse>(body)
+                .unwrap()
+                .validate(),
+            Ok(())
+        );
+    }
+    let claims = json!({"version":"tapid-security-v1", "authority":"https://accounts.example",
+        "subject":"user-1", "tenant":"org-1", "audience":"https://cloud.example",
+        "scopes":["administrator"], "issuedAt":1000, "expiresAt":2000, "credentialId":"credential-1"});
+    assert!(serde_json::from_value::<AccountAuthorization>(claims).is_err());
+    let publication = format!(
+        r#"{{"version":"tapid-security-v1","tenant":"org-1","evidenceDigest":"sha256-{}","expectedSequence":3}}"#,
+        "a".repeat(64)
+    );
+    for body in [
+        publication.replace("\"tenant\":", "\"tenant\":\"duplicate\",\"tenant\":"),
+        publication.replace(
+            "\"expectedSequence\":3",
+            "\"extra\":true,\"expectedSequence\":3",
+        ),
+    ] {
+        assert!(serde_json::from_str::<EvidencePublicationRequest>(&body).is_err());
+    }
 }
