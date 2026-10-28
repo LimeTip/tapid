@@ -3,6 +3,19 @@
 mod xpc;
 use std::io;
 
+#[cfg(target_os = "macos")]
+#[path = "authority.rs"]
+mod authority;
+#[cfg(target_os = "macos")]
+#[path = "cleanup.rs"]
+mod cleanup;
+#[path = "record.rs"]
+#[cfg(any(test, target_os = "macos"))]
+mod record;
+#[cfg(target_os = "macos")]
+#[path = "workload.rs"]
+mod workload;
+
 pub fn run(args: Vec<String>) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     if std::env::current_exe()?
@@ -12,6 +25,20 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         return xpc::service();
     }
     match args.as_slice() {
+        #[cfg(target_os = "macos")]
+        [command] if command == "authority" => authority::run(),
+        #[cfg(target_os = "macos")]
+        [command, expected, outside, tcp, unix, depth] if command == "authority-payload" => {
+            authority::payload(expected, outside, tcp, unix, depth)
+        }
+        #[cfg(target_os = "macos")]
+        [command] if command == "limits" => workload::run(),
+        #[cfg(target_os = "macos")]
+        [command, kind, transition] if command == "workload" => workload::child(kind, transition),
+        #[cfg(target_os = "macos")]
+        [command] if command == "cleanup" => cleanup::run(),
+        #[cfg(target_os = "macos")]
+        [command, action] if command == "cleanup-worker" => cleanup::worker(action),
         #[cfg(target_os = "macos")]
         [command] if command == "xpc" => xpc::client(),
         #[cfg(target_os = "macos")]
@@ -23,7 +50,7 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         [command] if command == "rejection" => rejection(),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: macos_managed_tree_probe rejection|lineage|xpc (native macOS only)",
+            "usage: macos_managed_tree_probe rejection|lineage|cleanup|limits|authority|xpc (native macOS only)",
         )),
     }
 }
@@ -165,6 +192,57 @@ mod tests {
             assert_eq!(run(args).unwrap_err().kind(), io::ErrorKind::InvalidInput);
         }
     }
+
+    #[test]
+    fn fixture_failure_and_rescue_never_establish_candidate_enforcement() {
+        use record::{Observation, Verdict};
+        let mut observation = Observation::diagnostic("normal-exit", "descendant cleanup");
+        assert_eq!(observation.verdict(), Verdict::HarnessFailure);
+        observation.setup_ready = true;
+        observation.positive_control = true;
+        assert_eq!(observation.verdict(), Verdict::Unverified);
+        observation.violation_observed = true;
+        assert_eq!(observation.verdict(), Verdict::Counterexample);
+        observation.rescue = "root killed by harness";
+        assert_eq!(observation.verdict(), Verdict::Counterexample);
+        observation.cleanup_error = Some("wait failed".into());
+        assert_eq!(observation.verdict(), Verdict::HarnessFailure);
+        assert!(observation.emit().is_ok());
+        observation.cleanup_error = None;
+        observation.candidate_available = false;
+        assert_eq!(observation.verdict(), Verdict::Unsupported);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cleanup_fixture_rejects_unknown_failure_before_spawn() {
+        assert_eq!(
+            cleanup::worker("unknown").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn workload_rejects_unknown_kind_or_transition_before_allocation() {
+        for (kind, transition) in [("unknown", "ordinary"), ("memory", "unknown")] {
+            assert_eq!(
+                workload::child(kind, transition).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn authority_rejects_unknown_expectation_without_file_access() {
+        assert_eq!(
+            authority::payload("unknown", "missing", "invalid", "missing", "leaf")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -277,6 +355,7 @@ fn lineage() -> io::Result<()> {
         "candidate=unsandboxed-diagnostic requested=observed-lineage enforced=none authoritative_boundary=none candidate_cleanup=none"
     );
     for transition in ["ordinary", "setsid", "setpgid", "double-fork"] {
+        let mut observation = record::Observation::diagnostic(transition, "cleanup on worker exit");
         let root = TempProject::new("lineage-diagnostic")?;
         let start = Instant::now();
         let status = Command::new(std::env::current_exe()?)
@@ -285,6 +364,8 @@ fn lineage() -> io::Result<()> {
             .current_dir(root.path())
             .status()?;
         if !status.success() {
+            observation.observed = format!("worker exited: {status}");
+            observation.emit()?;
             return Err(io::Error::other("worker fixture failed"));
         }
         if root.path().join("delayed-marker").exists() {
@@ -293,12 +374,17 @@ fn lineage() -> io::Result<()> {
             ));
         }
         let acknowledged = fs::read_to_string(root.path().join("ready"))?;
+        observation.setup_ready = true;
         while !root.path().join("delayed-marker").exists()
             && start.elapsed() < Duration::from_secs(3)
         {
             std::thread::sleep(Duration::from_millis(10));
         }
         let observed = root.path().join("delayed-marker").exists();
+        observation.positive_control = observed;
+        observation.violation_observed = observed;
+        observation.observed = format!("{acknowledged} delayed_marker={observed}");
+        observation.emit()?;
         println!(
             "case={transition} worker_status={status} acknowledgement={acknowledged:?} delayed_marker={observed} elapsed_us={} verdict=diagnostic-only harness_rescue=finite-child-self-expiry",
             start.elapsed().as_micros()

@@ -20,6 +20,9 @@ Commands:
 | `rejection` | Generated-file Restricted positive control, followed independently by ManagedTree and each configured limit through the public API | Requires `UnsupportedContainment` and absent target marker for each unsupported request. Any positive fixture failure makes the entire command exit 2. |
 | `lineage` | Fresh worker/child processes; ordinary execution, `setsid`, `setpgid`, and double-fork/exec; worker exits before a delayed child write | Explicitly unsandboxed diagnostic, no authority or cleanup guarantee. No candidate kills or process-group inference. |
 | `xpc` | Connect to the embedded service, perform paired filesystem controls | Requires service reply bits 15: acknowledgement, generated-file read/write, permission-denied outside read and write. Missing files, arbitrary errors and missing service do not satisfy denial. |
+| `cleanup` | Double-fork/session-changing leaf after normal exit, injected error, cancellation, timeout, worker SIGKILL and controller SIGKILL | Unsandboxed counterexamples to root-exit/tree-exit equivalence; supervisor failure explicitly unsupported. Harness root kills are not candidate cleanup. |
+| `limits` | Fixed time, combined output, process and touched-memory inputs; one or three leaves, ordinary or session-changing with redirected streams | Sixteen workload controls, not enforcement. No configured aggregate candidate exists; every limit verdict is unsupported. |
+| `authority` | Paired synthetic outside-file, symlink/traversal, TCP/UDP/Unix socket and environment controls, repeated through a child; public Restricted request | Positive fixture must work before interpreting denial. Setup rejection is unsupported, never a successful negative authority control. |
 | `worker ordinary\|setsid\|setpgid\|double-fork` | Private research fixture, launches one acknowledged child then exits | One payload with 300 ms delay; double-fork adds two immediately exiting intermediates. |
 | `child TRANSITION MILLISECONDS` | Private research fixture; delay bounded to 1–2000 ms | Creates only relative synthetic marker files. Finite work, **not** a kernel-enforced expiry deadline. |
 
@@ -42,6 +45,32 @@ A lineage run rejects an already-present marker at worker exit as inconclusive.
 The double-fork fixture allocates argv before forking and uses only fork, execv
 and _exit in child branches until a fresh Rust payload image starts. A successful
 intermediate exit does not end the readiness deadline.
+
+New research records use framed TOML (one document after each
+`--- research case ---` separator). Fields distinguish setup, positive control,
+requested/available/observed/enforced properties, threshold units, candidate
+cleanup and harness rescue. Verdicts are `harness-failure`, `counterexample`,
+`unsupported` or `unverified`; this observational harness has no supported/pass
+verdict and cannot construct production receipts. A cleanup error takes
+precedence over a counterexample. Missing markers never establish emptiness.
+
+Cleanup leaves have 600 ms finite work; holding workers have 1500 ms finite work.
+Readiness deadlines are two seconds, delayed-marker observation is bounded to
+three seconds. Cancellation and controller termination kill only a held direct
+child handle. Controller-death runs additionally allow the finite holding worker
+to finish before removing fixtures; this wait is not authoritative cleanup.
+These controls establish root/descendant separation, not candidate lifecycle.
+
+Limit leaves allocate and touch at most 2 MiB, produce at most 8192 bytes on each
+stream, and hold work for 200 ms. The controller launches at most three leaves,
+waits at most three seconds and uses a direct-child kill/wait rescue guard.
+Concurrent startup is requested, not proven simultaneous aggregate residency.
+Memory acknowledgements report bytes explicitly touched, not RSS, committed
+memory accounting or an enforced ceiling. Ordinary output is captured in one
+shared file and checked for exactly 16384 bytes per output leaf; session-changing
+controls redirect streams to null and acknowledge completion separately.
+Requested comparison thresholds are 50 ms, 4096 combined bytes, two processes
+and 4 MiB. No rlimit or candidate limit is installed by this command.
 
 ## Candidate ledger
 
@@ -76,6 +105,9 @@ Resolve the compiler artifact rather than assuming a Cargo output path:
 PROBE=$(/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node -e 'const fs=require("node:fs"); const rows=fs.readFileSync("target/probe-build.jsonl","utf8").trim().split("\n").map(JSON.parse); console.log(rows.find(x=>x.reason==="compiler-artifact"&&x.target.name==="macos_managed_tree_probe"&&x.executable).executable)')
 "$PROBE" rejection
 "$PROBE" lineage
+"$PROBE" cleanup
+"$PROBE" limits
+"$PROBE" authority
 ```
 
 For the XPC experiment use a disposable native account with execution-enabled
@@ -108,7 +140,7 @@ need for restricted entitlements. The single declared entitlement is
 `com.apple.security.app-sandbox=true`. Any packaging, signature, connection or
 fixture error is unverified setup, not expected authority denial.
 
-## Development evidence and gaps
+## Historical development evidence and gaps
 
 Base revision: `3d9461fbeef33ab66c35a63fa1cf4b2d06437677`; new uncommitted research
 files. Host: macOS **27.0.1**, build **26A434**, Darwin **27.0.0**
@@ -168,8 +200,69 @@ macOS authority or lifecycle guarantees. An offline Linux validation worker can
 complete portable repository checks with adequate storage, but cannot establish
 macOS 26 or 27 behavior.
 
-Next implement an explicit result matrix and the remaining bounded adversarial
-workloads, diagnose XPC connection setup using native launch logs in an isolated
-account, and run paired authority controls. Missing native authority does not
-block implementation of those fixtures. macOS 26 acceptance and full native
-matrix remain external execution requirements.
+## Recovered-workspace continuation
+
+The historical evidence above is preserved unchanged. Current continuation
+results and exact source scope are recorded separately in
+[the recovered-run index](macos-managed-tree-evidence/recovered-run/index.json).
+They are development evidence on macOS 27.0.1 build 26A434, not macOS 26
+acceptance or a clean-commit receipt. Historical disk exhaustion is not a current
+blocker: the continuation observed approximately 408 GiB available.
+
+New implementation adds private structured records, acknowledged cleanup/failure
+fixtures, bounded accounting workloads and paired root/child authority controls.
+It extends the recovered probe and reuses public `execute`, request/policy
+construction and shared temporary fixtures. XPC retains its separate packaging
+and identity contract; no policy compiler or production backend is copied.
+
+Six cleanup diagnostic controls observed delayed descendant writes after root
+exit or termination; the supervisor case remains unsupported. Sixteen bounded
+accounting workloads completed, including session-changing leaves with output
+redirected. Those are working inputs for candidate evaluation, not measured
+aggregate enforcement or proof of kill-on-owner-death.
+
+The authority positive fixture exercises generated-file read/write, outside-file
+read/write, symlink and parent traversal, loopback TCP connection, UDP bind, Unix
+socket connection and an explicitly constructed synthetic environment in root
+and child. Its initial Unix socket path exceeded Darwin's pathname limit; a
+short shared-fixture label corrected that setup defect. The Restricted request
+still rejects native profile installation before payload execution. Thus no
+negative authority control or descendant containment was established.
+
+The XPC bridge compiled with warnings denied, the bundle signed and verified,
+and effective App Sandbox entitlements were captured again. Connection still
+failed before worker acknowledgement. `/usr/bin/log show` returned
+`Cannot run while sandboxed`, preventing startup diagnostics in this execution
+environment. This does not identify a signing entitlement requirement and is
+not evidence that App Sandbox/XPC is impossible. Apple's
+[XPC service guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingXPCServices.html)
+was freshly retrieved to recheck bundle structure, signing and service startup;
+it supplies service semantics, not authoritative descendant-tree semantics.
+
+The final continuation example has seven passing tests; the focused production
+rejection regression runs one test and passes. Formatting, workspace Clippy
+with warnings denied, architecture checks and the separate integration workspace
+pass (integration targets: one consumer test and four contract tests). The full
+workspace command stops at CLI integration: 271 pass and five fail, each reporting
+native profile installation failure. Earlier completed suites report 282, eight
+and six passes. A separate runner run reports 152 passes and 25 failures,
+including profile installation rejection and downstream support/receipt
+expectations; the retained log includes every assertion. These are failed test
+runs, not a complete passing full-lane receipt. No test, audit policy or
+containment gate was weakened. Native macOS validation remains necessary even
+if portable validation later succeeds in the engine's Linux worker.
+
+Existing runner controls
+`inherited_regular_connected_and_listening_descriptors_are_closed` and
+`inherited_authority_does_not_cross_fork_exec_setsid_or_double_fork` were included
+in that runner attempt; both fail during native setup. Reuse those fixtures
+rather than duplicating their private sanitation logic in the example.
+Remaining independently executable work includes a controlled authenticated
+broker fixture, documented helper-route inventory,
+rapid-reparent repetitions, native rlimit comparison controls and XPC
+malformed/missing-service/timeout teardown coverage. Root/child authority
+controls also need independent per-operation records and detached variants;
+the current sequential payload stops on the first mismatch. Candidate-specific
+ownership/accounting and negative authority evidence require a runnable native
+candidate. macOS 26 remains a separate platform requirement. No evaluated
+candidate yet establishes ManagedTree, and issue #275 remains incomplete.

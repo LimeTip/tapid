@@ -1,0 +1,132 @@
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-registry-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-registry-client` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-archive/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-archive` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-manifest/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-manifest` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-policy/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-policy` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-lockfile/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-lockfile` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-resolver/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-resolver` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-core` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-runner/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-runner` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-linker/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-linker` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-publish/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-publish` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-signatures/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-signatures` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-store/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-store` (manifest) generated 1 warning
+warning: /Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-test-support/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-test-support` (manifest) generated 1 warning
+   Compiling smallvec v1.15.2
+   Compiling syn v3.0.4
+   Compiling find-msvc-tools v0.1.11
+   Compiling mio v1.2.2
+   Compiling ipnet v2.12.1
+   Compiling tapid-runner v0.0.7 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-runner)
+   Compiling tapid-archive v0.0.6 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-archive)
+   Compiling tapid-test-support v0.0.3 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-test-support)
+   Compiling cc v1.4.4
+   Compiling tokio v1.53.3
+   Compiling ring v0.17.14
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling zerotrie v0.2.5
+   Compiling zerovec v0.11.8
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling hyper v1.11.1
+   Compiling tower v0.5.3
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling rustls v0.23.46
+   Compiling serde v1.0.229
+   Compiling hyper-util v0.1.20
+   Compiling icu_provider v2.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_jcs v0.2.0
+   Compiling tapid-policy v0.0.4 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-policy)
+   Compiling tapid-signatures v0.0.4 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-signatures)
+   Compiling rustls-webpki v0.103.16
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tapid-core v0.0.7 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-core)
+   Compiling tower-http v0.6.11
+   Compiling tapid-manifest v0.0.10 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-manifest)
+   Compiling tapid-publish v0.0.5 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-publish)
+   Compiling tapid-store v0.0.8 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-store)
+   Compiling tapid-linker v0.0.8 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-linker)
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling tapid-registry-client v0.0.7 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-registry-client)
+   Compiling tapid-resolver v0.0.8 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-resolver)
+   Compiling tapid-lockfile v0.0.13 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-lockfile)
+   Compiling tapid-contract-integration v0.0.0 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/tests/integration)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.68s
+     Running consumer_install.rs (target/debug/deps/consumer_install-84bfdd7c82b479f5)
+
+running 1 test
+test local_npm_and_jsr_contracts_cover_replay_and_security_boundaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running contracts.rs (target/debug/deps/contracts-a0afaf4c3fa23b10)
+
+running 4 tests
+test unsigned_and_tampered_trust_artifacts_never_become_valid ... ok
+test trusted_keyring_verifies_authenticated_envelope_context ... ok
+test publishing_preview_is_runtime_derived_and_byte_deterministic ... ok
+test contracts_flow_from_runtime_fixture_to_deterministic_plan ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
