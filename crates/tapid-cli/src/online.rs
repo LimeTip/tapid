@@ -897,6 +897,31 @@ fn workspace_root_resolution(
     })
 }
 
+/// Resolve the complete selection before preparing only the requested closure.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_native_install(
+    project: &Path,
+    manifest: &PackageManifest,
+    store: &Store,
+    fixture: Option<&Path>,
+    config: &crate::registry::RegistryConfig,
+    profile: tapid_lockfile::InstallProfile,
+    progress: impl FnMut(crate::application::install::Progress),
+) -> Result<
+    (
+        PreparedNativeProfile,
+        crate::application::outcome::CandidateExclusions,
+    ),
+    OperationalError,
+> {
+    let workspace = workspace_materialization(project, config)?;
+    let graph = graph::resolve_package_graph(
+        project, manifest, workspace, fixture, false, config, None, None, progress,
+    )?;
+    let prepared = graph.prepare_native_profile(project, manifest, config, store, profile)?;
+    Ok((prepared, graph.candidate_exclusions))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_and_fetch_with_lock(
     project: &Path,

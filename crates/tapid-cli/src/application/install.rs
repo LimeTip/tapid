@@ -233,6 +233,7 @@ pub(crate) enum ManifestMutation<'a> {
 }
 
 pub(crate) struct InstallRequest<'a> {
+    pub(crate) profile: tapid_lockfile::InstallProfile,
     pub(crate) project_dir: &'a Path,
     pub(crate) target_manifest_path: &'a Path,
     pub(crate) mutation: ManifestMutation<'a>,
@@ -296,6 +297,7 @@ fn perform_install(
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
     let InstallRequest {
+        profile,
         target_manifest_path,
         mutation,
         store_root,
@@ -445,6 +447,27 @@ fn perform_install(
         .as_deref()
         .map(|bytes| parse_install_lock(bytes, &lock_path, ci, overrides))
         .transpose()?;
+    if current_lock.is_none()
+        && profile != tapid_lockfile::InstallProfile::default()
+        && matches!(mode, InstallMode::Online)
+        && package.is_none()
+        && manifest_override.is_none()
+        && !allow_unverified_registry_artifacts
+        && !overrides.enabled()
+    {
+        return native::fresh(
+            session,
+            &project_dir,
+            &manifest_path,
+            &original_manifest,
+            &current_manifest,
+            profile,
+            &lifecycle_policy,
+            store_root,
+            registry_fixture,
+            &mut report_replay_progress,
+        );
+    }
     let (previous_lock, mut imported) = match current_lock {
         Some(InstallLock::Native(lock)) => (Some(lock), None),
         Some(InstallLock::Imported(lock)) => (None, Some(lock)),
@@ -467,6 +490,7 @@ fn perform_install(
                 &original_manifest,
                 original_lock.as_deref().expect("classified existing lock"),
                 &selection,
+                profile,
                 &lifecycle_policy,
                 store_root,
                 offline,
@@ -476,6 +500,12 @@ fn perform_install(
         }
         None => (None, None),
     };
+    if profile != tapid_lockfile::InstallProfile::default() {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "non-full profiles require a complete native schema-11 selection",
+        ));
+    }
     if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
         imported = None;
     }

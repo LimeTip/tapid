@@ -225,6 +225,7 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
         }
         crate::application::install::run(
             crate::application::install::InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: &selection.root_dir,
                 target_manifest_path: &selection.manifest_path,
                 mutation: crate::application::install::ManifestMutation::ReplaceManifest(
@@ -303,6 +304,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
     };
     match crate::application::install::run(
         crate::application::install::InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: &selection.root_dir,
             target_manifest_path: &selection.manifest_path,
             mutation: crate::application::install::ManifestMutation::None,
@@ -360,6 +362,7 @@ fn mutate_and_install(
     }
     crate::application::install::run(
         crate::application::install::InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: &selection.root_dir,
             target_manifest_path: &selection.manifest_path,
             mutation: crate::application::install::ManifestMutation::ReplaceManifest(
@@ -560,6 +563,7 @@ mod stale_update_tests {
         project.write("package.json", newer).unwrap();
         let failure = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: &path,
                 mutation: ManifestMutation::ReplaceManifest(ManifestEdit {

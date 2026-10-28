@@ -26,6 +26,59 @@ fn validate_native_profile_layout(selection: &NativeSelection) -> Result<(), Ope
     Ok(())
 }
 
+/// Validate complete typed declarations against the manifest before filtering or
+/// obtaining sources. A matching digest alone does not prove the edge claims.
+pub(super) fn validate_native_roots(
+    selection: &NativeSelection,
+    manifest: &PackageManifest,
+    config: &crate::registry::RegistryConfig,
+) -> Result<(), OperationalError> {
+    let invalid = || {
+        OperationalError::new(
+            ErrorKind::Lockfile,
+            "native selection declarations do not match the complete manifest",
+        )
+    };
+    let edges = selection
+        .materialized_declarations(tapid_lockfile::InstallProfile::default())
+        .collect::<Vec<_>>();
+    let declarations = manifest
+        .effective_install_declarations()
+        .collect::<Vec<_>>();
+    if edges.len() != declarations.len() {
+        return Err(invalid());
+    }
+    for (kind, name, range) in declarations {
+        let (_, local) = dep_parts(name)?;
+        let expected_kind = match kind {
+            tapid_manifest::DependencyKind::Dependencies => NativeDeclarationKind::Required,
+            tapid_manifest::DependencyKind::DevDependencies => NativeDeclarationKind::Dev,
+            tapid_manifest::DependencyKind::OptionalDependencies => NativeDeclarationKind::Optional,
+            tapid_manifest::DependencyKind::PeerDependencies => {
+                unreachable!("effective declaration")
+            }
+        };
+        let edge = edges
+            .iter()
+            .find(|edge| {
+                edge.workspace.is_none()
+                    && edge.name == local.as_str()
+                    && std::mem::discriminant(&edge.kind) == std::mem::discriminant(&expected_kind)
+            })
+            .ok_or_else(invalid)?;
+        let key: LockfilePackageKey = edge.target.parse()?;
+        let requirement = range.parse::<Requirement>().map_err(|_| invalid())?;
+        let registry = registry_for_requirement(config, name, &requirement)?;
+        if key.source.package_source().as_ref() != Some(&registry)
+            || &key.name != requirement.package_name(&local)
+            || !requirement.matches_locked_version(&key.version)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 /// Complete selection and separately verified materialized sources. This is not a
 /// legacy lock and cannot be activated without layout/lifecycle preparation.
 #[allow(dead_code)]
@@ -42,9 +95,9 @@ impl PreparedNativeProfile {
     pub(crate) fn lifecycle_sources(
         &self,
         root_digest: &str,
+        profile: tapid_lockfile::InstallProfile,
     ) -> Result<Lockfile, OperationalError> {
         let mut lock = Lockfile::new(root_digest)?;
-        let profile = tapid_lockfile::InstallProfile::default();
         let mut packages = Vec::new();
         for (encoded, source) in &self.sources {
             let key: LockfilePackageKey = encoded.parse()?;

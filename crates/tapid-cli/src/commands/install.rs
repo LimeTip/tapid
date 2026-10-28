@@ -98,6 +98,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     };
     let result = crate::application::install::run_with_execution(
         crate::application::install::InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: &args.project_dir,
             target_manifest_path: &target_manifest_path,
             mutation: args.package.as_deref().map_or(

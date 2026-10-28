@@ -21,6 +21,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     let result = crate::application::install::run(
         crate::application::install::InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: &args.project_dir,
             target_manifest_path: std::path::Path::new("package.json"),
             mutation: crate::application::install::ManifestMutation::None,

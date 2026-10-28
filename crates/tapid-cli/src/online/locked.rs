@@ -128,23 +128,23 @@ pub(crate) fn prepare_native_locked(
     fixture_path: Option<&Path>,
     project: &Path,
     offline: bool,
+    profile: tapid_lockfile::InstallProfile,
 ) -> Result<selection::PreparedNativeProfile, OperationalError> {
+    selection::validate_native_roots(
+        selection,
+        &crate::commands::manifest::read_manifest_typed(&project.join("package.json"))?,
+        config,
+    )?;
     with_locked_archive_fetch(config, fixture_path, project, |fetch| {
-        selection::prepare_native_replay(
-            selection,
-            config,
-            store,
-            tapid_lockfile::InstallProfile::default(),
-            |key, url| {
-                if offline {
-                    return Err(OperationalError::new(
-                        ErrorKind::Store,
-                        "offline native selection requires verified source evidence in the store",
-                    ));
-                }
-                fetch(key, url)
-            },
-        )
+        selection::prepare_native_replay(selection, config, store, profile, |key, url| {
+            if offline {
+                return Err(OperationalError::new(
+                    ErrorKind::Store,
+                    "offline native selection requires verified source evidence in the store",
+                ));
+            }
+            fetch(key, url)
+        })
     })
 }
 
