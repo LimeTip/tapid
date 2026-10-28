@@ -79,3 +79,26 @@ checks do not supply npm baselines, actual maintenance/rollback outcomes, platfo
 qualification or participant evidence. The isolated validation handoff is unnecessary
 for these passing local tests; no configured disposable pilot command/worker receipt
 was supplied. Execution isolation remains the blocker to the first external journey.
+
+## Recovery environment reassessment — 2026-10-28
+
+Reassessed the preserved implementation at `5bdb1ac` without resetting source.
+The focused capture/comparator command above was rerun with the supplied Node
+22.23.3 executable and explicit PATH: 21 tests, 20 passed, one existing native
+probe skip, zero failures (1,299 ms). No production source changed in this retry;
+the full-lane result above remains prior-run evidence, not a new full-lane run.
+
+Checked available execution alternatives rather than attempting another Colima
+startup: Docker, Colima and Lima clients exist; Podman is absent. `docker info`
+still fails on the missing Colima Docker socket. The Colima `_lima` directory is
+absent. Connected-tool discovery exposes no disposable execution or engine
+validation tool, and the workflow supplies no configured validation command.
+A fresh bounded registry HEAD request returned HTTP 200. It executed no package
+code and is excluded from the qualification and journey launch counts.
+
+The engine's offline Linux validation lane cannot establish this networked npm
+baseline, qualified lifecycle host, or native macOS/Windows evidence. No sandbox
+denial affected the focused tests, so no isolated test-validation request is made.
+The required next execution remains the documented pilot command inside an
+engine-provided credential-free disposable environment with registry access.
+There is no new application outcome or participant evidence in this retry.
