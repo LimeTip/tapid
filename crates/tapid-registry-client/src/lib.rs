@@ -18,7 +18,10 @@ pub use models::{
     FetchMode, PackageMetadata, RawPackageMetadata, RawRegistrySnapshot, RegistryArtifact,
     RegistryKind, RegistryPackageId, RegistrySnapshot,
 };
-pub use npm::{NpmPackageEvidence, NpmRegistry};
+pub use npm::{
+    NpmInventory, NpmPackageEvidence, NpmPeerRequirement, NpmRegistry, NpmTagTarget,
+    NpmVersionFacts,
+};
 pub use transport::{HttpResponse, HttpTransport, HttpsTransport};
 
 mod git;

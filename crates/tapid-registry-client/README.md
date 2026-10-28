@@ -60,3 +60,25 @@ redirect permission, or non-HTTPS protocol permission. No checkout or package
 preparation code executes. Revision expressions and semver selectors are rejected.
 The caller pins the returned archive digest and applies archive/store verification.
 `RegistryPackageId` reuses core's source-qualified `PackageInstanceId`.
+
+## npm version inventory
+
+`NpmRegistry::inventory` requests full metadata through the same injected transport
+and response validation as `inspect`. `NpmInventory::from_metadata` parses a local
+snapshot with identical identity rules and a 32 MiB input limit. Supported version
+keys sort descending; unsupported keys are counted explicitly. Missing artifact
+metadata and malformed unrelated artifact evidence do not remove inventory records.
+Tags distinguish supported targets, missing versions and unsupported targets;
+none implies a fallback selection.
+
+`NpmInventory::facts` validates one selected version's identity, peer declarations
+(including optionality), engine declarations, deprecation text and executable
+names. Missing fields remain distinct from reported empty collections. Unknown
+engine names and opaque requirement strings remain registry data. Malformed
+selected declarations fail validation. This interface does not resolve peers,
+compare runtimes, validate executable installability, fetch artifacts, verify
+integrity or establish safety. Consumers must sanitize untrusted strings before
+display and bound their own output. `metadata_digest` fingerprints exact input
+bytes for continuation consistency; it provides no authenticity or freshness.
+Installation, evidence inspection and inventory intentionally retain different
+validation contracts. They share transport and the existing peer-declaration rules.

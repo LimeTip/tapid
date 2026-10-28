@@ -14,6 +14,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `tool install`, `tool list`, `tool update`, `tool remove` | Tool inventory and command mappings with operation change/recovery state |
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
+| `info` | Read-only npm version/tag inventory, explicit selection and registry declarations, with optional supplied Node comparison |
 | `status` | Read-only local project preflight; blockers and pending recovery retain `data` and exit 1 |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
@@ -495,3 +496,111 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Registry selection with `info`
+
+`tapid info PACKAGE --json` uses the schema-version-1 envelope, unchanged changes,
+empty stderr and typed diagnostics. It supports npm names, scoped names and the
+`npm:` prefix. Aliases, JSR, Git, file and workspace sources fail before transport
+creation. `info` supplies registry declarations for version selection; `explain`
+continues to own exact-version security evidence and `outdated` installed dependency
+comparisons. This command placement has no participant-evaluation claim.
+
+A bare name means the literal `latest` tag. `pkg@1.2.3` selects that exact supported
+version, `pkg@^1` and `pkg@*` use the resolver's existing range/prerelease semantics,
+and `pkg@next` selects that tag's exact target. Empty selectors fail. Missing,
+unsupported or malformed tag targets never fall back to another version. Ranges
+select over the entire bounded document, independently of pages; malformed winning
+records fail rather than selecting a lower version. Missing integrity does not
+exclude a version from inventory.
+
+| `data` field | Meaning |
+| --- | --- |
+| `source.kind/origin/mode/freshness` | npm, canonical configured origin, network or snapshot, unknown freshness |
+| `package` | Validated actual package name |
+| `selection.requested/kind/status/version` | Selector, exact/range/tag, typed result, selected version or null |
+| `versions` | Descending supported version keys and coverage |
+| `tags` | Lexically sorted named records with reported/missing_version/unsupported target states |
+| `facts` | Selected unverified declarations, or null without selection |
+| `checks` | Identity/structure validation and explicit Node comparison; other checks not performed |
+| `output_budget_limited` | Whether the output budget shortened planned pages |
+| `limitations` | Tapid-owned coverage and non-verification statements |
+
+`facts.peers`, `facts.engines`, and `facts.executables` contain `status` of missing
+or reported, `entries`, `returned`, `known_omitted`, and `complete`. They sort before
+limiting to 100 entries each. Named entries are arrays so sanitized names cannot
+merge map keys. Peers retain requirement text and optionality. Engines retain every
+reported name within coverage. Tapid interpretation stays under `checks`:
+`peer_requirements` and `engine_requirements` contain bounded records referencing
+their corresponding fact array by `fact_index`, with a `status`. Peer status means
+supported/unsupported expression interpretation, never peer compatibility. Unknown
+engines have an unsupported check. Executable names are declarations,
+not proof of installability or safe execution. `facts.deprecated.status/value`
+distinguishes absence from a reported string; absence does not assert safety.
+Malformed selected field types or identities fail closed.
+
+`checks.node` contains status not_checked, checked or unsupported, supplied version,
+match/mismatch outcome when checked, a reason otherwise, and scope
+`reported_node_requirement_only`. Only `--node-version VERSION` requests comparison;
+the host runtime is never inferred. Tags, aliases and unsupported engine expressions
+cannot establish a match. Missing, omitted or shortened Node declarations suppress
+comparison conclusions. Peer/project compatibility, successful resolution, artifact
+integrity, lifecycle inspection and package safety remain unchecked. A runtime
+mismatch is an inspection result and exits 0.
+
+`--page-size` is 1–100, default 100, independently applied to versions and tags.
+Each page has missing/reported `status`, `entries`, `returned`, `preceding`, `total_supported`, `known_omitted`
+(remaining after this page), `unsupported`, `complete` and `next`. `complete` means
+traversal has reached the end with no unsupported source keys or tag targets; `preceding` entries
+were not returned on this invocation. Unsupported source coverage persists after
+all supported versions are traversed. Filtering or no supported match never proves
+that no other version exists. Use independent `--versions-after` and `--tags-after`
+tokens. Page size may change. Tokens are bounded base64url records binding npm
+source identity, selector, collection, ordering, position and SHA-256 of exact
+metadata bytes. They contain no source URLs or credentials and grant no authority.
+Changed bytes (including whitespace) produce `REGISTRY_CONTINUATION_STALE`;
+invalid, oversized, cross-collection or impossible-position tokens produce
+`REGISTRY_CONTINUATION_INVALID`. Tokens are at most 2048 bytes.
+
+Every live page retrieves the full document through existing origin-bound
+credentials, retries and redirect restrictions, with a 32 MiB input cap. Normal
+operation uses metadata GETs only. `--registry-metadata PATH` reads a bounded
+regular file and disables all network and credential lookup. `--offline` without
+that snapshot fails with `REGISTRY_METADATA_UNAVAILABLE`. Snapshots have no freshness
+claim. Both modes read registry configuration from `--project-dir` (default `.`),
+but never project manifests, lockfiles, store/layout or pending transactions. They
+perform no installation, recovery, hooks, child execution, writes or permission
+changes. No persistent cache or silent cache fallback exists.
+
+All displayed scalars use the existing sanitization and 4096-byte UTF-8 display
+limit, with precise `truncated_fields` pointers. Registry-controlled strings remain
+data and never supply recovery advice. The complete compact envelope plus newline
+is at most 4 MiB, measured after escaping and including truncation metadata. Budget
+fitting removes trailing page entries deterministically and regenerates cursors
+from only emitted entries. Fixed-report overflow produces `REGISTRY_RESULT_LIMIT`.
+Selected collection omissions, shortened displays, unsupported source/fact coverage
+or requested unsupported checks produce partial results, exit 0. Ordinary planned
+pagination alone remains success, exit 0. Selection failure retains bounded inventory
+and produces `REGISTRY_SELECTION_FAILED`, exit 1, with selection status missing_tag,
+missing_tag_target, unsupported_tag_target or no_supported_match. Tag diagnostics
+carry source-qualified package context and metadata declaration provenance.
+Malformed metadata, routing or transport failure uses existing typed codes, exit 1;
+argument parsing retains exit 2. Errors never include raw registry responses.
+
+These are projections of four complete envelopes (other common fields omitted):
+
+```json
+{"operation":"info","outcome":"success","data":{"selection":{"requested":"latest","kind":"tag","status":"selected","version":"1.2.3"},"checks":{"node":{"status":"not_checked","outcome":null}}}}
+```
+
+```json
+{"operation":"info","outcome":"failure","errors":[{"code":"REGISTRY_SELECTION_FAILED"}],"data":{"selection":{"requested":"latest","kind":"tag","status":"missing_tag_target","version":null}}}
+```
+
+```json
+{"operation":"info","outcome":"partial","data":{"versions":{"entries":["1.2.3"],"returned":1,"preceding":0,"total_supported":1,"known_omitted":0,"unsupported":1,"complete":false,"next":null}}}
+```
+
+```json
+{"operation":"info","outcome":"success","data":{"checks":{"node":{"status":"checked","supplied":"20.0.0","outcome":"mismatch","reason":null,"scope":"reported_node_requirement_only"}}}}
+```
