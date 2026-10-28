@@ -35,3 +35,37 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+`resolve_instances_with_preferences` is the contextual selection interface under
+construction for [#306](https://github.com/LimeTip/tapid/issues/306). It shares
+ordinary candidate selection with the legacy resolver and returns deterministic
+placement references, source-qualified artifacts, named ordinary edges, and
+separate exact peer-provider references. Distinct placements remain distinct,
+including when their artifact and provider versions match.
+
+All ordinary siblings are allocated before peer binding. Lookup uses the local
+peer name in the consumer's enclosing scope and then outward; the consumer's
+private dependencies cannot satisfy its own peers. The nearest binding shadows
+outer bindings. Required absence fails; optional absence succeeds without adding
+providers. Visible incompatible, wrong-origin, or alias-target mismatched
+providers fail even for optional peers. No provider is installed or hoisted.
+Contextual errors retain the consumer placement, expected source, and nearest
+provider; their display text is bounded to 8 KiB with explicit truncation.
+
+Sibling mutual peers use finite preallocated references. Dependency recurrence
+uses an ancestor reference only when enclosing lookups agree on exact references
+for every reachable peer name. This permits peerless cycles and cycles with
+unchanged providers, including peer-bearing descendants. The comparison is
+conservative: a difference for a name that would be shadowed inside the repeated
+subtree can still cause rejection. Context-changing cycles fail before returning
+a graph. Expansion is bounded to 100,000 instances, 1,000,000 combined root,
+ordinary, and peer edges, depth 256, and 64 MiB of retained graph text accounting.
+Cycle analysis also has a 1,000,000-step work budget.
+
+The contextual interface does not yet retain contextual locked preferences,
+workspace scopes, or platform-excluded declaration evidence; metadata remains
+caller-filtered. Schema 11 persistence, exact linking, native maintenance, and
+Node runtime acceptance remain pending. The CLI continues to use the legacy
+direct-root contract. Do not flatten contextual results into version-only peer
+summaries for installation or infer native maintenance support from these
+resolver tests. See [ADR 0012](../../docs/adr/0012-contextual-peer-instance-graphs.md).
