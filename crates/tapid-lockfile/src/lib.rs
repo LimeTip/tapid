@@ -8,8 +8,8 @@ mod npm_import;
 mod selection;
 mod validation;
 pub use selection::{
-    AcceptedOmission, LockedSelection, OmissionOrigin, OmissionReason, SelectionProfile,
-    SelectionTarget,
+    AcceptedOmission, DeclarationSection, LockedSelection, OmissionOrigin, OmissionReason,
+    RetainedDeclaration, SelectionProfile, SelectionTarget,
 };
 
 /// Ordinary selection facts; imported placement locks retain their separate schema.

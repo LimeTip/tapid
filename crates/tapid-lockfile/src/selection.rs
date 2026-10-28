@@ -10,6 +10,26 @@ pub struct LockedSelection {
     pub target: SelectionTarget,
     pub profile: SelectionProfile,
     pub omissions: Vec<AcceptedOmission>,
+    pub declarations: Vec<RetainedDeclaration>,
+}
+
+/// A selected dependency declaration, before overlapping sections are collapsed.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RetainedDeclaration {
+    pub origin: OmissionOrigin,
+    pub section: DeclarationSection,
+    pub name: String,
+    pub requirement: String,
+    pub target: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeclarationSection {
+    Dependencies,
+    DevDependencies,
+    OptionalDependencies,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -63,7 +83,79 @@ impl LockedSelection {
         if !self.target.is_valid()
             || self.omissions.len() > 100_000
             || self.omissions.windows(2).any(|w| w[0] >= w[1])
+            || self.declarations.len() > 100_000
+            || self.declarations.windows(2).any(|w| w[0] >= w[1])
         {
+            return Err(invalid());
+        }
+        let bound_roots = lock
+            .root_bindings()
+            .values()
+            .collect::<std::collections::BTreeSet<_>>();
+        if lock
+            .roots()
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            != bound_roots
+        {
+            return Err(invalid());
+        }
+        let mut retained = std::collections::BTreeSet::new();
+        let mut covered = std::collections::BTreeSet::new();
+        for declaration in &self.declarations {
+            let name = declaration
+                .name
+                .parse::<PackageName>()
+                .map_err(|_| invalid())?;
+            let target = declaration.target.parse::<LockfilePackageKey>()?;
+            if declaration.requirement.len() > 4096
+                || declaration.requirement.trim() != declaration.requirement
+                || !retained.insert((&declaration.origin, declaration.section, &declaration.name))
+            {
+                return Err(invalid());
+            }
+            let requirement = declaration
+                .requirement
+                .parse::<tapid_resolver::Requirement>()
+                .map_err(|_| invalid())?;
+            let dependencies = match &declaration.origin {
+                OmissionOrigin::Root => lock.root_bindings(),
+                OmissionOrigin::Workspace { key } => lock
+                    .workspace_packages()
+                    .get(key)
+                    .ok_or_else(invalid)?
+                    .dependencies(),
+                OmissionOrigin::Package { key } => {
+                    if declaration.section == DeclarationSection::DevDependencies {
+                        return Err(invalid());
+                    }
+                    lock.packages().get(key).ok_or_else(invalid)?.dependencies()
+                }
+            };
+            if dependencies.get(&declaration.name) != Some(&declaration.target)
+                || requirement.package_name(&name) != &target.name
+                || !requirement.matches_locked_version(&target.version)
+            {
+                return Err(invalid());
+            }
+            covered.insert((declaration.origin.clone(), declaration.name.clone()));
+        }
+        // Every selected edge needs provenance, including required/optional overlap.
+        let edges =
+            lock.root_bindings()
+                .keys()
+                .map(|name| (OmissionOrigin::Root, name.clone()))
+                .chain(lock.packages().iter().flat_map(|(key, package)| {
+                    package.dependencies().keys().map(move |name| {
+                        (OmissionOrigin::Package { key: key.clone() }, name.clone())
+                    })
+                }))
+                .chain(lock.workspace_packages().iter().flat_map(|(key, package)| {
+                    package.dependencies().keys().map(move |name| {
+                        (OmissionOrigin::Workspace { key: key.clone() }, name.clone())
+                    })
+                }));
+        if edges.into_iter().any(|edge| !covered.contains(&edge)) {
             return Err(invalid());
         }
         let mut declarations = std::collections::BTreeSet::new();

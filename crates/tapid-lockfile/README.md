@@ -66,6 +66,16 @@ production profile, and canonically ordered optional-declaration cuts. Origins
 identify the root, an exact workspace key, or an exact package key; local names,
 requirements, exact registry origins, and known removed target keys retain aliases
 and instance context.
+The required `declarations` array retains selected dependency declarations by
+origin, original dependency section, local name, requirement and exact target
+key. Required and optional declarations sharing a binding remain separate records.
+Root bindings cover every root, and declaration records cover every root,
+workspace and package dependency edge. Records are sorted and unique by
+origin/section/name; duplicate, missing, dangling and mismatched facts fail
+validation. Package development declarations are rejected because they are not
+installed transitive dependencies. Peer-provider contexts retain their existing
+separate key contract; this array does not replace peer validation. Copied-source
+and unsupported-spec declaration integration remains pending.
 The initial reason allowlist contains confirmed metadata absence, no usable
 candidate, and incompatible platform. Archive, integrity, authentication and
 containment failures cannot be represented as accepted reasons.
