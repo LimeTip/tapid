@@ -254,11 +254,12 @@ pub(super) fn checkpoint(point: &str, project: &Path, owner: &str) -> Result<(),
         (Some(Fault::CleanupPending), "after_commit") => {
             // Windows rejects reads through another handle while the lock is held.
             // Use the owning guard's identity to obstruct its cleanup path.
-            fs::write(
-                project.join(format!(".tapid-node-modules-old-{}", owner.trim_end())),
-                b"not a directory",
-            )
-            .unwrap();
+            let backup = project.join(format!(".tapid-node-modules-old-{}", owner.trim_end()));
+            // Replay has a previous installation, unlike an initial add.
+            if backup.is_dir() {
+                fs::remove_dir_all(&backup).unwrap();
+            }
+            fs::write(backup, b"not a directory").unwrap();
             Ok(())
         }
         (Some(Fault::RollbackPending), "manifest_written") => {
@@ -350,6 +351,73 @@ fn failure_after_commit_keeps_the_committed_manifest_lock_and_packages() {
             .next()
             .is_some()
     );
+}
+
+#[test]
+fn ci_post_commit_failures_preserve_pins_and_forbid_repetition() {
+    for (fault, state, mode) in [
+        (Fault::AfterCommit, ChangeState::Committed, InstallMode::Ci),
+        (
+            Fault::CleanupPending,
+            ChangeState::CommittedCleanupPending,
+            InstallMode::Ci,
+        ),
+        (
+            Fault::AfterCommit,
+            ChangeState::Committed,
+            InstallMode::CiOffline,
+        ),
+        (
+            Fault::CleanupPending,
+            ChangeState::CommittedCleanupPending,
+            InstallMode::CiOffline,
+        ),
+    ] {
+        let (project, fixture) = project_with_fixture("ci-post-commit", INTEGRITY);
+        let store = project.path().join("store");
+        run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
+                store_root: Some(&store),
+                mode: InstallMode::Online,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap();
+        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+        let _fault = inject(fault);
+        let failure = run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.outcome.state, state);
+        assert_eq!(failure.retry, RetryAdvice::DoNotRepeat);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert!(
+            project
+                .path()
+                .join("node_modules/plugin/package.json")
+                .is_file()
+        );
+    }
 }
 
 #[test]

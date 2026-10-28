@@ -905,6 +905,8 @@ fn perform_install(
         session.outcome.state = ChangeState::Committed;
         crate::filesystem::activation::test_crash_at("commit_decision");
         publication.commit().map_err(OperationalError::from)?;
+        #[cfg(test)]
+        outcome_tests::checkpoint("after_commit", &project_dir, activation_lock.owner_line())?;
         journal
             .finish()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
@@ -979,6 +981,8 @@ fn perform_install(
     if let Some(publication) = publication {
         publication.commit().map_err(OperationalError::from)?;
     }
+    #[cfg(test)]
+    outcome_tests::checkpoint("after_commit", &project_dir, activation_lock.owner_line())?;
     journal
         .finish()
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
