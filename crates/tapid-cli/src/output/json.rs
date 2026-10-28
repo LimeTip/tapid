@@ -3,6 +3,7 @@ use crate::application::outcome::{
     ChangeState, OperationFailure, OperationOutcome, RetryAdvice, Warning,
 };
 mod cache;
+mod compatibility;
 mod dependency;
 mod explain;
 mod outdated;
@@ -20,6 +21,7 @@ pub(crate) use why::{why_failure, why_success};
 
 mod diagnostic;
 mod paths;
+pub(crate) use paths::encode as encode_path;
 
 use serde_json::{Value, json};
 use std::{io::Write, process::ExitCode};
@@ -240,6 +242,7 @@ pub(crate) fn status_result(report: &crate::application::status::StatusReport) -
     result["data"] = data;
     truncated.sort_unstable();
     result["truncated_fields"] = json!(truncated);
+    compatibility::attach(&mut result, Some(&report.compatibility));
     emit(result, u8::from(blocked || shortened))
 }
 
@@ -311,6 +314,7 @@ pub(crate) fn failure_or_human(
 fn failure_result(failure: &OperationFailure, operation: &str) -> Value {
     let mut result = envelope(operation, "failure", Some(&failure.outcome));
     diagnostic::record(&mut result, &failure.error, "operation");
+    compatibility::attach(&mut result, failure.outcome.compatibility.as_ref());
     if let Some(error) = &failure.recovery_error {
         diagnostic::record(&mut result, error, "recovery");
     }

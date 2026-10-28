@@ -6074,7 +6074,11 @@ fn dependency_lifecycle_required_native_build_fails_without_approval() {
         .unwrap();
     assert!(!output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["data"], serde_json::Value::Null);
+    assert_eq!(result["data"]["compatibility"]["evidence_complete"], true);
+    assert_eq!(
+        result["data"]["compatibility"]["runtime"]["state"],
+        "not_requested"
+    );
     let hook = &result["lifecycle"]["packages"][0]["hooks"][0];
     assert_eq!(hook["authorization"], "exact_policy");
     assert_eq!(hook["disposition"], "blocked");
@@ -6974,7 +6978,11 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
         .unwrap();
     assert!(!output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["data"], serde_json::Value::Null);
+    assert_eq!(result["data"]["compatibility"]["evidence_complete"], true);
+    assert_eq!(
+        result["data"]["compatibility"]["runtime"]["state"],
+        "not_requested"
+    );
     assert_eq!(result["lifecycle"]["coverage"], "incomplete");
     assert_eq!(result["lifecycle"]["hooks_skipped"], 1);
     assert_eq!(result["warning_details"][0]["hook"], "preinstall");

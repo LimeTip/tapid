@@ -14,6 +14,7 @@ pub(crate) enum ByteIntegrity {
 }
 
 pub(crate) struct ExplainReport {
+    pub(crate) compatibility: crate::compatibility::Report,
     pub(crate) evidence: NpmPackageEvidence,
     pub(crate) source: String,
     pub(crate) byte_integrity: ByteIntegrity,
@@ -90,7 +91,21 @@ pub(crate) fn explain(
             None,
         )
     };
+    let mut compatibility = crate::compatibility::Report {
+        evidence_complete: true,
+        strict_satisfied: true,
+        ..Default::default()
+    };
+    compatibility.selected_package(
+        &format!(
+            "{}|{}@{}",
+            evidence.identity.registry, evidence.identity.name, evidence.identity.version
+        ),
+        &evidence.node_engine,
+        "registry_metadata",
+    );
     let mut report = ExplainReport {
+        compatibility,
         evidence,
         source,
         byte_integrity: ByteIntegrity::NotChecked,

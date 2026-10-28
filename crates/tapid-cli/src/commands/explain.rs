@@ -5,6 +5,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    #[command(flatten)]
+    runtime: crate::compatibility::RuntimeOptions,
     /// Exact npm package version, including scoped names.
     pub(crate) package: String,
     /// Directory whose tapid.toml supplies registry routing. No manifest is required.
@@ -19,7 +21,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
-    let report = match crate::application::explain::explain(
+    let mut report = match crate::application::explain::explain(
         &args.package,
         &args.project_dir,
         args.registry_metadata.as_deref(),
@@ -35,9 +37,13 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    report
+        .compatibility
+        .runtime(args.runtime.identify(&args.project_dir, None));
     if json {
         return crate::output::json::explain(Ok(&report));
     }
+    crate::output::report_compatibility(Some(&report.compatibility));
     let evidence = &report.evidence;
     println!(
         "{}@{}",

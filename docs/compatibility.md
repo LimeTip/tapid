@@ -252,3 +252,30 @@ Copied declarations in workspace members or published package dependency maps,
 live directory dependencies, Git preparation hooks, and approved copied-package
 lifecycle execution are outside this contract. Copied sources do not fall back
 to registry resolution. See [ADR 0009](adr/0009-immutable-copied-dependency-sources.md).
+
+## Node engines and manager requirements
+
+Compatibility policy is advisory by default. `--strict-compat` on install, ci,
+add/remove/update and prune rejects incompatible, unsupported, unavailable or
+unchecked applicable requirements before hooks and activation. It evaluates the
+root, participating workspace members and every selected dependency instance;
+it does not alter dependency selection. Complete inspected absence can pass
+without Node. An unknown historical declaration cannot be reported compatible.
+
+Root/member and selected-package `engines.node` strings use the resolver's npm
+range rules, including empty wildcard and prerelease eligibility. Tags, aliases
+and dependency source specifications are unsupported. Malformed `engines` or
+non-string Node values are preserved and reported. Root/member `packageManager`
+supports only `tapid@<exact-version>` against this executable's version; ranges,
+integrity suffixes, other managers and all declared `devEngines` are unsupported.
+Dependency manager declarations do not impose consumer requirements. No declaration
+starts Corepack, another manager, provisioning or downloads for compatibility.
+
+Identification requires explicit `--identify-node` or `--node-runtime`; strict
+mode does not request it automatically. These flags are mutually exclusive and
+cannot be used with dry-run previews. Status stays read-only, offline and probe-free.
+Exact-package explain evaluates its inspected metadata without requiring a project
+manifest. [CLI details](../crates/tapid-cli/README.md#node-and-package-manager-compatibility)
+and [result fields](json-results.md#requirement-compatibility-observations) describe
+bounds and trust limits. [ADR 0012](adr/0012-node-compatibility-evidence.md) records
+why observations, lock provenance and execution selection remain separate.

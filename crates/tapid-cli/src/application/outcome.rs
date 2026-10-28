@@ -18,6 +18,7 @@ pub(crate) use lifecycle::LifecycleReport;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
     InvalidRequest,
+    CompatibilityRejected,
     Project,
     ProjectChanged,
     Manifest,
@@ -46,6 +47,7 @@ pub(crate) enum ErrorKind {
 impl ErrorKind {
     pub(crate) fn code(self) -> &'static str {
         match self {
+            Self::CompatibilityRejected => "COMPATIBILITY_REJECTED",
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::Project => "PROJECT_UNAVAILABLE",
             Self::ProjectChanged => "PROJECT_CHANGED",

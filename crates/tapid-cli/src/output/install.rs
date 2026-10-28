@@ -81,28 +81,7 @@ impl Reporter {
 
     pub(crate) fn summary(&self, report: &InstallReport) {
         super::report_warnings(&self.remaining_warnings(&report.outcome.warnings));
-        if let Some(compatibility) = &report.outcome.compatibility {
-            for fact in compatibility.facts.iter().take(100) {
-                if !matches!(fact.status, "satisfied" | "not_declared") {
-                    let (location, _) = super::json::text(&fact.location);
-                    let (identity, _) = super::json::text(&fact.identity);
-                    let (requirement, _) =
-                        super::json::text(fact.requirement.as_deref().unwrap_or("unspecified"));
-                    eprintln!(
-                        "Compatibility warning: {identity} {location}: {} ({}, requirement: {requirement}).",
-                        fact.status, fact.reason
-                    );
-                }
-            }
-        }
-        if let Some(compatibility) = &report.outcome.compatibility
-            && compatibility.facts.len() > 100
-        {
-            eprintln!(
-                "Compatibility details: {} additional fact(s) omitted.",
-                compatibility.facts.len() - 100
-            );
-        }
+        super::report_compatibility(report.outcome.compatibility.as_ref());
         if report.replayed {
             println!(
                 "Replayed lockfile: {} package(s) in {:.2}s",
@@ -174,6 +153,7 @@ impl Reporter {
 
     pub(crate) fn failure(&self, mut failure: OperationFailure) {
         let phase = match failure.error.kind {
+            ErrorKind::CompatibilityRejected => "compatibility validation",
             ErrorKind::InvalidRequest
             | ErrorKind::Project
             | ErrorKind::ProjectChanged

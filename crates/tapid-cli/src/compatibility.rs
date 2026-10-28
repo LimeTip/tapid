@@ -1,5 +1,7 @@
 //! Compatibility facts are observations, separate from installation success.
 use serde::Serialize;
+mod runtime;
+pub(crate) use runtime::Options as RuntimeOptions;
 use tapid_manifest::{NodeEngineDeclaration, PackageManifest};
 
 #[derive(Debug, Default, Serialize)]
@@ -10,16 +12,12 @@ pub(crate) struct Report {
     pub(crate) runtime: Runtime,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug)]
 pub(crate) struct Runtime {
-    state: RuntimeState,
-}
-
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum RuntimeState {
-    #[default]
-    NotRequested,
+    pub(crate) state: &'static str,
+    pub(crate) reason: &'static str,
+    pub(crate) executable: Option<std::path::PathBuf>,
+    pub(crate) version: Option<tapid_core::PackageVersion>,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,9 +29,39 @@ pub(crate) struct Fact {
     pub(crate) status: &'static str,
     pub(crate) reason: &'static str,
     pub(crate) requirement: Option<String>,
+    pub(crate) runtime_reference: Option<&'static str>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self {
+            state: "not_requested",
+            reason: "identification_not_requested",
+            executable: None,
+            version: None,
+        }
+    }
 }
 
 impl Report {
+    pub(crate) fn runtime(&mut self, runtime: Runtime) {
+        self.runtime = runtime;
+        for fact in &mut self.facts {
+            if fact.classification == "range"
+                && let Some(range) = &fact.requirement
+            {
+                let (_, status, reason) =
+                    node_evaluation(NodeEngineDeclaration::Range(range), &self.runtime);
+                fact.status = status;
+                fact.reason = reason;
+            }
+        }
+        self.strict_satisfied = self
+            .facts
+            .iter()
+            .all(|f| matches!(f.status, "satisfied" | "not_declared"));
+    }
+
     pub(crate) fn project(manifest: &PackageManifest) -> Self {
         let mut report = Self {
             evidence_complete: true,
@@ -45,7 +73,8 @@ impl Report {
     }
 
     pub(crate) fn manifest(&mut self, manifest: &PackageManifest, path: &str) {
-        let (classification, status, reason) = node_evaluation(manifest.node_engine());
+        let (classification, status, reason) =
+            node_evaluation(manifest.node_engine(), &self.runtime);
         let requirement = match manifest.node_engine() {
             NodeEngineDeclaration::Range(range) => Some(range),
             _ => None,
@@ -105,6 +134,7 @@ impl Report {
             identity: path.into(),
             provenance: "project_manifest",
             requirement: requirement.map(str::to_owned),
+            runtime_reference: (classification == "range").then_some("/runtime"),
             classification,
             status,
             reason,
@@ -128,7 +158,7 @@ impl Report {
             R::MalformedEngines => NodeEngineDeclaration::MalformedEngines,
             R::MalformedNode => NodeEngineDeclaration::MalformedNode,
         };
-        let (classification, status, reason) = node_evaluation(declaration);
+        let (classification, status, reason) = node_evaluation(declaration, &self.runtime);
         self.strict_satisfied &= matches!(status, "satisfied" | "not_declared");
         self.facts.push(Fact {
             location: "engines/node".into(),
@@ -138,6 +168,7 @@ impl Report {
                 R::Range(range) => Some(range.clone()),
                 _ => None,
             },
+            runtime_reference: (classification == "range").then_some("/runtime"),
             classification,
             status,
             reason,
@@ -181,7 +212,7 @@ impl Report {
                 {
                     return None;
                 }
-                let evaluation = node_evaluation(manifest.node_engine());
+                let evaluation = node_evaluation(manifest.node_engine(), &self.runtime);
                 let range = match manifest.node_engine() {
                     NodeEngineDeclaration::Range(range) => Some(range.to_owned()),
                     _ => None,
@@ -189,6 +220,7 @@ impl Report {
                 Some((evaluation, range))
             })();
             if let Some(((classification, status, reason), requirement)) = recovered {
+                fact.runtime_reference = (classification == "range").then_some("/runtime");
                 fact.classification = classification;
                 fact.status = status;
                 fact.reason = reason;
@@ -215,6 +247,7 @@ impl Report {
             identity: key.into(),
             provenance: "unavailable",
             requirement: None,
+            runtime_reference: None,
             classification: "unknown",
             status: "unknown_evidence",
             reason: "selected_package_evidence_unavailable",
@@ -224,6 +257,7 @@ impl Report {
 
 fn node_evaluation(
     declaration: NodeEngineDeclaration<'_>,
+    runtime: &Runtime,
 ) -> (&'static str, &'static str, &'static str) {
     match declaration {
         NodeEngineDeclaration::NotDeclared => ("absent", "not_declared", "no_declaration"),
@@ -232,10 +266,15 @@ fn node_evaluation(
         }
         NodeEngineDeclaration::MalformedNode => ("malformed", "unsupported", "node_not_string"),
         NodeEngineDeclaration::Range(range) => {
-            if tapid_resolver::Requirement::parse_range(range).is_ok() {
-                ("range", "unchecked_runtime", "identification_not_requested")
-            } else {
-                ("unevaluable_range", "unsupported", "unsupported_node_range")
+            match tapid_resolver::Requirement::parse_range(range) {
+                Ok(requirement) => match &runtime.version {
+                    Some(version) if requirement.matches(version) => {
+                        ("range", "satisfied", "node_version_matches")
+                    }
+                    Some(_) => ("range", "incompatible", "node_version_mismatch"),
+                    None => ("range", "unchecked_runtime", runtime.reason),
+                },
+                Err(_) => ("unevaluable_range", "unsupported", "unsupported_node_range"),
             }
         }
     }
@@ -266,5 +305,27 @@ pub(crate) fn registry_node_engine(
         L::Range(range) => R::Range(range.clone()),
         L::MalformedEngines => R::MalformedEngines,
         L::MalformedNode => R::MalformedNode,
+    }
+}
+
+impl Serialize for Runtime {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct("Runtime", 5)?;
+        value.serialize_field("state", &self.state)?;
+        value.serialize_field("reason", &self.reason)?;
+        value.serialize_field("version", &self.version.as_ref().map(ToString::to_string))?;
+        value.serialize_field(
+            "executable",
+            &self.executable.as_ref().map(|p| p.display().to_string()),
+        )?;
+        value.serialize_field(
+            "executable_path",
+            &self
+                .executable
+                .as_ref()
+                .map(|p| crate::output::json::encode_path(p)),
+        )?;
+        value.end()
     }
 }

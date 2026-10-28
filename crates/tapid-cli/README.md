@@ -465,7 +465,7 @@ opens the shared store, acquires transaction locks, or attempts recovery.
 Exit 0 means no local blockers were found. It does not establish complete
 compatibility or successful installation, replay, or script execution. Exit 1
 means blockers, read failures, detected changes, or inspection truncation.
-Dependency resolution, registry access, engine/platform requirements, installed
+Dependency resolution, registry access, runtime identification/target-platform requirements, installed
 tree integrity, shared-store recovery, lifecycle approvals, and runner assurance
 remain unchecked. A managed marker establishes ownership only. An invalid existing marker blocks
 operation even when node_modules is absent. Root and member manifest discovery
@@ -494,7 +494,7 @@ using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
 
-### Advisory compatibility observations
+### Node and package-manager compatibility
 
 Install and graph-changing lifecycle results include advisory compatibility facts
 for root/member `engines.node`, `packageManager`, and `devEngines`, plus selected
@@ -503,11 +503,27 @@ unchecked requirements; version-1 JSON results expose `data.compatibility` with
 per-declaration reasons, source-qualified dependency instance keys, evidence
 completeness, and the full report's `strict_satisfied` assessment. JSON shows up
 to 1,024 facts and human output up to 100, with omitted counts. This assessment
-is advisory; strict rejection and runtime identification are not yet implemented.
+is advisory by default. Install, ci, add/remove/update and prune accept
+`--strict-compat` to reject incompatible, unsupported, unknown or unchecked
+requirements before dependency hooks or activation. Strict mode never implicitly
+executes Node. Dry-run previews reject compatibility options.
 
-No Node executable is probed. Supported Node range syntax uses the resolver's
+Ordinary operations and status execute no Node probe. Explicit, mutually exclusive
+`--identify-node` and `--node-runtime <absolute-path>` authorize identification on
+install, ci, add/remove/update, prune and exact-package explain. Discovery chooses
+the first eligible external executable from at most 256 PATH entries. Project,
+workspace, installation/staging and configured store paths, including symlink
+routes, are excluded. Probing runs `--version` without a shell or ambient startup
+environment, with null stdin, a private working directory, a five-second leader
+deadline and a combined 4 KiB accepted-output limit. The existing explicitly
+uncontained supervisor provides no containment or descendant cleanup guarantee.
+Only caller-selected external code runs. Canonical paths neither authenticate a
+publisher nor remove replacement races. These observations never certify the
+different runtime selected by `tapid run`.
+
+Supported Node range syntax uses the resolver's
 npm semantics, including empty wildcards; valid declarations remain
-`unchecked_runtime`. Only exact `tapid@<version>` manager declarations are
+`unchecked_runtime` without identified evidence. Only exact `tapid@<version>` manager declarations are
 compared with this Tapid version. Other managers, manager ranges/integrity
 suffixes, and any declared `devEngines` are unsupported. No declaration runs
 Corepack or delegates to another manager.

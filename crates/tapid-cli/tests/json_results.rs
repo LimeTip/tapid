@@ -1,3 +1,6 @@
+#[path = "json_cases/compatibility.rs"]
+mod compatibility;
+
 #[path = "json_cases/outdated.rs"]
 mod outdated;
 
@@ -789,6 +792,33 @@ fn json_install_replays_imported_npm_selections() {
         String::from_utf8_lossy(&import.stderr)
     );
     let store = project.path().join("store");
+    let before_hydration = fs::read(project.path().join("tapid.lock")).unwrap();
+    let (output, rejected) = invoke(
+        &project,
+        &[
+            "install",
+            "--frozen",
+            "--strict-compat",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success(), "{rejected}");
+    assert_eq!(rejected["errors"][0]["code"], "COMPATIBILITY_REJECTED");
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        before_hydration
+    );
+    assert!(!project.path().join("node_modules").exists());
+    assert!(
+        !project
+            .path()
+            .join(".tapid-lifecycle-journal.json")
+            .exists()
+    );
     let mut hydrated_lock = None;
     for offline in [false, true] {
         let mut args = vec![
@@ -848,7 +878,24 @@ fn json_install_replays_imported_npm_selections() {
         if let Some(previous) = &hydrated_lock {
             assert_eq!(&bytes, previous);
         }
-        hydrated_lock = Some(bytes);
+        hydrated_lock = Some(bytes.clone());
+        let installed = fs::read(project.path().join("node_modules/parent/package.json")).unwrap();
+        args.push("--strict-compat");
+        let (rejected, failure) = invoke(&project, &args);
+        assert!(!rejected.status.success(), "{failure}");
+        assert_eq!(failure["errors"][0]["code"], "COMPATIBILITY_REJECTED");
+        assert_eq!(failure["data"]["compatibility"]["strict_satisfied"], false);
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert_eq!(
+            fs::read(project.path().join("node_modules/parent/package.json")).unwrap(),
+            installed
+        );
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
     }
 }
 

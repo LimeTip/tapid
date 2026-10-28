@@ -18,6 +18,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     if json {
         return crate::output::json::status_result(&report);
     }
+    crate::output::report_compatibility(Some(&report.compatibility));
     println!(
         "Project: {}",
         crate::output::json::text(report.project.display()).0

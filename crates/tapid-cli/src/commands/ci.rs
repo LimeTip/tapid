@@ -3,6 +3,11 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    /// Reject incompatible, unsupported, unknown or unchecked compatibility requirements. Does not implicitly execute Node.
+    #[arg(long)]
+    strict_compat: bool,
+    #[command(flatten)]
+    runtime: crate::compatibility::RuntimeOptions,
     /// Project root containing package.json and tapid.lock.
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
@@ -19,7 +24,7 @@ pub(crate) struct Args {
 
 /// Replay native locked selections and suppress all progress when returning JSON.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
-    let result = crate::application::install::run(
+    let result = crate::application::install::run_with_compatibility(
         crate::application::install::InstallRequest {
             project_dir: &args.project_dir,
             target_manifest_path: std::path::Path::new("package.json"),
@@ -33,6 +38,10 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             registry_fixture: args.registry_fixture.as_deref(),
             allow_unverified_registry_artifacts: false,
         },
+        Default::default(),
+        args.runtime
+            .identify(&args.project_dir, args.store_dir.as_deref()),
+        args.strict_compat,
         |event| match event {
             crate::application::install::Progress::Replay(completed, total) if !json => {
                 eprintln!("Locked install progress: {completed}/{total}")
@@ -46,6 +55,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 return crate::output::json::installed(&report, "ci");
             }
             crate::output::report_warnings(&report.outcome.warnings);
+            crate::output::report_compatibility(report.outcome.compatibility.as_ref());
             println!(
                 "Installed from lockfile: {} package(s)",
                 report.package_count
