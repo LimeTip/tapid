@@ -86,6 +86,9 @@ profile, and local workspace records bind to declared member paths. Pending
 records cannot contain tree receipts, copied sources, or derived outputs.
 Verified records reuse existing package and derived-output validation. Structural
 receipt validation does not authenticate a derived output or authorize activation.
+Offline CLI status recognizes schema 11 and checks the root and workspace
+manifest snapshots with bounded reads. It explicitly reports registry declaration
+bindings, installed-profile validation and source integrity as checks not performed.
 The existing `Lockfile` reader continues to reject schema 11. See
 [ADR 0012](../../docs/adr/0012-native-profile-selection-evidence.md) for evidence
 authority, frozen replay and transaction integration requirements.
