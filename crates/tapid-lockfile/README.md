@@ -100,6 +100,11 @@ or stale profile metadata fails before materialization. The generation record
 travels with the layout during activation and recovery; neither record grants
 source integrity or lifecycle-output authority. Older layouts without a generation
 record require explicit install replay before schema-11 prune.
+Offline CLI `why` explicitly dispatches schema 11 and validates the complete
+manifest snapshot. It explains the complete selection using typed declaration
+and dependency edges and exact peer providers, including omitted packages and
+workspace-scoped declarations. It does not infer installed membership or verify
+source integrity; human and JSON results state these limits.
 The existing `Lockfile` reader continues to reject schema 11. See
 [ADR 0012](../../docs/adr/0012-native-profile-selection-evidence.md) for evidence
 authority, frozen replay and transaction integration requirements.
