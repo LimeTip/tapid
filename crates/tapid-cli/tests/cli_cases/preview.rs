@@ -541,6 +541,48 @@ fn dependency_dry_run_does_not_present_locked_pins_as_declared_transitive_ranges
 }
 
 #[test]
+fn overridden_preview_does_not_claim_a_locked_pin_is_the_original_range() {
+    let scenario = preview_project("locked-override-reasons");
+    scenario.project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"parent":"^1.0.0"},"overrides":{"parent":{"child":"1.0.0"}}}"#).unwrap();
+    let output = scenario
+        .command(&[
+            "--json",
+            "add",
+            "react@^18.0.0",
+            "--peer",
+            "--dry-run",
+            "--registry-fixture",
+            "registry.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let child = value["data"]["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "child")
+        .unwrap();
+    let reason = child["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|reason| reason["graph"] == "after")
+        .unwrap();
+    assert_eq!(reason["requirement"], "1.0.0");
+    assert!(reason["original_requirement"].is_null(), "{reason}");
+    assert_eq!(
+        reason["override_rules"],
+        serde_json::json!(["/overrides/parent/child"])
+    );
+}
+
+#[test]
 fn dependency_dry_run_reports_new_root_binding_for_an_existing_transitive_package() {
     let scenario = preview_project("root-binding-preview");
     let output = scenario
@@ -1029,6 +1071,22 @@ fn targeted_override_preview_changes_only_the_matching_parent_without_writes() {
         .filter(|package| package["name"] == "actual")
         .collect::<Vec<_>>();
     assert_eq!(actual.len(), 2, "{value}");
+    let changed = actual
+        .iter()
+        .find(|package| package["version"] == "2.0.0")
+        .unwrap();
+    let reason = changed["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|reason| reason["graph"] == "after")
+        .unwrap();
+    assert_eq!(reason["requirement"], "npm:actual@2");
+    assert_eq!(reason["original_requirement"], "npm:actual@1");
+    assert_eq!(
+        reason["override_rules"],
+        serde_json::json!(["/overrides/selected@^1/local"])
+    );
     assert!(
         actual.iter().any(|package| package["version"] == "1.0.0"),
         "{value}"

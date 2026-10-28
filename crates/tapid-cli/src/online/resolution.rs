@@ -39,6 +39,8 @@ fn resolution_error(
             .map(|root| RequirementDiagnostic {
                 local_name: Some(root.name.to_string()),
                 requirement: root.requirement.raw.clone(),
+                original_requirement: None,
+                override_rules: Vec::new(),
                 package: None,
                 declaration: None,
             })
@@ -259,70 +261,34 @@ fn insert_records(
     Ok(())
 }
 
-fn overridden_requirement(name: &PackageName, previous: &str, replacement: &Requirement) -> String {
-    if previous.trim().starts_with("npm:") {
-        return match previous.parse::<Requirement>() {
-            Ok(alias) => format!("npm:{}@{}", alias.package_name(name), replacement.raw),
-            // Keep malformed aliases invalid rather than changing their source.
-            Err(_) => previous.to_owned(),
-        };
-    }
-    replacement.raw.clone()
-}
-
-/// Locate effective ranges using the same override rules as metadata and workspace roots.
+/// Locate actual resolver matches and the separately prepared workspace roots.
 pub(super) fn locate_override_requirements(
     context: &mut crate::application::outcome::DiagnosticContext,
-    declarations: &[RequirementDiagnostic],
-    manifest: &PackageManifest,
     path: &Path,
-    overrides: &BTreeMap<PackageName, Requirement>,
+    workspace_matches: &[RequirementDiagnostic],
 ) {
     use crate::application::outcome::Declaration;
     let mut located = Vec::new();
     for requirement in &context.requirements {
-        let mut origins = Vec::new();
-        for selector in manifest.overrides().keys() {
-            let Ok((_, name)) = dep_parts(selector) else {
-                continue;
-            };
-            let Some(replacement) = overrides.get(&name) else {
-                continue;
-            };
-            let metadata_override = requirement.package.as_ref().is_some_and(|package| {
-                package.source == NPM
-                    && requirement.local_name.as_deref() == Some(name.as_str())
-                    && overridden_requirement(&name, &requirement.requirement, replacement)
-                        == requirement.requirement
-            });
-            let workspace_override = requirement.package.is_none()
-                && requirement.declaration.as_ref().is_none_or(|declaration| {
-                    declaration.workspace.is_some() && declaration.selects_resolver_root()
-                })
-                && declarations.iter().any(|candidate| {
-                    candidate.local_name == requirement.local_name
-                        && candidate.declaration.as_ref().is_some_and(|declaration| {
-                            declaration.workspace.is_some() && declaration.selects_resolver_root()
-                        })
-                        && candidate
-                            .requirement
-                            .parse::<Requirement>()
-                            .is_ok_and(|original| {
-                                candidate.local_name.as_deref().is_some_and(|local| {
-                                    local
-                                        .parse::<PackageName>()
-                                        .is_ok_and(|local| original.package_name(&local) == &name)
-                                })
-                            })
-                        && requirement.requirement == replacement.raw
-                });
-            if metadata_override || workspace_override {
+        if !requirement.override_rules.is_empty() {
+            for rule in &requirement.override_rules {
                 let mut effective = requirement.clone();
-                effective.declaration = Some(Declaration::manifest(
-                    path,
-                    Declaration::pointer("overrides", selector),
-                ));
-                origins.push(effective);
+                effective.declaration = Some(Declaration::manifest(path, rule.clone()));
+                located.push(effective);
+            }
+            continue;
+        }
+        let mut origins = Vec::new();
+        if requirement.package.is_none() {
+            for matched in workspace_matches.iter().filter(|matched| {
+                matched.local_name == requirement.local_name
+                    && matched.requirement == requirement.requirement
+            }) {
+                for rule in &matched.override_rules {
+                    let mut effective = matched.clone();
+                    effective.declaration = Some(Declaration::manifest(path, rule.clone()));
+                    origins.push(effective);
+                }
             }
         }
         if origins.is_empty() {

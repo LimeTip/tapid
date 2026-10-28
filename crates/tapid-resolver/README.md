@@ -66,5 +66,8 @@ when candidates would select the same child version. Contexts are deduplicated
 for cycles. Context visits and edge/rule work are bounded at 1,000,000; retained
 policy text and context evidence share the 64 MiB input budget. Successful
 results retain matched rule identifiers and original/effective requirements.
+Candidate-selection failures retain the same edge evidence in
+`RequirementOrigin::override_match`; consumers need not infer matches from
+effective range text.
 The CLI compiles active root declarations into this same policy for native
 installation, previews and dependency edits.

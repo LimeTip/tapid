@@ -505,11 +505,13 @@ fn override_diagnostics_preserve_non_npm_metadata_origins() {
     let manifest =
         PackageManifest::parse(r#"{"name":"app","version":"1.0.0","overrides":{"h3":"^3"}}"#)
             .unwrap();
-    let overrides = manifest_overrides(&manifest).unwrap();
+    let _ = manifest_overrides(&manifest).unwrap();
     for source in ["https://registry.example.test", "https://jsr.io"] {
         let original = RequirementDiagnostic {
             local_name: Some("h3".into()),
             requirement: "^3".into(),
+            original_requirement: None,
+            override_rules: Vec::new(),
             package: Some(DiagnosticPackage {
                 source: source.into(),
                 name: "parent".into(),
@@ -521,13 +523,7 @@ fn override_diagnostics_preserve_non_npm_metadata_origins() {
             requirements: vec![original.clone()],
             ..DiagnosticContext::default()
         };
-        resolution::locate_override_requirements(
-            &mut context,
-            &[],
-            &manifest,
-            Path::new("package.json"),
-            &overrides,
-        );
+        resolution::locate_override_requirements(&mut context, Path::new("package.json"), &[]);
         assert_eq!(context.requirements, vec![original]);
     }
 }

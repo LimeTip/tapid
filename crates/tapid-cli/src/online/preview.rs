@@ -18,6 +18,7 @@ pub(crate) struct GraphSnapshot {
     pub packages: BTreeMap<String, GraphPackage>,
     pub roots: BTreeMap<String, String>,
     pub requirements: BTreeMap<(String, String), String>,
+    pub overrides: BTreeMap<(String, String), (Option<String>, Vec<String>)>,
 }
 
 impl GraphSnapshot {
@@ -160,6 +161,27 @@ pub(crate) fn resolve(
                 .requirements
                 .insert((key.clone(), name.clone()), requirement.clone());
         }
+    }
+    for matched in &resolved.resolution.override_matches {
+        let edge = (
+            keys[&matched.parent].clone(),
+            matched.dependency.to_string(),
+        );
+        snapshot
+            .requirements
+            .insert(edge.clone(), matched.effective.raw.clone());
+        let evidence = snapshot.overrides.entry(edge).or_insert_with(|| {
+            let original = (!pinned_identities.contains(&(
+                matched.parent.registry.to_string(),
+                matched.parent.name.to_string(),
+                matched.parent.version.to_string(),
+            )))
+            .then(|| matched.original.raw.clone());
+            (original, Vec::new())
+        });
+        evidence.1.extend(matched.rules.iter().cloned());
+        evidence.1.sort();
+        evidence.1.dedup();
     }
     for edge in &resolved.resolution.dependencies {
         snapshot

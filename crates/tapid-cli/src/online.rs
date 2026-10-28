@@ -745,7 +745,7 @@ struct WorkspaceRootResolution {
     direct_root_identities: BTreeSet<(PackageSource, PackageName)>,
     workspace_root_keys: Vec<String>,
     registry_dependencies: Vec<WorkspaceRegistryDependency>,
-    overrides: BTreeMap<PackageName, Requirement>,
+    override_requirements: Vec<crate::application::outcome::RequirementDiagnostic>,
 }
 
 fn register_local_root_identity(
@@ -771,6 +771,14 @@ fn workspace_root_resolution(
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<WorkspaceRootResolution, String> {
     let overrides = manifest_overrides(manifest)?;
+    let mut rule_ids = BTreeMap::<PackageName, Vec<String>>::new();
+    for rule in resolution::compile_override_rules(manifest)?
+        .into_iter()
+        .filter(|rule| rule.parent.is_none())
+    {
+        rule_ids.entry(rule.dependency).or_default().push(rule.id);
+    }
+    let mut override_requirements = Vec::new();
     let mut roots = Vec::new();
     let mut direct_root_identities = BTreeSet::new();
     let mut registry_dependencies = Vec::with_capacity(workspace.registry_dependencies.len());
@@ -873,6 +881,20 @@ fn workspace_root_resolution(
             .get(&dependency.package)
             .cloned()
             .unwrap_or_else(|| dependency.requirement.clone());
+        let override_rules = rule_ids
+            .get(&dependency.package)
+            .cloned()
+            .unwrap_or_default();
+        if !override_rules.is_empty() {
+            override_requirements.push(crate::application::outcome::RequirementDiagnostic {
+                local_name: Some(dependency.manifest_name.clone()),
+                requirement: requirement.raw.clone(),
+                original_requirement: Some(dependency.requirement.raw.clone()),
+                override_rules,
+                package: None,
+                declaration: None,
+            });
+        }
         roots.push(Dependency::new(
             dependency.registry.clone(),
             dependency
@@ -892,7 +914,7 @@ fn workspace_root_resolution(
         direct_root_identities,
         workspace_root_keys,
         registry_dependencies,
-        overrides,
+        override_requirements,
     })
 }
 

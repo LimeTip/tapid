@@ -341,6 +341,7 @@ mod tests {
         let project = tapid_test_support::TempProject::new("json-error-context").unwrap();
         let error = tapid_resolver::ResolveError::Conflict {
             origin: Box::new(tapid_resolver::RequirementOrigin {
+                override_match: None,
                 name: "package".parse().unwrap(),
                 package: None,
             }),

@@ -455,6 +455,7 @@ fn json_effective_overrides_locate_root_manifest_fields() {
         let requirement = &requirements[0];
         assert_eq!(requirement["local_name"], local);
         assert_eq!(requirement["requirement"], expected);
+        assert_eq!(requirement["original_requirement"], previous);
         assert_eq!(requirement["declaration"]["origin"], "manifest");
         assert_eq!(
             requirement["declaration"]["pointer"],
@@ -478,6 +479,47 @@ fn json_effective_overrides_locate_root_manifest_fields() {
             assert_eq!(requirement["package"]["name"], "alias-parent");
         }
     }
+}
+
+#[test]
+fn json_unsatisfied_nested_override_keeps_actual_rule_and_original_range() {
+    let project = TempProject::new("json-nested-override").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"alias-parent":"1.0.0"},"overrides":{"alias-parent@^1":{"h3-v2":"^3"}}}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+    fixture["packages"][4]["dependencies"] = serde_json::json!({"h3-v2":"npm:h3@^1"});
+    project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let (output, result) = invoke(
+        &project,
+        &[
+            "install",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            "store",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let requirement = &result["errors"][0]["context"]["requirements"][0];
+    assert_eq!(requirement["requirement"], "npm:h3@^3");
+    assert_eq!(requirement["original_requirement"], "npm:h3@^1");
+    assert_eq!(
+        requirement["declaration"]["pointer"],
+        "/overrides/alias-parent@^1/h3-v2"
+    );
+    assert_eq!(
+        requirement["override_rules"],
+        serde_json::json!(["/overrides/alias-parent@^1/h3-v2"])
+    );
+    assert_eq!(
+        std::fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!project.path().join("tapid.lock").exists());
 }
 
 #[test]

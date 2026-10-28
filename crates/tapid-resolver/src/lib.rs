@@ -573,6 +573,8 @@ pub struct RequirementOrigin {
     pub name: PackageName,
     /// None means a caller-supplied root requirement.
     pub package: Option<Box<RegistryPackageId>>,
+    /// Actual winning policy evidence, retained even when selection fails.
+    pub override_match: Option<Box<OverrideMatch>>,
 }
 
 /// Structured deterministic failures from requirement parsing and graph selection.
@@ -837,6 +839,7 @@ where
             || RequirementOrigin {
                 name: local_name.clone(),
                 package: None,
+                override_match: None,
             },
         ) {
             Ok(package) => package,
@@ -991,6 +994,14 @@ where
                 || RequirementOrigin {
                     name: dependency.clone(),
                     package: Some(Box::new(parent.clone())),
+                    override_match: override_matches
+                        .iter()
+                        .rev()
+                        .find(|matched| {
+                            matched.parent == parent && matched.dependency == dependency
+                        })
+                        .cloned()
+                        .map(Box::new),
                 },
             ) {
                 Ok(package) => package,

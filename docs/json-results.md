@@ -114,6 +114,15 @@ Each package entry contains `key`, `source`, `name`, `version`, `integrity`, `de
 
 Each reason contains `graph` of `before` or `after`, `relation` of `direct` for a graph root or `dependency` for a parent edge, `parent` as the parent package key or null for roots, `dependency` as the incoming name, and `requirement` as an available requirement or null. These are selection edges in the indicated graph, not API compatibility claims. Existing lockfile transitive edges do not preserve their original dependency kind or declared range; unavailable ranges remain null rather than presenting reconstructed exact pins as declared requirements.
 
+For a freshly resolved overridden edge, `requirement` is the effective range.
+The additive `original_requirement` and `override_rules` fields retain the
+metadata declaration and sorted matching root-manifest JSON pointers. Human
+previews show the same before/effective ranges and pointers. Persisted-lock
+parents reused during native resolution can retain current policy matches and
+effective ranges, but omit unavailable original ranges. Persisted-lock
+inspection, including `why`, cannot recover historical rule matches or original
+ranges from lock edges and does not infer attribution from selected versions.
+
 `effects` contains `network_allowed`, `metadata_source`, `metadata_lookups`, `artifact_requests`, `cache_reads`, `cache_writes`, `project_writes`, `recovery`, and `scripts`. `network_allowed` describes permission to fetch registry metadata, not proof that a request occurred. `metadata_source` is `registry`, `fixture`, or `lockfile`; `metadata_lookups` counts package metadata retrievals, not individual HTTP requests. Successful metadata is reused by source and actual package name within one graph operation; reuse by another consumer does not increment the count. A matching online lock can produce zero lookups even when network access is allowed. Fixtures and offline/frozen inspection forbid registry access. `artifact_requests` is always 0, and the remaining effect flags are always false. Cache fields refer to the package store, not reading the project's lockfile.
 
 Previews do not create an activation lock, recover transactions, access the package store, fetch artifacts, or run scripts. Pending recovery fails without attempting recovery. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without establishing that its artifacts are cached. Previews requiring copied file/Git resolution or imported npm locks fail explicitly. Artifact availability, archive validity, lifecycle outputs, and later installation success remain unverified. A later command reads current inputs and may resolve different metadata.
@@ -177,6 +186,10 @@ dependency section; there is no existing provider declaration to report.
 Effective root overrides of transitive or workspace requirements point to the
 root manifest's `/overrides/...` field, preserving the original selector spelling.
 Transitive requirements retain the declaring package identity and effective alias syntax.
+When candidate selection fails on an overridden metadata edge, requirements also
+include `original_requirement` and `override_rules` from the resolver's actual
+winning matches. Each matching declaration has its own located requirement entry.
+Equal range text without a matching rule does not establish override attribution.
 Resolver root origins exclude `peerDependencies` entries, even when they have
 the same name and range as an installed dependency. Peer requirements remain
 visible in the peer-specific declaration and requirement fields.
