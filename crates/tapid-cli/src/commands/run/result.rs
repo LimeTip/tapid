@@ -8,7 +8,7 @@ use std::{
 use serde_json::{Value, json};
 use tapid_runner::{ExecutionError, ExecutionOutcome};
 
-pub(super) enum RunFailure {
+pub(in crate::commands) enum RunFailure {
     ProjectUnavailable,
     WorkspaceInvalid,
     ManifestInvalid,
@@ -20,6 +20,7 @@ pub(super) enum RunFailure {
     RegistryConfigurationInvalid,
     EnvironmentInvalid,
     PreparationFailed,
+    InstalledSelection(crate::application::installed::SelectionError),
     Execution(ExecutionError),
 }
 
@@ -37,12 +38,28 @@ impl RunFailure {
             Self::RegistryConfigurationInvalid => "REGISTRY_CONFIGURATION_INVALID",
             Self::EnvironmentInvalid => "ENVIRONMENT_INVALID",
             Self::PreparationFailed => "PREPARATION_FAILED",
+            Self::InstalledSelection(error) => {
+                use crate::application::installed::SelectionError;
+                match error {
+                    SelectionError::MissingCommand => "COMMAND_MISSING",
+                    SelectionError::Ambiguous(_) => "COMMAND_AMBIGUOUS",
+                    SelectionError::InvalidCommand => "COMMAND_INVALID",
+                    SelectionError::InvalidPackageSelection(_) => "PACKAGE_INELIGIBLE",
+                    SelectionError::InvalidProjectSelection(_) => "WORKSPACE_INVALID",
+                    SelectionError::InvalidMapping(
+                        tapid_linker::PlanError::UnsupportedBinExecutable(_),
+                    ) => "BIN_EXECUTABLE_UNSUPPORTED",
+                    SelectionError::InvalidMapping(_) => "BIN_MAPPING_INVALID",
+                    SelectionError::InconsistentInstallation(_)
+                    | SelectionError::ProjectEvidence(_) => "INSTALLATION_INCONSISTENT",
+                }
+            }
             Self::Execution(error) => super::execution_error_category(error.category()),
         }
     }
 }
 
-pub(super) fn create_file(path: &Path, project: &Path) -> io::Result<File> {
+pub(in crate::commands) fn create_file(path: &Path, project: &Path) -> io::Result<File> {
     let name = path.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "result file needs a filename")
     })?;
@@ -77,10 +94,29 @@ pub(super) fn create_file(path: &Path, project: &Path) -> io::Result<File> {
     options.open(parent.join(name))
 }
 
-pub(super) fn write(
+pub(in crate::commands) fn write(
     file: &mut File,
     outcome: &Result<ExecutionOutcome, RunFailure>,
     policy_inputs: Option<&Value>,
+) -> io::Result<()> {
+    write_record(file, outcome, policy_inputs, "run", None)
+}
+
+pub(in crate::commands) fn write_exec(
+    file: &mut File,
+    outcome: &Result<ExecutionOutcome, RunFailure>,
+    policy_inputs: Option<&Value>,
+    owner: Option<&Value>,
+) -> io::Result<()> {
+    write_record(file, outcome, policy_inputs, "exec", owner)
+}
+
+fn write_record(
+    file: &mut File,
+    outcome: &Result<ExecutionOutcome, RunFailure>,
+    policy_inputs: Option<&Value>,
+    operation: &str,
+    owner: Option<&Value>,
 ) -> io::Result<()> {
     let (status, error, receipt) = match outcome {
         Ok(outcome) => ("completed", Value::Null, super::receipt_value(outcome)),
@@ -100,14 +136,17 @@ pub(super) fn write(
             Value::Null,
         ),
     };
-    let value = json!({
+    let mut value = json!({
         "schema_version": 1,
-        "operation": "run",
+        "operation": operation,
         "outcome": status,
         "error": error,
         "policy_inputs": policy_inputs,
         "receipt": receipt,
     });
+    if operation == "exec" {
+        value["owner"] = owner.cloned().unwrap_or(Value::Null);
+    }
     let mut bytes = serde_json::to_vec(&value).expect("run result JSON values are serializable");
     bytes.push(b'\n');
     let result = file.write_all(&bytes).and_then(|()| file.sync_all());

@@ -51,26 +51,7 @@ pub(crate) fn fetch_imported(
     let selected = graph
         .selected_paths(std::env::consts::OS, std::env::consts::ARCH, current_libc())
         .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e.to_string()))?;
-    for path in &selected {
-        let package = &graph.packages[path];
-        let identity = DiagnosticPackage {
-            source: package.registry.to_string(),
-            name: package.name.to_string(),
-            version: Some(package.version.to_string()),
-        };
-        let origin = registry_config
-            .origin_for_name(&package.name)
-            .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
-        if origin != package.registry {
-            return Err(OperationalError::new(
-                ErrorKind::RegistryConfiguration,
-                format!(
-                    "registry identity mismatch for package {} at {path}: selected {origin}, imported {}",
-                    package.name, package.registry
-                ),
-            ).with_diagnostic(DiagnosticContext::comparison("registry_identity", None, origin, &package.registry)).for_package(identity));
-        }
-    }
+    validate_imported_routes(&graph, &selected, registry_config)?;
     let fixture: Option<Fixture> = fixture_path
         .map(|path| {
             fs::read(path)
@@ -225,133 +206,26 @@ pub(crate) fn fetch_imported(
                 (digest, ImportedTree::Extracted(temp))
             }
         };
-        let artifact_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.path().join("package/package.json")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        if artifact_manifest["name"].as_str() != Some(package.name.as_str())
-            || artifact_manifest["version"].as_str() != Some(&package.version.to_string())
-        {
-            let observed = artifact_manifest["name"]
-                .as_str()
-                .and_then(|value| value.parse::<PackageName>().ok())
-                .zip(
-                    artifact_manifest["version"]
-                        .as_str()
-                        .and_then(|value| value.parse::<PackageVersion>().ok()),
-                )
-                .map(|(name, version)| format!("{name}@{version}"))
-                .unwrap_or_else(|| "invalid_package_identity".into());
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                format!("archive identity disagrees with imported selection at {path}"),
-            )
-            .with_diagnostic(DiagnosticContext::comparison(
-                "artifact_identity",
-                None,
-                format!("{}@{}", package.name, package.version),
-                observed,
-            ))
-            .for_package(identity));
-        }
+        validate_imported_identity(package, path, &temp.path().join("package/package.json"))?;
         let tree = transaction
             .stage_verified_tree(&digest, temp.path())
             .map_err(OperationalError::from)?;
         receipts.insert(path.clone(), digest.to_string());
-        let mut locked = LockedPackage::new_with_context_and_provenance(
-            package.registry.as_str(),
-            package.name.as_str(),
-            &package.version.to_string(),
-            &package.integrity.to_string(),
-            &digest.to_string(),
-            (&peer, &platform),
-            RegistryIntegrityProvenance::RegistryDeclared,
-        )
-        .map_err(OperationalError::from)?;
-        locked
-            .set_artifact_url(&package.resolved)
-            .map_err(OperationalError::from)?;
+        let (locked, instance) = imported_instance(package, &digest, &tree, peer, platform)?;
         let key = locked.key();
-        let instance = PackageInstance {
-            id: tapid_core::PackageInstanceId::new(
-                package.registry.clone(),
-                package.name.clone(),
-                package.version.clone(),
-            ),
-            peer_context: peer,
-            platform_context: platform,
-            tree: VerifiedTreeReference::new(&digest.to_string(), &tree)
-                .map_err(|e| e.to_string())?,
-        };
         keys.insert(path.clone(), InstanceKey::from(&instance));
         // Equal contexts were checked during import. Preserve distinct contexts.
         instances.entry(key.clone()).or_insert(instance);
         trees.insert(key, tree);
         locked_by_path.insert(path.clone(), locked);
     }
-    let mut edges = Vec::new();
-    let mut packages = BTreeMap::new();
-    for (path, mut locked) in locked_by_path {
-        let package = &graph.packages[&path];
-        for (name, target) in package.dependencies.iter().chain(&package.peers) {
-            if !selected.contains(target) {
-                continue;
-            }
-            let target_key = &keys[target];
-            let key = LockfilePackageKey::from_source(
-                target_key.id.registry.clone(),
-                target_key.id.name.clone(),
-                target_key.id.version.clone(),
-                &target_key.peer_context,
-                &target_key.platform_context,
-            )
-            .to_string();
-            locked
-                .add_alias_dependency(name, &key)
-                .map_err(OperationalError::from)?;
-            edges.push(NamedDependencyEdge {
-                parent: keys[&path].clone(),
-                dependency: NamedDependency {
-                    name: name
-                        .parse()
-                        .map_err(|e: tapid_core::DomainError| e.to_string())?,
-                    child: keys[target].clone(),
-                },
-            });
-        }
-        packages.entry(locked.key()).or_insert(locked);
-    }
-    let mut lock =
-        Lockfile::new(imported.root_manifest_digest()).map_err(OperationalError::from)?;
-    lock.insert_packages(packages.into_values())
-        .map_err(OperationalError::from)?;
-    let mut roots = Vec::new();
-    let mut bindings = BTreeMap::new();
-    for (name, path) in &graph.roots {
-        if !selected.contains(path) {
-            continue;
-        }
-        let key = &keys[path];
-        let encoded = LockfilePackageKey::from_source(
-            key.id.registry.clone(),
-            key.id.name.clone(),
-            key.id.version.clone(),
-            &key.peer_context,
-            &key.platform_context,
-        )
-        .to_string();
-        bindings.insert(name.clone(), encoded);
-        roots.push(NamedDependency {
-            name: name
-                .parse()
-                .map_err(|e: tapid_core::DomainError| e.to_string())?,
-            child: key.clone(),
-        });
-    }
-    lock.set_roots(bindings.values())
-        .map_err(OperationalError::from)?;
-    lock.set_root_bindings(bindings)
-        .map_err(OperationalError::from)?;
+    let (lock, roots, edges) = imported_topology(
+        imported.root_manifest_digest(),
+        &graph,
+        &selected,
+        locked_by_path,
+        &keys,
+    )?;
     imported
         .record_verified_trees(receipts.clone())
         .map_err(|e| e.to_string())?;
@@ -375,14 +249,45 @@ pub(crate) fn fetch_imported(
         .record_verified_artifacts(artifact_receipts)
         .map_err(|e| e.to_string())?;
     let instances: Vec<_> = instances.into_values().collect();
-    let mut plan = WorkspaceInstallPlan::from(workspace.links);
+    let (input, workspace) = imported_layout(
+        project,
+        workspace.links,
+        &graph,
+        &NamedLayoutInput {
+            instances,
+            root_dependencies: roots,
+            dependency_edges: edges,
+        },
+        &keys,
+    )?;
+    Ok(PreparedInstall {
+        candidate_exclusions: Default::default(),
+        lock,
+        layout: PreparedLayout {
+            input,
+            trees,
+            workspace,
+        },
+        transaction,
+    })
+}
+
+/// Share install topology and member placement with read-only verification.
+pub(crate) fn imported_layout(
+    project: &Path,
+    links: WorkspaceLinkPlan,
+    graph: &tapid_lockfile::ImportedNpmGraph,
+    input: &NamedLayoutInput,
+    keys: &BTreeMap<String, InstanceKey>,
+) -> Result<(NamedLayoutInput, WorkspaceInstallPlan), OperationalError> {
+    let mut plan = WorkspaceInstallPlan::from(links);
     plan.include_owned_members()?;
     for (member, points) in &graph.member_roots {
         let roots = &points.dependencies;
         let local_roots: Vec<_> = roots
             .iter()
             .filter(|(name, path)| {
-                *path != &format!("node_modules/{name}") && selected.contains(*path)
+                *path != &format!("node_modules/{name}") && keys.contains_key(*path)
             })
             .map(|(name, path)| {
                 Ok(NamedDependency {
@@ -427,7 +332,7 @@ pub(crate) fn fetch_imported(
                     input: pinned_layout(
                         roots
                             .iter()
-                            .filter(|(_, path)| selected.contains(*path))
+                            .filter(|(_, path)| keys.contains_key(*path))
                             .map(|(name, path)| {
                                 Ok(NamedDependency {
                                     name: name
@@ -437,8 +342,8 @@ pub(crate) fn fetch_imported(
                                 })
                             })
                             .collect::<Result<_, String>>()?,
-                        &instances,
-                        &edges,
+                        &input.instances,
+                        &input.dependency_edges,
                     ),
                     links,
                 },
@@ -450,16 +355,14 @@ pub(crate) fn fetch_imported(
             .workspace_links
             .contains_key(&format!("node_modules/{}", link.name))
     });
-    Ok(PreparedInstall {
-        candidate_exclusions: Default::default(),
-        lock,
-        layout: PreparedLayout {
-            input: pinned_layout(roots, &instances, &edges),
-            trees,
-            workspace: plan,
-        },
-        transaction,
-    })
+    Ok((
+        pinned_layout(
+            input.root_dependencies.clone(),
+            &input.instances,
+            &input.dependency_edges,
+        ),
+        plan,
+    ))
 }
 
 /// Read the same contained workspace sources used by native installs.
@@ -562,4 +465,266 @@ fn pinned_layout(
             .cloned()
             .collect(),
     }
+}
+
+/// Reconstruct edges and direct bindings identically for acquisition and observation.
+fn imported_topology(
+    digest: &str,
+    graph: &tapid_lockfile::ImportedNpmGraph,
+    selected: &BTreeSet<String>,
+    locked_by_path: BTreeMap<String, LockedPackage>,
+    keys: &BTreeMap<String, InstanceKey>,
+) -> Result<(Lockfile, Vec<NamedDependency>, Vec<NamedDependencyEdge>), OperationalError> {
+    let mut edges = Vec::new();
+    let mut packages = BTreeMap::new();
+    for (path, mut locked) in locked_by_path {
+        let package = &graph.packages[&path];
+        for (name, target) in package.dependencies.iter().chain(&package.peers) {
+            if !selected.contains(target) {
+                continue;
+            }
+            let target_key = &keys[target];
+            let key = LockfilePackageKey::from_source(
+                target_key.id.registry.clone(),
+                target_key.id.name.clone(),
+                target_key.id.version.clone(),
+                &target_key.peer_context,
+                &target_key.platform_context,
+            )
+            .to_string();
+            locked
+                .add_alias_dependency(name, &key)
+                .map_err(OperationalError::from)?;
+            edges.push(NamedDependencyEdge {
+                parent: keys[&path].clone(),
+                dependency: NamedDependency {
+                    name: name
+                        .parse()
+                        .map_err(|e: tapid_core::DomainError| e.to_string())?,
+                    child: keys[target].clone(),
+                },
+            });
+        }
+        packages.entry(locked.key()).or_insert(locked);
+    }
+    let mut lock = Lockfile::new(digest).map_err(OperationalError::from)?;
+    lock.insert_packages(packages.into_values())
+        .map_err(OperationalError::from)?;
+    let mut roots = Vec::new();
+    let mut bindings = BTreeMap::new();
+    for (name, path) in &graph.roots {
+        if !selected.contains(path) {
+            continue;
+        }
+        let key = &keys[path];
+        let encoded = LockfilePackageKey::from_source(
+            key.id.registry.clone(),
+            key.id.name.clone(),
+            key.id.version.clone(),
+            &key.peer_context,
+            &key.platform_context,
+        )
+        .to_string();
+        bindings.insert(name.clone(), encoded);
+        roots.push(NamedDependency {
+            name: name
+                .parse()
+                .map_err(|e: tapid_core::DomainError| e.to_string())?,
+            child: key.clone(),
+        });
+    }
+    lock.set_roots(bindings.values())
+        .map_err(OperationalError::from)?;
+    lock.set_root_bindings(bindings)
+        .map_err(OperationalError::from)?;
+
+    Ok((lock, roots, edges))
+}
+
+#[cfg(test)]
+mod installed_tests;
+
+fn validate_imported_identity(
+    package: &tapid_lockfile::ImportedNpmPackage,
+    path: &str,
+    manifest_path: &Path,
+) -> Result<(), OperationalError> {
+    let identity = DiagnosticPackage {
+        source: package.registry.to_string(),
+        name: package.name.to_string(),
+        version: Some(package.version.to_string()),
+    };
+    let artifact_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(manifest_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if artifact_manifest["name"].as_str() != Some(package.name.as_str())
+        || artifact_manifest["version"].as_str() != Some(&package.version.to_string())
+    {
+        let observed = artifact_manifest["name"]
+            .as_str()
+            .and_then(|value| value.parse::<PackageName>().ok())
+            .zip(
+                artifact_manifest["version"]
+                    .as_str()
+                    .and_then(|value| value.parse::<PackageVersion>().ok()),
+            )
+            .map(|(name, version)| format!("{name}@{version}"))
+            .unwrap_or_else(|| "invalid_package_identity".into());
+        return Err(OperationalError::new(
+            ErrorKind::Integrity,
+            format!("archive identity disagrees with imported selection at {path}"),
+        )
+        .with_diagnostic(DiagnosticContext::comparison(
+            "artifact_identity",
+            None,
+            format!("{}@{}", package.name, package.version),
+            observed,
+        ))
+        .for_package(identity));
+    }
+
+    Ok(())
+}
+
+/// Existing authenticated references only. Caller validates bounded project and
+/// workspace observations separately and retains the store guard while using paths.
+/// No acquisition, receipt publication, snapshots or recovery is performed.
+#[allow(dead_code)]
+pub(crate) struct ImportedObservation {
+    pub lock: Lockfile,
+    pub input: NamedLayoutInput,
+    pub placements: BTreeMap<String, InstanceKey>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn observe_imported_artifacts(
+    imported: &ImportedNpmLockfile,
+    guard: &tapid_store::StoreReadGuard,
+    config: &crate::registry::RegistryConfig,
+) -> Result<ImportedObservation, OperationalError> {
+    let graph = imported
+        .graph()
+        .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?;
+    let selected = graph
+        .selected_paths(std::env::consts::OS, std::env::consts::ARCH, current_libc())
+        .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?;
+    validate_imported_routes(&graph, &selected, config)?;
+    let mut locked_by_path = BTreeMap::new();
+    let mut keys = BTreeMap::new();
+    let mut instances = BTreeMap::new();
+    for path in &selected {
+        let package = &graph.packages[path];
+        let receipt = imported
+            .verified_artifact(path)
+            .filter(|receipt| {
+                receipt.resolved == package.resolved
+                    && receipt.integrity == package.integrity.to_string()
+            })
+            .ok_or_else(|| {
+                OperationalError::new(
+                    ErrorKind::Integrity,
+                    format!("missing authenticated imported artifact receipt at {path}"),
+                )
+            })?;
+        let digest: ArtifactDigest = receipt
+            .tree_digest
+            .parse()
+            .map_err(|e| OperationalError::new(ErrorKind::Lockfile, e))?;
+        let tree = guard.verified_tree_path(&digest)?;
+        validate_imported_identity(
+            package,
+            path,
+            &crate::filesystem::tree::package_content_root(&tree)?.join("package.json"),
+        )?;
+        let peer = graph.peer_context(path);
+        let platform = PackagePlatform {
+            os: package.os.clone(),
+            cpu: package.cpu.clone(),
+            libc: package.libc.clone(),
+        }
+        .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())?;
+        let (locked, instance) = imported_instance(package, &digest, &tree, peer, platform)?;
+        keys.insert(path.clone(), InstanceKey::from(&instance));
+        instances.entry(locked.key()).or_insert(instance);
+        locked_by_path.insert(path.clone(), locked);
+    }
+    let (lock, roots, edges) = imported_topology(
+        imported.root_manifest_digest(),
+        &graph,
+        &selected,
+        locked_by_path,
+        &keys,
+    )?;
+    Ok(ImportedObservation {
+        lock,
+        input: NamedLayoutInput {
+            instances: instances.into_values().collect(),
+            root_dependencies: roots,
+            dependency_edges: edges,
+        },
+        placements: keys,
+    })
+}
+
+fn imported_instance(
+    package: &tapid_lockfile::ImportedNpmPackage,
+    digest: &ArtifactDigest,
+    tree: &Path,
+    peer: tapid_core::PeerContext,
+    platform: tapid_core::PlatformContext,
+) -> Result<(LockedPackage, PackageInstance), OperationalError> {
+    let mut locked = LockedPackage::new_with_context_and_provenance(
+        package.registry.as_str(),
+        package.name.as_str(),
+        &package.version.to_string(),
+        &package.integrity.to_string(),
+        &digest.to_string(),
+        (&peer, &platform),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .map_err(OperationalError::from)?;
+    locked
+        .set_artifact_url(&package.resolved)
+        .map_err(OperationalError::from)?;
+    let instance = PackageInstance {
+        id: tapid_core::PackageInstanceId::new(
+            package.registry.clone(),
+            package.name.clone(),
+            package.version.clone(),
+        ),
+        peer_context: peer,
+        platform_context: platform,
+        tree: VerifiedTreeReference::new(&digest.to_string(), tree).map_err(|e| e.to_string())?,
+    };
+
+    Ok((locked, instance))
+}
+
+fn validate_imported_routes(
+    graph: &tapid_lockfile::ImportedNpmGraph,
+    selected: &BTreeSet<String>,
+    config: &crate::registry::RegistryConfig,
+) -> Result<(), OperationalError> {
+    for path in selected {
+        let package = &graph.packages[path];
+        let identity = DiagnosticPackage {
+            source: package.registry.to_string(),
+            name: package.name.to_string(),
+            version: Some(package.version.to_string()),
+        };
+        let origin = config
+            .origin_for_name(&package.name)
+            .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
+        if origin != package.registry {
+            return Err(OperationalError::new(
+                ErrorKind::RegistryConfiguration,
+                format!(
+                    "registry identity mismatch for package {} at {path}: selected {origin}, imported {}",
+                    package.name, package.registry
+                ),
+            ).with_diagnostic(DiagnosticContext::comparison("registry_identity", None, origin, &package.registry)).for_package(identity));
+        }
+    }
+
+    Ok(())
 }

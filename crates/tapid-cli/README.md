@@ -416,6 +416,60 @@ Receipt schema version 1 contains `assurance`, `backend` with name/version/depre
 
 Install derives executable shims from verified package `bin` metadata. Unix uses symlinks. Windows writes `.cmd` and PowerShell wrappers. The planner rejects malformed metadata, absolute or traversal targets, symlink and special-file targets, collisions, and unsupported platforms. Root scripts remain arbitrary code and can use every explicitly granted capability.
 
+## Execute an installed project binary
+
+```sh
+tapid exec --allow-read . -- tsc --noEmit
+tapid exec --workspace web --package typescript --allow-read . -- tsc --noEmit
+tapid exec --package typescript --allow-read . --result-file ../exec-result.json -- tsc --noEmit
+```
+
+`--project-dir` selects the explicit project/workspace root. `--workspace` selects
+one exact member name; otherwise the root manifest determines eligibility. Only
+that manifest's installed direct dependencies, dev dependencies, optional
+dependencies and workspace links are eligible. Transitive-only packages and
+other members' bindings are excluded. Aliases retain their local install names.
+Colliding commands fail; use `--package` with the local install name to choose
+one. Command comparison follows the target platform's linker collision rules.
+Qualification never bypasses complete layout verification: an installation with
+conflicting managed shims is rejected as inconsistent before selection.
+
+Exec requires an existing managed installation, matching lock/manifests, verified
+store evidence and current lifecycle approvals for derived trees. It verifies
+the complete root/member layout and repeats selection and verification immediately
+before checked execution while retaining project/store coordination. It never
+downloads, resolves, installs, recovers, edits configuration or creates scripts.
+`--store-dir` selects an existing store. Workspace source remains mutable and is
+reported separately from authenticated package content. Host pathname races after
+final observation remain outside the runner's documented trusted-host boundary.
+
+Supported entries are regular `.js`, `.cjs`, or `.mjs` files with no shebang or a
+supported Node shebang, and extensionless files with a supported Node shebang.
+The accepted shebang words are `node`, `node.exe`, `/usr/bin/node`,
+`/usr/bin/node.exe`, `/usr/bin/env node`, and `/usr/bin/env node.exe`.
+Existing linker validation rejects interpreter arguments, escaping paths, links
+and unsupported executables. Native binaries and other interpreters fail before
+launch. Tapid invokes the bound Node executable with a direct argument vector;
+shell syntax in arguments remains data. The invoking host PATH is used only to
+discover Node when `--node-runtime` is absent; it is never inherited by the child.
+
+Exec shares `tapid run` invocation permission selection, credential exclusion,
+runtime binding and fail-closed checked execution. An exact profile named
+`exec:<install-name>:<command>` in `[run.scripts."exec:typescript:tsc"]` takes
+precedence over configured defaults. With neither profile nor defaults, the
+Restricted baseline grants no project reads/writes, environment, networking or
+subprocesses; pass the required `--allow-*` flags explicitly. Requests remain
+bounded by configured policy. Backend limitations and native evidence gates are
+the same as for `run`; this interface adds no platform support claim.
+
+Child streams and exit semantics are preserved. `--result-file` uses the existing
+caller-owned result transport with `operation: "exec"`, typed selection failure
+codes and an `owner` object identifying the local install name, actual package
+name/version/source and peer/platform context, or a `mutable-workspace` identity.
+It includes policy inputs and the checked enforcement receipt when established.
+Global `--json` is unsupported for child execution; use the result file. Without
+one, stderr receives the existing human receipt, which child output can forge.
+
 ## Lifecycle policy and limitations
 
 - Dependency lifecycle scripts are denied by default. Exact checked-in approvals can build private derived trees using Linux ManagedTree; see [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).

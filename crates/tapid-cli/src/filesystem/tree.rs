@@ -5,6 +5,8 @@ use std::{
 };
 use tapid_linker::{ManagedRoot, PackageInstance};
 
+pub(crate) mod verification;
+
 #[cfg(test)]
 thread_local! {
     static BYTE_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -423,6 +425,25 @@ fn materialize_package_shims(
     workspace_links: &tapid_linker::WorkspaceLinkPlan,
     workspace_root: &Path,
 ) -> Result<(), String> {
+    let shims = package_shim_plan(stage, plan, workspace_links, workspace_root)?;
+    let workspace_link_roots = workspace_links
+        .links
+        .iter()
+        .map(|link| {
+            stage
+                .join("node_modules")
+                .join(link.name.as_str().split('/').collect::<PathBuf>())
+        })
+        .collect::<Vec<_>>();
+    write_package_shims(shims, &workspace_link_roots)
+}
+
+fn package_shim_plan(
+    stage: &Path,
+    plan: &tapid_linker::MaterializationPlan,
+    workspace_links: &tapid_linker::WorkspaceLinkPlan,
+    workspace_root: &Path,
+) -> Result<tapid_linker::ShimPlan, String> {
     let managed = ManagedRoot::new(stage.join("node_modules")).map_err(|e| e.to_string())?;
     let mut packages = Vec::new();
     for step in &plan.activation.steps {
@@ -455,7 +476,6 @@ fn materialize_package_shims(
         });
     }
     let mut workspace_packages = Vec::new();
-    let mut workspace_link_roots = Vec::new();
     for link in &workspace_links.links {
         let source = fs::canonicalize(&link.source).map_err(|error| {
             format!(
@@ -477,7 +497,6 @@ fn materialize_package_shims(
         let link_root = stage
             .join("node_modules")
             .join(link.name.as_str().split('/').collect::<PathBuf>());
-        workspace_link_roots.push(link_root.clone());
         workspace_packages.push(tapid_linker::WorkspaceShimPackage {
             tree_root: source,
             package_json,
@@ -485,14 +504,21 @@ fn materialize_package_shims(
             bin_dir: stage.join("node_modules"),
         });
     }
-    let shims = tapid_linker::plan_shims_with_workspace_packages(
+    tapid_linker::plan_shims_with_workspace_packages(
         managed,
         packages,
         workspace_root,
         workspace_packages,
         crate::application::replay::current_platform(),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn write_package_shims(
+    shims: tapid_linker::ShimPlan,
+    workspace_link_roots: &[PathBuf],
+) -> Result<(), String> {
     for entry in shims.entries {
         let parent = entry
             .target

@@ -289,6 +289,24 @@ The nested receipt retains requested, declared, observed, and enforced dimension
 
 Legacy stderr receipts add `policy_inputs` when invocation permission flags are used. Result-file envelopes include the same metadata at the top level once policy selection succeeds, including profile-only runs. `source` is `script-profile`, `configured-defaults` or `invocation-baseline`; `configuration` contains the configured ceiling or null; `invocation` contains the supplied permission lists/booleans; `effective` describes the selected project policy and preserved assurance/limits. Environment entries are names only. Omitted lists inherit configured grants, so an empty invocation list does not itself mean the effective grant list is empty. Backend runtime additions remain in `effective_filesystem`, and checked enforcement remains in the established evidence. Profile-only stderr receipts retain their existing shape. Consumers must accept additive fields; this metadata does not make untrusted child streams a trusted machine-result channel.
 
+## Project-local binary execution
+
+`tapid exec --result-file PATH -- COMMAND ARGS...` shares the run transport and
+destination trust rules above. Global `--json` remains unsupported. The result
+uses `operation: "exec"` and adds `owner` (null when selection did not complete).
+An authenticated owner contains `kind: "authenticated-package"`, `install_name`,
+actual `name`, `version`, `source`, `peer_context`, and `platform_context`.
+A workspace owner has `kind: "mutable-workspace"`, `install_name`, `name`,
+`version` and its source path; it makes no immutable-content authentication claim.
+
+Selection failures use `COMMAND_MISSING`, `COMMAND_AMBIGUOUS`, `COMMAND_INVALID`,
+`PACKAGE_INELIGIBLE`, `WORKSPACE_INVALID`, `BIN_MAPPING_INVALID`, `BIN_EXECUTABLE_UNSUPPORTED`, or
+`INSTALLATION_INCONSISTENT`. Preparation uses `PREPARATION_FAILED`; checked
+execution uses the existing runner error categories. `policy_inputs` identifies
+requested/effective policy when available; `receipt` is null unless checked
+execution succeeded. Child output cannot supply these fields. Owner metadata is
+selection evidence, not evidence that execution or containment succeeded.
+
 ## Project status
 
 `tapid --json status` uses the version 1 envelope and always reports unchanged

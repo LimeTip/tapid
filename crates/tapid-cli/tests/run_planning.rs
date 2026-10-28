@@ -730,3 +730,145 @@ fn cli_launch_failure_is_nonzero_without_receipt_and_cleans_reserved_directory()
     }
     fs::remove_dir_all(project).unwrap();
 }
+
+#[test]
+fn direct_node_preparation_preserves_argv_without_managed_bins_or_ambient_environment() {
+    let project = tapid_test_support::TempProject::new("direct-node-plan").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let runtime_dir = tapid_test_support::TempProject::new("direct-node-runtime").unwrap();
+    let runtime = runtime_dir
+        .path()
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    fs::write(&runtime, b"runtime").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entry = project
+        .write("cli.js", b"console.log(process.argv)")
+        .unwrap();
+    let entry = fs::canonicalize(entry).unwrap();
+    let config = RunConfig::parse_toml(
+        "[run.scripts.explicit]\nassurance = \"restricted\"\nenvironment = [\"PUBLIC_VALUE\"]\n",
+    )
+    .unwrap();
+    let policy = config.exact_profile("explicit").unwrap();
+    let arguments: Vec<OsString> = [
+        "",
+        "two words",
+        "'\"",
+        ";touch sentinel",
+        "$(echo injected)",
+        "--eval",
+        "line\nbreak",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let ambient = BTreeMap::from([
+        ("PUBLIC_VALUE".into(), "allowed".into()),
+        ("SECRET_TOKEN".into(), "hidden".into()),
+    ]);
+    let prepared = run::prepare_node_execution_request_with_policy(
+        &root,
+        &root,
+        policy,
+        None,
+        &entry,
+        &arguments,
+        run::HostExecutionEnvironment {
+            node_runtime: Some(&runtime),
+            path: Some(OsStr::new("/untrusted/path")),
+            allowlisted: &ambient,
+            allow_process_memory_stats: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.request().program(),
+        fs::canonicalize(&runtime).unwrap()
+    );
+    let expected: Vec<OsString> = std::iter::once(entry.into_os_string())
+        .chain(arguments)
+        .collect();
+    assert_eq!(prepared.request().arguments(), expected);
+    assert!(!prepared.request().uses_windows_verbatim_arguments());
+    assert_eq!(
+        prepared.executable_search_directories(),
+        expected_search_directories(vec![fs::canonicalize(runtime.parent().unwrap()).unwrap()])
+    );
+    assert_eq!(
+        prepared.request().environment(),
+        &BTreeMap::from([(OsString::from("PUBLIC_VALUE"), OsString::from("allowed"))])
+    );
+    assert!(!root.join("node_modules").exists());
+    assert!(!root.join("sentinel").exists());
+}
+
+#[test]
+fn direct_node_preparation_rejects_escaped_entries_and_policy_escalation() {
+    let project = tapid_test_support::TempProject::new("direct-node-denial").unwrap();
+    let root = fs::canonicalize(project.path()).unwrap();
+    let outside = tapid_test_support::TempProject::new("direct-node-outside").unwrap();
+    let entry = fs::canonicalize(outside.write("cli.js", b"").unwrap()).unwrap();
+    let runtime = outside
+        .write(if cfg!(windows) { "node.exe" } else { "node" }, b"runtime")
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let config = RunConfig::parse_toml("[run.scripts.ceiling]\nassurance = \"restricted\"\n[run.scripts.expanded]\nassurance = \"restricted\"\nnetwork = true\n").unwrap();
+    let ceiling = config.exact_profile("ceiling").unwrap();
+    let expanded = config.exact_profile("expanded").unwrap();
+    let ambient = BTreeMap::new();
+    let host = || run::HostExecutionEnvironment {
+        node_runtime: Some(&runtime),
+        path: None,
+        allowlisted: &ambient,
+        allow_process_memory_stats: false,
+    };
+    assert!(matches!(
+        run::prepare_node_execution_request_with_policy(
+            &root,
+            &root,
+            ceiling,
+            None,
+            &entry,
+            &[],
+            host()
+        ),
+        Err(run::RunPreparationError::InvalidNodeEntry)
+    ));
+    let entry = fs::canonicalize(project.write("cli.js", b"").unwrap()).unwrap();
+    assert!(matches!(
+        run::prepare_node_execution_request_with_policy(
+            &root,
+            &root,
+            expanded,
+            Some(ceiling),
+            &entry,
+            &[],
+            host()
+        ),
+        Err(run::RunPreparationError::InvalidRequest(_))
+    ));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("cli.js", root.join("link.js")).unwrap();
+        assert!(matches!(
+            run::prepare_node_execution_request_with_policy(
+                &root,
+                &root,
+                ceiling,
+                None,
+                &root.join("link.js"),
+                &[],
+                host()
+            ),
+            Err(run::RunPreparationError::InvalidNodeEntry)
+        ));
+    }
+}
