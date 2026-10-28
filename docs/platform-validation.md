@@ -184,7 +184,7 @@ sampled controls; it does not resolve the inventory below or enable authenticati
 | KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
 | Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
 | Dynamic DLL loads | Native token/ACL checks apply; compatibility interception is incomplete | Add absolute, searched, altered-search, secondary-dependency and manual-load controls. Static imports and observed loads cannot establish closure. |
-| Descendant executables | Suspended root is verified and assigned to a non-breakaway Job before resume; token restrictions propagate | Extended AAP fixture pairs approved root/descendant execution with undeclared executable denial. Dynamic process API and DLL-initialization bypass controls remain outstanding. |
+| Descendant executables | Suspended root is verified and assigned to a non-breakaway Job before resume; token restrictions propagate | Extended AAP fixture pairs approved root/descendant execution with undeclared executable denial, including `CreateProcessW` resolved directly from kernel32. Native execution and DLL-initialization bypass controls remain outstanding. |
 | Declared tools / runtime snapshots | CLI verifies declared tool bytes; Windows system identity is rejected before authenticated lookup | Retain the same bounded authority for hashing and execution. Secondary-byte, resolution-order and mutation controls must precede enabling recipe reuse. |
 
 Kernel enforcement and privileged-host integrity are trust assumptions. They do
@@ -194,6 +194,17 @@ further fixture development. The extended AAP control is owned by the existing
 native Windows workspace test suite and requires its guard setup. Compilation
 or a zero-test macOS invocation is not an enforcement receipt. This checkpoint
 does not establish #157 project-script acceptance or #274 integrated adoption.
+
+The AAP/ARAP executable controls additionally resolve `CreateProcessW` through
+`GetProcAddress`, bypassing application import adaptation. The host must launch
+the undeclared fixture, and both contained root and descendant must launch their
+approved copy through that same API. A distinctive target exit code rejects a
+zero-test libtest success. Each launch uses an absolute program, no inherited
+handles, a five-second wait, held process/thread handles and bounded termination
+on timeout. AAP launches outside the declared grants must return access denied;
+ARAP results remain characterization. These controls have compile-only coverage
+until the native Windows acceptance lane executes them. They do not establish
+arbitrary process-API closure, runtime identity or recipe authentication.
 
 The nonignored `windows_inventories_all_restricted_application_packages_authority`
 test emits `ARAP:<process>:<operation>:allowed|denied` observations through the

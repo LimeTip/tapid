@@ -417,6 +417,7 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
     assert!(host_control.status.success(), "{host_control:?}");
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("undeclared-target-executed"));
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("host-dynamic-library-valid"));
+    resolved_process_probe(&undeclared_executable).expect("host resolved-process positive control");
     // Use an executable outside the undeclared DLL directory: Windows searches
     // the application directory before SetDllDirectoryW. Otherwise this host
     // control would select the ambient fixture for reasons unrelated to the
@@ -504,6 +505,7 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
         for operation in [
             "read",
             "execute",
+            "resolved-execute",
             "load-library",
             "search-library",
             "resolved-load-library",
@@ -551,7 +553,7 @@ fn windows_ambient_read_probe_helper() {
         }
     }
     let outside_executable = fs::read_to_string("outside-executable.txt").unwrap();
-    let launch = Command::new(outside_executable)
+    let launch = Command::new(&outside_executable)
         .args([
             "--exact",
             "windows_ambient_execution_target_helper",
@@ -569,6 +571,21 @@ fn windows_ambient_read_probe_helper() {
         Err(error) => {
             assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             println!("{trustee}:{mode}:execute:denied");
+        }
+    }
+    resolved_process_probe(&std::env::current_exe().unwrap())
+        .expect("approved executable must launch through resolved CreateProcessW");
+    match resolved_process_probe(std::path::Path::new(&outside_executable)) {
+        Ok(()) => {
+            assert_ne!(
+                trustee, "AAP",
+                "resolved launch of undeclared AAP executable"
+            );
+            println!("{trustee}:{mode}:resolved-execute:allowed");
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("{trustee}:{mode}:resolved-execute:denied");
         }
     }
     load_authority_probe_library(
@@ -641,6 +658,114 @@ fn windows_ambient_read_probe_helper() {
         );
     } else {
         println!("approved-child");
+    }
+}
+
+// Bypass application import adaptation deliberately. The kernel token and Job
+// must constrain this launch independently of the compatibility hooks.
+fn resolved_process_probe(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Security::SECURITY_ATTRIBUTES,
+        System::Threading::{
+            GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+            WaitForSingleObject,
+        },
+    };
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> isize;
+        fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
+    }
+    type CreateProcess = unsafe extern "system" fn(
+        *const u16,
+        *mut u16,
+        *const SECURITY_ATTRIBUTES,
+        *const SECURITY_ATTRIBUTES,
+        i32,
+        u32,
+        *const std::ffi::c_void,
+        *const u16,
+        *const STARTUPINFOW,
+        *mut PROCESS_INFORMATION,
+    ) -> i32;
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: owns exactly one successful CreateProcessW handle.
+            assert_ne!(unsafe { CloseHandle(self.0) }, 0);
+        }
+    }
+    let kernel: Vec<_> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: borrow the already loaded system module, which remains loaded.
+    let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
+    assert_ne!(kernel, 0);
+    // SAFETY: the module is live and the symbol is NUL terminated.
+    let address = unsafe { GetProcAddress(kernel, c"CreateProcessW".as_ptr().cast()) };
+    assert!(!address.is_null());
+    // SAFETY: exact ABI of the named Windows export.
+    let create = unsafe { std::mem::transmute::<*const std::ffi::c_void, CreateProcess>(address) };
+    let mut program: Vec<_> = path.as_os_str().encode_wide().collect();
+    assert!(path.is_absolute());
+    assert!(!program.contains(&0) && !program.contains(&u16::from(b'"')));
+    let mut command = vec![u16::from(b'"')];
+    command.extend_from_slice(&program);
+    command
+        .extend("\" --exact windows_resolved_execution_target_helper --nocapture".encode_utf16());
+    command.push(0);
+    program.push(0);
+    // SAFETY: these native structures admit all-zero initialization.
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    // SAFETY: output storage is initialized by a successful CreateProcessW.
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: owned terminated argv, explicit absolute program, no inherited
+    // handles, and valid native structures. Environment/current directory inherit
+    // from the isolated helper; the target performs no filesystem operations.
+    if unsafe {
+        create(
+            program.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let process = (Handle(process.hProcess), Handle(process.hThread));
+    // SAFETY: held process handle has synchronization rights.
+    let wait = unsafe { WaitForSingleObject(process.0.0, 5_000) };
+    if wait != WAIT_OBJECT_0 {
+        // SAFETY: stop only the held fixture process, then require its exit.
+        assert_ne!(unsafe { TerminateProcess(process.0.0, 1) }, 0);
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.0.0, 5_000) },
+            WAIT_OBJECT_0
+        );
+        panic!("resolved process probe failed to finish: wait={wait}, timeout={WAIT_TIMEOUT}");
+    }
+    let mut exit = 0;
+    // SAFETY: process is held and has exited; output storage is writable.
+    assert_ne!(unsafe { GetExitCodeProcess(process.0.0, &mut exit) }, 0);
+    assert_eq!(exit, 71, "resolved process target did not run");
+    Ok(())
+}
+
+#[test]
+fn windows_resolved_execution_target_helper() {
+    // A distinctive exit proves this test body ran; a misspelled libtest filter
+    // would otherwise exit successfully with zero tests. Ordinary suite execution
+    // does not select this helper by its exact name and must return normally.
+    if std::env::args().any(|arg| arg == "windows_resolved_execution_target_helper") {
+        std::process::exit(71);
     }
 }
 
