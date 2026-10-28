@@ -274,6 +274,7 @@ async function matchingGraphs(check: (npm: string, tapid: string) => void) {
         packages[location] = {
           ...metadata,
           registry: "https://registry.npmjs.org",
+          artifactUrl: `https://registry.npmjs.org/${metadata.name}/file.tgz`,
           artifactIntegrity: "sha512-fixture",
           ...(metadata.name === "platform"
             ? { platformContext: "os=darwin;cpu=;libc=" }
@@ -325,3 +326,148 @@ for (const [field, value, result] of [
       assert.equal(report[result].length, 1);
       assert.equal(report[result][0].name, "app");
     }));
+
+test("matching provenance cannot hide an additional conflicting record", async () =>
+  matchingGraphs((npm, tapid) => {
+    const path = join(tapid, "tapid.lock"), lock = json(path);
+    lock.packages.conflict = {
+      ...lock.packages.app,
+      registry: "https://other.example",
+      artifactIntegrity: "sha512-conflict",
+    };
+    writeJson(path, lock);
+    const { report, code } = compare(npm, tapid);
+    assert.equal(code, 1);
+    assert.equal(report.sourceIdentityMismatches.length, 1);
+    assert.equal(report.integrityMismatches.length, 1);
+  }));
+
+test("invalid comparator arguments use the execution-error exit", () => {
+  const result = spawnSync(process.execPath,
+    nodeArgs("scripts/compare-news-site-package-graphs.ts", ["--unknown"]),
+    { encoding: "utf8", timeout: 20_000 });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /graph comparison error:/);
+});
+
+test("different artifact paths on the same registry are selection drift", async () =>
+  matchingGraphs((npm, tapid) => {
+    const path = join(tapid, "tapid.lock"), lock = json(path);
+    lock.packages.app.artifactUrl = "https://registry.npmjs.org/app/other.tgz";
+    writeJson(path, lock);
+    const { report, code } = compare(npm, tapid);
+    assert.equal(code, 1);
+    assert.equal(report.artifactUrlMismatches.length, 1);
+  }));
+
+test("platform constraint changes cannot hide behind a platform-optional flag", async () =>
+  matchingGraphs((npm, tapid) => {
+    const path = join(tapid, "tapid.lock"), lock = json(path);
+    lock.packages.platform.platformContext = "os=linux;cpu=;libc=";
+    writeJson(path, lock);
+    assert.equal(compare(npm, tapid).code, 1);
+  }));
+
+test("malformed installed package metadata cannot disappear", async () =>
+  matchingGraphs((npm, tapid) => {
+    writeJson(join(tapid, "node_modules/unused/package.json"), { version: "9.0.0" });
+    assert.throws(() => compare(npm, tapid), /invalid installed package identity/);
+  }));
+
+test("package contents are not installed package locations", async () =>
+  matchingGraphs((npm, tapid) => {
+    writeJson(join(tapid, "node_modules/app/examples/package.json"), {});
+    assert.equal(compare(npm, tapid).code, 0);
+  }));
+
+test("imported placement evidence survives receipt-only changes", async () =>
+  matchingGraphs((npm, tapid) => {
+    const path = join(tapid, "tapid.lock");
+    const lock = { lockfileVersion: 8, npmLock: json(join(npm, "package-lock.json")),
+      verifiedTrees: {}, verifiedArtifacts: {} };
+    writeJson(path, lock);
+    assert.equal(compare(npm, tapid).code, 0);
+    lock.verifiedTrees = { "node_modules/app": "sha256-tree" };
+    lock.verifiedArtifacts = { "node_modules/app": {
+      treeDigest: "sha256-tree", resolved: lock.npmLock.packages["node_modules/app"].resolved,
+      integrity: "sha512-fixture" } };
+    writeJson(path, lock);
+    const after = compare(npm, tapid);
+    assert.equal(after.code, 0);
+    assert.equal(after.report.verificationReceipts.tapid.artifacts, 1);
+  }));
+
+test("one valid instance cannot hide a missing nested provenance record", async () =>
+  matchingGraphs((npm, tapid) => {
+    const rootPath = join(npm, "package.json"), manifest = json(rootPath);
+    manifest.dependencies.child = "1.0.0";
+    writeJson(rootPath, manifest);
+    writeJson(join(npm, "node_modules/app/node_modules/child/package.json"),
+      { name: "child", version: "1.0.0" });
+    const path = join(npm, "package-lock.json"), lock = json(path);
+    delete lock.packages["node_modules/app/node_modules/child"];
+    writeJson(path, lock);
+    const { report, code } = compare(npm, tapid);
+    assert.equal(code, 1);
+    assert.ok(report.missingProvenance.some((entry) => entry.name === "child"));
+  }));
+
+for (const context of ["peer", "artifact"])
+test(`swapped same-version ${context} contexts cannot hide in aggregate edge sets`, async () =>
+  temporary((path) => {
+    const roots = [join(path, "npm"), join(path, "tapid")];
+    for (const [side, project] of roots.entries()) {
+      const manifest = { name: "fixture", version: "1.0.0",
+        dependencies: { left: "1.0.0", right: "1.0.0" } };
+      writeJson(join(project, "package.json"), manifest);
+      const packages: any = { "": manifest };
+      for (const [index, parent] of ["left", "right"].entries()) {
+        const manifests = {
+          [parent]: { name: parent, version: "1.0.0", dependencies: { app: "1.0.0" } },
+          [`${parent}/node_modules/app`]: { name: "app", version: "1.0.0",
+            peerDependencies: { peer: "*" } },
+          [`${parent}/node_modules/peer`]: { name: "peer",
+            version: (side && context === "peer" ? 1 - index : index) + ".0.0" },
+        };
+        for (const [location, metadata] of Object.entries(manifests)) {
+          writeJson(join(project, "node_modules", location, "package.json"), metadata);
+          packages["node_modules/" + location] = { ...metadata,
+            resolved: `https://registry.npmjs.org/${metadata.name}/${metadata.version}.tgz`,
+            integrity: "sha512-fixture" };
+          if (metadata.name === "app" && context === "artifact")
+            packages["node_modules/" + location].resolved =
+              `https://registry.npmjs.org/app/${side ? 1 - index : index}.tgz`;
+        }
+      }
+      const lock = { lockfileVersion: 3, packages };
+      writeJson(join(project, "package-lock.json"), lock);
+      writeJson(join(project, "tapid.lock"), { lockfileVersion: 8, npmLock: lock });
+    }
+    const { report, code } = compare(...roots as [string, string]);
+    assert.deepEqual(report.peerEdgeDifferences, { npmOnly: [], tapidOnly: [] });
+    assert.equal(code, 1);
+    assert.equal(report.contextualGraphEqual, false);
+  }));
+
+test("equivalent cyclic bindings compare equal across different hoisting layouts", async () =>
+  temporary((path) => {
+    const roots = [join(path, "npm"), join(path, "tapid")];
+    for (const [side, project] of roots.entries()) {
+      const manifest = { name: "fixture", version: "1.0.0", dependencies: { app: "1.0.0" } };
+      writeJson(join(project, "package.json"), manifest);
+      const packages: any = { "": manifest };
+      for (const [location, metadata] of Object.entries({
+        app: { name: "app", version: "1.0.0", dependencies: { child: "1.0.0" } },
+        [side ? "app/node_modules/child" : "child"]:
+          { name: "child", version: "1.0.0", dependencies: { app: "1.0.0" } },
+      })) {
+        writeJson(join(project, "node_modules", location, "package.json"), metadata);
+        packages["node_modules/" + location] = { ...metadata,
+          resolved: `https://registry.npmjs.org/${metadata.name}/file.tgz`, integrity: "sha512-fixture" };
+      }
+      const lock = { lockfileVersion: 3, packages };
+      writeJson(join(project, "package-lock.json"), lock);
+      writeJson(join(project, "tapid.lock"), { lockfileVersion: 8, npmLock: lock });
+    }
+    assert.equal(compare(...roots as [string, string]).code, 0);
+  }));

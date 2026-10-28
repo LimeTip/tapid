@@ -4,6 +4,40 @@
 
 Tapid manages packages and lockfiles. It is not a runtime and does not replace Node.js, workerd, Wrangler, or deployment tools. npm is not required to import a v3 lock or to install and replay the resulting Tapid lock.
 
+## Evaluate an existing application reversibly
+
+Use two isolated checkouts of the same immutable application revision: `npm-baseline` and `tapid-evaluation`. Record the source URL, commit, license, OS/architecture, Node/npm versions, Tapid source revision and binary SHA-256. Use the application's documented toolchain. Retain the original npm lock, all matching root/member manifests, and any previous Tapid lock outside both checkouts. Keep credentials and stores out of evidence reports. The [evaluation index and report template](evaluations/npm-migration/README.md) distinguish attempted checks from successful acceptance.
+
+1. In `npm-baseline`, run `npm ci` with the application's normal lifecycle behavior. Run its documented build, tests and a bounded start/readiness check. Record missing scripts, services and prerequisites explicitly. A failed baseline makes application comparison inconclusive.
+2. Start `tapid-evaluation` without npm-owned root or member `node_modules` trees. Select a fresh isolated store and an isolated home/configuration. Record `tapid --json status` before mutation. Status is local compatibility inspection; it does not establish store validity, lifecycle compatibility or application readiness.
+3. Import and verify using the commands below. An unsupported diagnostic is a stopping condition for dependent checks. Retain its JSON pointer, package identity, field/reason, and before/after hashes of manifests and locks. Check that the store and installed trees are unchanged. Do not delete unsupported metadata or refresh npm selections to turn that attempt into success.
+4. Install frozen, then replay offline with the same store. Preserve the imported lock before and after hydration. Receipt changes are verification evidence, not version drift.
+
+```sh
+# In tapid-evaluation; EVALUATION_STORE is an absolute, disposable store path.
+tapid --json status
+tapid import-package-lock ./package-lock.json
+tapid lock verify
+tapid install --frozen --store-dir "$EVALUATION_STORE"
+tapid install --offline --frozen --store-dir "$EVALUATION_STORE"
+```
+
+From the Tapid source checkout, compare the installed graphs before application execution:
+
+```sh
+node --experimental-strip-types scripts/compare-news-site-package-graphs.ts \
+  --npm-root "$NPM_BASELINE" --tapid-root "$TAPID_EVALUATION" \
+  --json "$EVIDENCE_DIR/graph.json" --text "$EVIDENCE_DIR/graph.md"
+```
+
+Exit 0 means equality under the comparator's supported evidence model; exit 1 means differences or incomplete instance evidence; exit 2 means an input/execution error. Schema 2 reports contextual dependency/peer bindings, exact artifact URLs and integrities, aggregate differences and receipt counts separately. It handles cycles and layout-only hoisting differences. It currently rejects package links, including workspace links; native locks with multiple candidate records for an installed name/version report ambiguous association. These are comparator limits, not proof of importer incompatibility. Do not claim workspace parity or general native-maintenance stability from this helper yet. Optional/platform differences require review against explicit constraints; an arbitrary missing optional package is not a platform exemption.
+
+Run the same application build, tests and bounded readiness check on the Tapid tree using its existing runtime/tools. Record the command, working directory, exit and readiness result independently of graph parity. **Imported replay never executes dependency hooks, even after an approval draft.** Hook-dependent applications may therefore fail despite equal selections. Successful import does not certify application behavior, later dependency mutations or deployment.
+
+Before maintenance, explain the conversion risk: `add` and named `update` leave imported replay and invoke native resolution, whose peer and member/workspace support is narrower. Keep independent disposable copies of the successfully imported state for one exact add target and one named update target. Record expected direct changes, requiring edges for necessary transitive changes and all unrelated compatible selections. Save pre-operation manifests, locks and semantic evidence. The retained npm lock describes the old state after conversion; comparing against it is not sufficient proof of maintenance stability. Until explicit native before/after comparison is available, mark that result unavailable. Never automatically retry with fresh resolution or weaker verification. Replay successful native results frozen and offline.
+
+Finally demonstrate rollback after actual Tapid activation: restore the retained matching root/member manifests and locks, remove or restore the appropriate root/member installed trees, run the retained `npm ci` path, and repeat a previously passing application check. Reinstalling npm after a rejected import proves baseline recovery only; it is not evidence of rollback from an activated Tapid tree. Keep the baseline available throughout.
+
 ## Migration
 
 Keep a backup or a version-control copy of `package.json`, `package-lock.json`, and any existing `tapid.lock` before importing. Use a clean project with no interrupted Tapid transaction.
