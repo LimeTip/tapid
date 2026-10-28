@@ -25,6 +25,7 @@ pub(super) struct ProjectEvidence {
     pub root: PathBuf,
     pub workspace: Workspace,
     pub lock: Lockfile,
+    imported: Option<tapid_lockfile::ImportedNpmLockfile>,
     pub config: RegistryConfig,
     pub store: tapid_store::StoreReadGuard,
     observations: BTreeMap<PathBuf, Option<Vec<u8>>>,
@@ -71,6 +72,12 @@ impl ProjectEvidence {
         OperationalError,
     > {
         self.revalidate()?;
+        if self.imported.is_some() {
+            return Err(failure(
+                ErrorKind::Lockfile,
+                "imported locks require imported-layout verification",
+            ));
+        }
         let (input, _) =
             super::installed_input(&self.lock, self.workspace.root(), &self.store, &self.config)?;
         let local = crate::online::workspace_materialization_from_discovered(
@@ -83,6 +90,51 @@ impl ProjectEvidence {
         workspace_plan
             .include_owned_members()
             .map_err(|e| failure(ErrorKind::Materialization, e))?;
+        self.verify_layout(&input, &workspace_plan)?;
+        Ok((input, workspace_plan))
+    }
+
+    pub(super) fn verify_imported_layout(
+        &self,
+    ) -> Result<
+        (
+            tapid_linker::NamedLayoutInput,
+            crate::online::WorkspaceInstallPlan,
+        ),
+        OperationalError,
+    > {
+        self.revalidate()?;
+        let imported = self
+            .imported
+            .as_ref()
+            .ok_or_else(|| failure(ErrorKind::Lockfile, "expected an imported lock"))?;
+        let observed =
+            crate::online::observe_imported_artifacts(imported, &self.store, &self.config)?;
+        let local = crate::online::workspace_materialization_from_discovered(
+            &self.root,
+            &self.config,
+            None,
+            &self.workspace,
+        )?;
+        let graph = imported
+            .graph()
+            .map_err(|e| failure(ErrorKind::Lockfile, e))?;
+        let (input, workspace_plan) = crate::online::imported_layout(
+            &self.root,
+            local.links,
+            &graph,
+            &observed.input,
+            &observed.placements,
+        )?;
+        self.verify_layout(&input, &workspace_plan)?;
+        Ok((input, workspace_plan))
+    }
+
+    fn verify_layout(
+        &self,
+        input: &tapid_linker::NamedLayoutInput,
+        workspace_plan: &crate::online::WorkspaceInstallPlan,
+    ) -> Result<(), OperationalError> {
         // Even an unowned member tree can affect Node lookup from mutable
         // workspace source. Never let it escape verification through omission.
         for member in self.workspace.members() {
@@ -119,12 +171,12 @@ impl ProjectEvidence {
             )
             .map_err(|e| failure(ErrorKind::Materialization, e))
         };
-        verify(&self.root, &input, &workspace_plan.links)?;
+        verify(&self.root, input, &workspace_plan.links)?;
         for (root, member) in &workspace_plan.members {
             verify(root, &member.input, &member.links)?;
         }
         self.revalidate()?;
-        Ok((input, workspace_plan))
+        Ok(())
     }
 
     /// Compose exact root/member selection with complete native-layout evidence.
@@ -348,53 +400,77 @@ impl ProjectEvidence {
             .transpose()
             .map_err(|e| failure(ErrorKind::RegistryConfiguration, e))?
             .unwrap_or_default();
-        let lock = Lockfile::from_json(
-            std::str::from_utf8(observations[&root.join("tapid.lock")].as_deref().unwrap())
-                .map_err(|e| failure(ErrorKind::Lockfile, e))?,
-        )
-        .map_err(|e| failure(ErrorKind::Lockfile, e))?;
-        lock.validate_replay(&crate::filesystem::atomic::digest_bytes(
-            observations[&root.join("package.json")].as_deref().unwrap(),
-        ))
-        .map_err(|e| {
-            let kind = if matches!(
-                e,
-                tapid_lockfile::LockfileError::RootManifestDigestMismatch { .. }
-            ) {
-                ErrorKind::LockManifestMismatch
-            } else {
-                ErrorKind::Lockfile
-            };
-            failure(kind, e)
-        })?;
-        crate::application::replay::validate_root_bindings(&lock, workspace.root(), &config)
-            .map_err(|e| failure(ErrorKind::Lockfile, e))?;
+        let parsed = crate::application::install::parse_project_lock(
+            observations[&root.join("tapid.lock")].as_deref().unwrap(),
+            &root.join("tapid.lock"),
+        )?;
+        let store = store.existing_read_guard()?;
         let local = crate::online::workspace_materialization_from_discovered(
             &root, &config, None, &workspace,
         )?;
-        if !crate::online::workspace_matches_lock(&local, &lock) {
-            return Err(failure(
-                ErrorKind::Lockfile,
-                "workspace receipts differ from current manifests",
-            ));
+        let (lock, imported) = match parsed {
+            crate::application::install::InstallLock::Native(lock) => (lock, None),
+            crate::application::install::InstallLock::Imported(imported) => {
+                let manifest = observations[&root.join("package.json")].as_deref().unwrap();
+                imported
+                    .validate_replay(
+                        std::str::from_utf8(manifest)
+                            .map_err(|e| failure(ErrorKind::Manifest, e))?,
+                        &crate::filesystem::atomic::digest_bytes(manifest),
+                    )
+                    .map_err(|e| failure(ErrorKind::LockManifestMismatch, e))?;
+                imported
+                    .validate_workspace_manifests(&crate::online::imported_workspace_manifests(
+                        &root, &local,
+                    )?)
+                    .map_err(|e| failure(ErrorKind::LockManifestMismatch, e))?;
+                let observed =
+                    crate::online::observe_imported_artifacts(&imported, &store, &config)?;
+                (observed.lock, Some(imported))
+            }
+        };
+        if imported.is_none() {
+            lock.validate_replay(&crate::filesystem::atomic::digest_bytes(
+                observations[&root.join("package.json")].as_deref().unwrap(),
+            ))
+            .map_err(|e| {
+                let kind = if matches!(
+                    e,
+                    tapid_lockfile::LockfileError::RootManifestDigestMismatch { .. }
+                ) {
+                    ErrorKind::LockManifestMismatch
+                } else {
+                    ErrorKind::Lockfile
+                };
+                failure(kind, e)
+            })?;
+            crate::application::replay::validate_root_bindings(&lock, workspace.root(), &config)
+                .map_err(|e| failure(ErrorKind::Lockfile, e))?;
+            if !crate::online::workspace_matches_lock(&local, &lock) {
+                return Err(failure(
+                    ErrorKind::Lockfile,
+                    "workspace receipts differ from current manifests",
+                ));
+            }
+            let dependencies = crate::online::resolved_workspace_registry_dependencies(
+                workspace.root(),
+                &local,
+                &config,
+            )?;
+            crate::application::replay::validate_workspace_dependency_edges(
+                &local,
+                &dependencies,
+                &lock,
+            )
+            .map_err(|e| failure(ErrorKind::Lockfile, e))?;
         }
-        let dependencies = crate::online::resolved_workspace_registry_dependencies(
-            workspace.root(),
-            &local,
-            &config,
-        )?;
-        crate::application::replay::validate_workspace_dependency_edges(
-            &local,
-            &dependencies,
-            &lock,
-        )
-        .map_err(|e| failure(ErrorKind::Lockfile, e))?;
         let evidence = Self {
             root,
             workspace,
             lock,
+            imported,
             config,
-            store: store.existing_read_guard()?,
+            store,
             observations,
             _activation: activation,
         };
@@ -444,6 +520,10 @@ impl ProjectEvidence {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "project/imported_tests.rs"]
+mod imported_tests;
 
 #[cfg(test)]
 mod tests {

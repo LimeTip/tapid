@@ -15,6 +15,7 @@ pub(crate) use locked::{
 };
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
+pub(crate) use npm_import::{imported_layout, observe_imported_artifacts};
 mod resolution;
 mod update;
 #[cfg(test)]

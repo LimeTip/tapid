@@ -249,14 +249,45 @@ pub(crate) fn fetch_imported(
         .record_verified_artifacts(artifact_receipts)
         .map_err(|e| e.to_string())?;
     let instances: Vec<_> = instances.into_values().collect();
-    let mut plan = WorkspaceInstallPlan::from(workspace.links);
+    let (input, workspace) = imported_layout(
+        project,
+        workspace.links,
+        &graph,
+        &NamedLayoutInput {
+            instances,
+            root_dependencies: roots,
+            dependency_edges: edges,
+        },
+        &keys,
+    )?;
+    Ok(PreparedInstall {
+        candidate_exclusions: Default::default(),
+        lock,
+        layout: PreparedLayout {
+            input,
+            trees,
+            workspace,
+        },
+        transaction,
+    })
+}
+
+/// Share install topology and member placement with read-only verification.
+pub(crate) fn imported_layout(
+    project: &Path,
+    links: WorkspaceLinkPlan,
+    graph: &tapid_lockfile::ImportedNpmGraph,
+    input: &NamedLayoutInput,
+    keys: &BTreeMap<String, InstanceKey>,
+) -> Result<(NamedLayoutInput, WorkspaceInstallPlan), OperationalError> {
+    let mut plan = WorkspaceInstallPlan::from(links);
     plan.include_owned_members()?;
     for (member, points) in &graph.member_roots {
         let roots = &points.dependencies;
         let local_roots: Vec<_> = roots
             .iter()
             .filter(|(name, path)| {
-                *path != &format!("node_modules/{name}") && selected.contains(*path)
+                *path != &format!("node_modules/{name}") && keys.contains_key(*path)
             })
             .map(|(name, path)| {
                 Ok(NamedDependency {
@@ -301,7 +332,7 @@ pub(crate) fn fetch_imported(
                     input: pinned_layout(
                         roots
                             .iter()
-                            .filter(|(_, path)| selected.contains(*path))
+                            .filter(|(_, path)| keys.contains_key(*path))
                             .map(|(name, path)| {
                                 Ok(NamedDependency {
                                     name: name
@@ -311,8 +342,8 @@ pub(crate) fn fetch_imported(
                                 })
                             })
                             .collect::<Result<_, String>>()?,
-                        &instances,
-                        &edges,
+                        &input.instances,
+                        &input.dependency_edges,
                     ),
                     links,
                 },
@@ -324,16 +355,14 @@ pub(crate) fn fetch_imported(
             .workspace_links
             .contains_key(&format!("node_modules/{}", link.name))
     });
-    Ok(PreparedInstall {
-        candidate_exclusions: Default::default(),
-        lock,
-        layout: PreparedLayout {
-            input: pinned_layout(roots, &instances, &edges),
-            trees,
-            workspace: plan,
-        },
-        transaction,
-    })
+    Ok((
+        pinned_layout(
+            input.root_dependencies.clone(),
+            &input.instances,
+            &input.dependency_edges,
+        ),
+        plan,
+    ))
 }
 
 /// Read the same contained workspace sources used by native installs.

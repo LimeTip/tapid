@@ -985,7 +985,7 @@ fn perform_install(
     Ok((lock.packages().len(), true))
 }
 
-enum InstallLock {
+pub(super) enum InstallLock {
     Native(Lockfile),
     Imported(tapid_lockfile::ImportedNpmLockfile),
 }
@@ -996,23 +996,7 @@ fn parse_install_lock(
     ci: bool,
     overrides: super::dependency_scripts::ExecutionOverrides,
 ) -> Result<InstallLock, OperationalError> {
-    let input = std::str::from_utf8(bytes)
-        .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
-    let lock = if serde_json::from_str::<serde_json::Value>(input)
-        .ok()
-        .is_some_and(|value| value["lockfileVersion"] == 8)
-    {
-        tapid_lockfile::ImportedNpmLockfile::from_json(input)
-            .map(InstallLock::Imported)
-            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))?
-    } else {
-        Lockfile::from_json(input)
-            .map(InstallLock::Native)
-            .map_err(|error| {
-                OperationalError::from(error)
-                    .context(format!("invalid lockfile {}", path.display()))
-            })?
-    };
+    let lock = parse_project_lock(bytes, path)?;
     if overrides.enabled() && matches!(lock, InstallLock::Imported(_)) {
         return Err(OperationalError::new(
             ErrorKind::InvalidRequest,
@@ -1026,6 +1010,30 @@ fn parse_install_lock(
         ));
     }
     Ok(lock)
+}
+
+/// Shared schema detection; callers apply their own replay and execution policy.
+pub(super) fn parse_project_lock(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<InstallLock, OperationalError> {
+    let input = std::str::from_utf8(bytes)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
+    if serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .is_some_and(|value| value["lockfileVersion"] == 8)
+    {
+        tapid_lockfile::ImportedNpmLockfile::from_json(input)
+            .map(InstallLock::Imported)
+            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))
+    } else {
+        Lockfile::from_json(input)
+            .map(InstallLock::Native)
+            .map_err(|error| {
+                OperationalError::from(error)
+                    .context(format!("invalid lockfile {}", path.display()))
+            })
+    }
 }
 
 fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
