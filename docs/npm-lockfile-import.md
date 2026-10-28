@@ -62,3 +62,14 @@ Import failures leave root and member manifests, the previous lock, store, and a
 After an install, restore the saved lock and matching manifest, then replay their verified trees, or restore the saved npm project and run `npm ci`. Keep the npm lock backup until you have checked your application with its chosen runtime and tools.
 
 Imported locks use Tapid schema 8, separately from ordinary schema 7 verified-tree locks. Schema 8 retains the npm selections and stores tree verification receipts by package placement, bound to each receipt's tarball URL and integrity value. Older Tapid clients reject this schema. Receipts can change on the first frozen install; selected versions, sources, integrity values, and constraints do not. See [ADR 0008](adr/0008-offline-npm-lock-import.md) and the [npm lockfile format](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/).
+
+Artifact identity validation uses the same package-content root selection as
+native installation. A single archive wrapper directory may have a name other
+than `package` (as in published DefinitelyTyped archives). Multiple manifest
+roots or content outside the selected wrapper fail before activation; accepting
+a wrapper name does not relax integrity, extraction or package identity checks.
+
+An undeclared peer's `optional: true` metadata annotation is retained as inert
+metadata, matching published packages such as sharp. It creates neither a peer
+constraint nor a provider. Undeclared non-optional annotations, invalid names,
+non-boolean values and unknown metadata fields still fail explicitly.

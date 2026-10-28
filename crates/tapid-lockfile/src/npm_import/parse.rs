@@ -718,7 +718,12 @@ pub(super) fn optional_peers(
     if let Some(value) = entry.get("peerDependenciesMeta") {
         for (name, value) in object(value, &pointer(at, "peerDependenciesMeta"), identity)? {
             let location = pointer(&pointer(at, "peerDependenciesMeta"), name);
-            if !peers.contains_key(name) {
+            name.parse::<PackageName>()
+                .map_err(|e| error(&location, identity, "peerDependenciesMeta", &e.to_string()))?;
+            let meta = object(value, &location, identity)?;
+            check_fields(meta, &["optional"], &location, identity)?;
+            let is_optional = flag(meta, "optional", &location, identity)?;
+            if !peers.contains_key(name) && !is_optional {
                 return Err(error(
                     &location,
                     identity,
@@ -726,9 +731,9 @@ pub(super) fn optional_peers(
                     "metadata has no corresponding peer dependency",
                 ));
             }
-            let meta = object(value, &location, identity)?;
-            check_fields(meta, &["optional"], &location, identity)?;
-            if flag(meta, "optional", &location, identity)? {
+            // npm retains optional annotations for undeclared peers (e.g. sharp's
+            // type metadata). Preserve the JSON without inventing a graph edge.
+            if is_optional && peers.contains_key(name) {
                 optional.insert(name.clone());
             }
         }
