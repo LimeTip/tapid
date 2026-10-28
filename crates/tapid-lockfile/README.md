@@ -59,3 +59,19 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+`NativeSelection` is the schema-11 capability model for explicit dependency-kind
+profiles. Installation does not yet emit or replay it. Unlike `Lockfile`, it
+separates pending registry archive pins from verified source/derived evidence,
+records typed declaration and package edges, and retains exact peer providers.
+`from_json` validates the complete selection, including omitted packages;
+`materialized_keys(InstallProfile)` returns exact retained keys without altering
+that selection. Optional declarations must already override regular declarations;
+dev declarations remain independent. Workspace declarations share the same
+profile, and local workspace records bind to declared member paths. Pending
+records cannot contain tree receipts, copied sources, or derived outputs.
+Verified records reuse existing package and derived-output validation. Structural
+receipt validation does not authenticate a derived output or authorize activation.
+The existing `Lockfile` reader continues to reject schema 11. See
+[ADR 0012](../../docs/adr/0012-native-profile-selection-evidence.md) for evidence
+authority, frozen replay and transaction integration requirements.

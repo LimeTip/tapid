@@ -1135,7 +1135,7 @@ impl DerivedHookOutput {
         &self.tree_digest
     }
 }
-fn validate_derived_hooks(outputs: &[DerivedHookOutput]) -> Result<(), LockfileError> {
+pub(crate) fn validate_derived_hooks(outputs: &[DerivedHookOutput]) -> Result<(), LockfileError> {
     let mut previous = None;
     for output in outputs {
         let tag = output
@@ -1327,7 +1327,7 @@ impl LockedPackage {
         &self.dependencies
     }
 
-    fn validate(&self) -> Result<(), LockfileError> {
+    pub(crate) fn validate(&self) -> Result<(), LockfileError> {
         let registry = self
             .registry
             .parse::<PackageSource>()

@@ -5,6 +5,8 @@
 mod error;
 mod model;
 mod npm_import;
+mod profile;
+mod selection_json;
 mod validation;
 
 #[cfg(test)]
@@ -33,3 +35,5 @@ pub use npm_import::{
     ImportedNpmArtifactReceipt, ImportedNpmEntryPoints, ImportedNpmGraph, ImportedNpmLockfile,
     ImportedNpmPackage, NpmImportError,
 };
+
+pub use profile::{InstallProfile, NativeSelection, PROFILE_LOCKFILE_VERSION};
