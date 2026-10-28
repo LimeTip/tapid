@@ -5,6 +5,8 @@ use tapid_core::{ArtifactDigest, PackageName, PackageVersion, PlatformContext, R
 
 use crate::PackageInstanceWire;
 
+pub const SECURITY_CONTRACT_V2: &str = "tapid-security-v2";
+
 pub const SECURITY_CONTRACT_V1: &str = "tapid-security-v1";
 pub const MAX_SECURITY_BYTES: usize = 262_144;
 
@@ -80,7 +82,7 @@ pub struct SecurityFinding {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SecurityResult {
+pub struct SecurityResultClaims<F> {
     pub version: String,
     pub request: SecurityRequest,
     pub issuer: String,
@@ -97,7 +99,7 @@ pub struct SecurityResult {
     pub checked_at: u64,
     pub issued_at: u64,
     pub expires_at: u64,
-    pub findings: Vec<SecurityFinding>,
+    pub findings: Vec<F>,
     pub limitations: Vec<String>,
 }
 
@@ -125,7 +127,24 @@ pub enum SecurityReason {
 impl SecurityRequest {
     /// Checks v1 identity, portable placement, context and coverage invariants.
     pub fn validate(&self) -> Result<(), SecurityReason> {
-        if self.version != SECURITY_CONTRACT_V1 {
+        self.validate_for(SECURITY_CONTRACT_V1)
+    }
+
+    pub fn validate_v2(&self) -> Result<(), SecurityReason> {
+        self.validate_for(SECURITY_CONTRACT_V2)?;
+        if matches!(self.check, SecurityCheck::Advisory)
+            && self
+                .coverage
+                .iter()
+                .any(|c| !matches!(c.as_str(), "advisory" | "reported_malware"))
+        {
+            return Err(SecurityReason::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    fn validate_for(&self, contract: &str) -> Result<(), SecurityReason> {
+        if self.version != contract {
             return Err(SecurityReason::UnsupportedVersion);
         }
         let subject = &self.subject;
@@ -209,12 +228,116 @@ pub(crate) fn valid_coverage(values: &[String]) -> bool {
             .all(|(i, v)| text(v) && !values[..i].contains(v))
 }
 
+/// The v1 finding schema remains closed; v2 metadata is never silently discarded.
+pub type SecurityResult = SecurityResultClaims<SecurityFinding>;
+pub type SecurityResultV2 = SecurityResultClaims<SecurityFindingV2>;
+
 impl SecurityResult {
     pub fn validate(&self) -> Result<(), SecurityReason> {
         if self.version != SECURITY_CONTRACT_V1 {
             return Err(SecurityReason::UnsupportedVersion);
         }
         self.request.validate()?;
+        if self
+            .findings
+            .iter()
+            .any(|f| !text(&f.id) || !text(&f.summary) || !text(&f.severity))
+        {
+            return Err(SecurityReason::InvalidResult);
+        }
+        self.validate_metadata(SECURITY_CONTRACT_V1, self.findings.len())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportClassification {
+    Advisory,
+    ReportedMalware,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportState {
+    Active,
+    Withdrawn,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SecurityFix {
+    /// Exact replacement version at the same origin/name; not a remediation plan.
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SecurityFindingV2 {
+    pub id: String,
+    pub revision: String,
+    pub classification: ReportClassification,
+    pub state: ReportState,
+    pub summary: String,
+    pub severity: Option<String>,
+    pub fixes: Vec<SecurityFix>,
+}
+
+impl SecurityResultV2 {
+    pub fn validate(&self) -> Result<(), SecurityReason> {
+        let active = self
+            .findings
+            .iter()
+            .filter(|f| f.state == ReportState::Active)
+            .count();
+        self.validate_metadata(SECURITY_CONTRACT_V2, active)?;
+        for (i, finding) in self.findings.iter().enumerate() {
+            let coverage = match finding.classification {
+                ReportClassification::Advisory => "advisory",
+                ReportClassification::ReportedMalware => "reported_malware",
+            };
+            if !text(&finding.id)
+                || !text(&finding.revision)
+                || !text(&finding.summary)
+                || finding.severity.as_ref().is_some_and(|v| !text(v))
+                || finding.fixes.len() > 128
+                || finding.fixes.iter().any(|f| {
+                    f.version
+                        .parse::<PackageVersion>()
+                        .map(|v| v.to_string())
+                        .ok()
+                        .as_deref()
+                        != Some(f.version.as_str())
+                })
+                || self.findings[..i].iter().any(|f| f.id == finding.id)
+                || (self.scope == SecurityScope::PackageVersion
+                    && !self.request.coverage.iter().any(|c| c == coverage))
+                || (self.scope == SecurityScope::PackageVersion
+                    && finding.state == ReportState::Active
+                    && !self.coverage.iter().any(|c| c == coverage))
+                || (finding.state == ReportState::Withdrawn
+                    && self.status != SecurityStatus::InvalidEvidence)
+            {
+                return Err(SecurityReason::InvalidResult);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<F> SecurityResultClaims<F> {
+    fn validate_metadata(
+        &self,
+        contract: &str,
+        active_findings: usize,
+    ) -> Result<(), SecurityReason> {
+        if self.version != contract {
+            return Err(SecurityReason::UnsupportedVersion);
+        }
+        if contract == SECURITY_CONTRACT_V2 {
+            self.request.validate_v2()?;
+        } else {
+            self.request.validate()?;
+        }
         if [
             &self.issuer,
             &self.scanner,
@@ -243,7 +366,7 @@ impl SecurityResult {
                     | SecurityStatus::Unavailable
                     | SecurityStatus::Unsupported
                     | SecurityStatus::InvalidEvidence
-            ) && (!self.coverage.is_empty() || !self.findings.is_empty()))
+            ) && (!self.coverage.is_empty() || active_findings != 0))
             || self.sequence == 0
             || self.checked_at > self.issued_at
             || self.issued_at >= self.expires_at
@@ -254,12 +377,8 @@ impl SecurityResult {
             || self.findings.len() > 256
             || self.limitations.len() > 128
             || self.limitations.iter().any(|v| !text(v))
-            || self
-                .findings
-                .iter()
-                .any(|f| !text(&f.id) || !text(&f.summary) || !text(&f.severity))
-            || (self.status == SecurityStatus::Findings && self.findings.is_empty())
-            || (self.status == SecurityStatus::NoKnownFindings && !self.findings.is_empty())
+            || (self.status == SecurityStatus::Findings && active_findings == 0)
+            || (self.status == SecurityStatus::NoKnownFindings && active_findings != 0)
         {
             return Err(SecurityReason::InvalidResult);
         }
