@@ -41,7 +41,7 @@ impl ShimStrategy {
         self,
         targets: impl IntoIterator<Item = &'a std::path::Path>,
     ) -> Result<(), PlanError> {
-        let mut outputs = BTreeSet::new();
+        let mut outputs = ShimOutputs::default();
         for target in targets {
             reserve_shim_outputs(&mut outputs, target, self)?;
         }
@@ -120,13 +120,66 @@ pub fn plan_shims(
     packages: Vec<ShimPackage>,
     platform: Platform,
 ) -> Result<ShimPlan, PlanError> {
-    let strategy = match platform {
-        Platform::Unix => ShimStrategy::UnixSymlink,
-        Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
-        Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
-    };
-    let mut entries = Vec::new();
-    let mut outputs = BTreeSet::new();
+    let mut accumulator = ShimAccumulator::new(platform)?;
+    populate_registry(&managed_root, packages, platform, &mut accumulator)?;
+    Ok(accumulator.finish(managed_root))
+}
+
+struct ShimAccumulator {
+    strategy: ShimStrategy,
+    entries: Vec<ShimEntry>,
+    outputs: ShimOutputs,
+}
+
+impl ShimAccumulator {
+    fn new(platform: Platform) -> Result<Self, PlanError> {
+        let strategy = match platform {
+            Platform::Unix => ShimStrategy::UnixSymlink,
+            Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
+            Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
+        };
+        Ok(Self {
+            strategy,
+            entries: Vec::new(),
+            outputs: ShimOutputs::default(),
+        })
+    }
+
+    fn insert(
+        &mut self,
+        command: &str,
+        source: PathBuf,
+        target: PathBuf,
+        inspection_source: &std::path::Path,
+        platform: Platform,
+    ) -> Result<(), PlanError> {
+        reserve_shim_outputs(&mut self.outputs, &target, self.strategy)?;
+        self.entries.push(ShimEntry {
+            interpreter: shim_interpreter(inspection_source, platform)?,
+            command: command.to_owned(),
+            source,
+            target,
+            strategy: self.strategy,
+        });
+        Ok(())
+    }
+
+    fn finish(mut self, managed_root: ManagedRoot) -> ShimPlan {
+        self.entries
+            .sort_by(|a, b| a.target.cmp(&b.target).then(a.source.cmp(&b.source)));
+        ShimPlan {
+            managed_root,
+            entries: self.entries,
+        }
+    }
+}
+
+fn populate_registry(
+    managed_root: &ManagedRoot,
+    packages: Vec<ShimPackage>,
+    platform: Platform,
+    accumulator: &mut ShimAccumulator,
+) -> Result<(), PlanError> {
     for package in packages {
         if !package.tree_root.is_absolute()
             || package
@@ -165,21 +218,16 @@ pub fn plan_shims(
             if !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(target_path));
             }
-            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
-            entries.push(ShimEntry {
-                interpreter: shim_interpreter(&source, platform)?,
-                command: target.command.clone(),
-                source,
-                target: target_path,
-                strategy,
-            });
+            accumulator.insert(
+                &target.command,
+                source.clone(),
+                target_path,
+                &source,
+                platform,
+            )?;
         }
     }
-    entries.sort_by(|a, b| a.target.cmp(&b.target).then(a.source.cmp(&b.source)));
-    Ok(ShimPlan {
-        managed_root,
-        entries,
-    })
+    Ok(())
 }
 
 /// Plans registry shims and workspace shims together so command collisions are
@@ -192,7 +240,25 @@ pub fn plan_shims_with_workspace_packages(
     workspace_packages: Vec<WorkspaceShimPackage>,
     platform: Platform,
 ) -> Result<ShimPlan, PlanError> {
-    let mut plan = plan_shims(managed_root, packages, platform)?;
+    let mut accumulator = ShimAccumulator::new(platform)?;
+    populate_registry(&managed_root, packages, platform, &mut accumulator)?;
+    populate_workspace(
+        &managed_root,
+        workspace_root,
+        workspace_packages,
+        platform,
+        &mut accumulator,
+    )?;
+    Ok(accumulator.finish(managed_root))
+}
+
+fn populate_workspace(
+    managed_root: &ManagedRoot,
+    workspace_root: &std::path::Path,
+    workspace_packages: Vec<WorkspaceShimPackage>,
+    platform: Platform,
+    accumulator: &mut ShimAccumulator,
+) -> Result<(), PlanError> {
     if !workspace_root.is_absolute()
         || workspace_root
             .components()
@@ -202,16 +268,6 @@ pub fn plan_shims_with_workspace_packages(
             workspace_root.to_path_buf(),
         ));
     }
-    let strategy = match platform {
-        Platform::Unix => ShimStrategy::UnixSymlink,
-        Platform::Windows => ShimStrategy::WindowsCmdAndPowerShell,
-        Platform::Other => return Err(PlanError::UnsupportedPlatform(platform)),
-    };
-    let mut outputs = plan
-        .entries
-        .iter()
-        .flat_map(|entry| shim_output_keys(&entry.target, strategy))
-        .collect::<BTreeSet<_>>();
     for package in workspace_packages {
         if !package.tree_root.is_absolute()
             || package
@@ -223,9 +279,7 @@ pub fn plan_shims_with_workspace_packages(
         {
             return Err(PlanError::PathOutsideManagedRoot(package.tree_root));
         }
-        if !plan.managed_root.contains(&package.link_root)
-            || !plan.managed_root.contains(&package.bin_dir)
-        {
+        if !managed_root.contains(&package.link_root) || !managed_root.contains(&package.bin_dir) {
             return Err(PlanError::PathOutsideManagedRoot(package.link_root));
         }
         let manifest =
@@ -273,22 +327,19 @@ pub fn plan_shims_with_workspace_packages(
             }
             let source = package.link_root.join(&target.target);
             let target_path = package.bin_dir.join(".bin").join(&target.command);
-            if !plan.managed_root.contains(&source) || !plan.managed_root.contains(&target_path) {
+            if !managed_root.contains(&source) || !managed_root.contains(&target_path) {
                 return Err(PlanError::PathOutsideManagedRoot(source));
             }
-            reserve_shim_outputs(&mut outputs, &target_path, strategy)?;
-            plan.entries.push(ShimEntry {
-                interpreter: shim_interpreter(&validated_source, platform)?,
-                command: target.command.clone(),
+            accumulator.insert(
+                &target.command,
                 source,
-                target: target_path,
-                strategy,
-            });
+                target_path,
+                &validated_source,
+                platform,
+            )?;
         }
     }
-    plan.entries
-        .sort_by(|a, b| a.target.cmp(&b.target).then(a.source.cmp(&b.source)));
-    Ok(plan)
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -297,15 +348,32 @@ enum ShimKey {
     Utf16(Vec<u16>),
 }
 
+#[derive(Default)]
+struct ShimOutputs {
+    keys: BTreeSet<ShimKey>,
+    #[cfg(test)]
+    generated: usize,
+    #[cfg(test)]
+    attempts: usize,
+}
+
 fn reserve_shim_outputs(
-    outputs: &mut BTreeSet<ShimKey>,
+    outputs: &mut ShimOutputs,
     target: &std::path::Path,
     strategy: ShimStrategy,
 ) -> Result<(), PlanError> {
-    if shim_output_keys(target, strategy)
-        .into_iter()
-        .any(|key| !outputs.insert(key))
+    let keys = shim_output_keys(target, strategy);
+    #[cfg(test)]
     {
+        outputs.generated += keys.len();
+    }
+    if keys.into_iter().any(|key| {
+        #[cfg(test)]
+        {
+            outputs.attempts += 1;
+        }
+        !outputs.keys.insert(key)
+    }) {
         return Err(PlanError::ShimCollision(target.to_owned()));
     }
     Ok(())
@@ -390,6 +458,279 @@ mod tests {
             tree_root: tree,
             package_json: format!(r#"{{"name":"{name}","version":"1.0.0","bin":{bin}}}"#),
             bin_dir: root.join("node_modules"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_planner_retains_non_utf8_placement_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let fixture = tapid_test_support::TempProject::new("native-shim-paths").unwrap();
+        let root = fixture.path();
+        let mut first = shim_package(root, "first", r#""cli.js""#, "first");
+        let mut second = first.clone();
+        first.bin_dir = root.join(OsString::from_vec(b"node-\xff".to_vec()));
+        second.bin_dir = root.join(OsString::from_vec(b"node-\xfe".to_vec()));
+        let plan = plan_shims(
+            ManagedRoot::new(root).unwrap(),
+            vec![first.clone(), second.clone()],
+            Platform::Unix,
+        )
+        .unwrap();
+        assert_eq!(plan.entries.len(), 2);
+        assert_ne!(plan.entries[0].target, plan.entries[1].target);
+        assert!(
+            plan.entries
+                .iter()
+                .any(|entry| entry.target == first.bin_dir.join(".bin/first"))
+        );
+        assert!(
+            plan.entries
+                .iter()
+                .any(|entry| entry.target == second.bin_dir.join(".bin/first"))
+        );
+        assert!(matches!(
+            plan_shims(
+                ManagedRoot::new(root).unwrap(),
+                vec![first.clone(), first],
+                Platform::Unix
+            ),
+            Err(PlanError::ShimCollision(_))
+        ));
+    }
+
+    #[test]
+    fn collision_precedes_workspace_interpreter_but_follows_source_validation() {
+        let fixture = tapid_test_support::TempProject::new("shim-error-order").unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let registry = shim_package(&root, "registry", r#"{"tool":"cli.js"}"#, "registry");
+        let local = shim_package(&root, "local", r#"{"tool":"cli.js"}"#, "workspace/local");
+        std::fs::write(local.tree_root.join("cli.js"), "#!/bin/sh\n").unwrap();
+        let workspace = WorkspaceShimPackage {
+            tree_root: local.tree_root,
+            package_json: local.package_json,
+            link_root: root.join("node_modules/local"),
+            bin_dir: registry.bin_dir.clone(),
+        };
+        let plan = |registry_packages| {
+            plan_shims_with_workspace_packages(
+                ManagedRoot::new(&root).unwrap(),
+                registry_packages,
+                &root.join("workspace"),
+                vec![workspace.clone()],
+                Platform::Windows,
+            )
+        };
+        assert!(matches!(
+            plan(vec![registry.clone()]),
+            Err(PlanError::ShimCollision(_))
+        ));
+        assert!(matches!(
+            plan(vec![]),
+            Err(PlanError::InvalidPackageMetadata(_))
+        ));
+        std::fs::remove_file(workspace.tree_root.join("cli.js")).unwrap();
+        std::fs::create_dir(workspace.tree_root.join("cli.js")).unwrap();
+        assert!(matches!(
+            plan(vec![registry]),
+            Err(PlanError::BinTargetNotRegular(_))
+        ));
+    }
+
+    #[test]
+    fn large_mixed_fixture_measures_indexed_work() {
+        let fixture = tapid_test_support::TempProject::new("large-shims").unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let bins = |prefix: &str| {
+            let mappings = (0..5000)
+                .map(|i| format!(r#""{prefix}{i:04}":"cli.js""#))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{mappings}}}")
+        };
+        let registry = shim_package(&root, "registry", &bins("r"), "registry");
+        let local = shim_package(&root, "local", &bins("w"), "workspace/local");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                local.tree_root.join("cli.js"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let workspace = WorkspaceShimPackage {
+            tree_root: local.tree_root,
+            package_json: local.package_json,
+            link_root: root.join("node_modules/local"),
+            bin_dir: registry.bin_dir.clone(),
+        };
+        for platform in [Platform::Unix, Platform::Windows] {
+            let managed = ManagedRoot::new(&root).unwrap();
+            let mut accumulator = ShimAccumulator::new(platform).unwrap();
+            populate_registry(&managed, vec![registry.clone()], platform, &mut accumulator)
+                .unwrap();
+            let width = if platform == Platform::Unix { 1 } else { 2 };
+            assert_eq!(accumulator.outputs.generated, 5000 * width);
+            populate_workspace(
+                &managed,
+                &root.join("workspace"),
+                vec![workspace.clone()],
+                platform,
+                &mut accumulator,
+            )
+            .unwrap();
+            assert_eq!(accumulator.outputs.generated, 10000 * width);
+            assert_eq!(accumulator.outputs.attempts, 10000 * width);
+            let keys = accumulator
+                .entries
+                .iter()
+                .map(|entry| shim_output_keys(&entry.target, accumulator.strategy))
+                .collect::<Vec<_>>();
+            let mut comparisons = 0usize;
+            for (i, current) in keys.iter().enumerate() {
+                for previous in &keys[..i] {
+                    comparisons += 1;
+                    assert!(!current.iter().any(|key| previous.contains(key)));
+                }
+            }
+            assert_eq!(comparisons, 49_995_000);
+            let mut duplicate = workspace.clone();
+            duplicate.package_json =
+                r#"{"name":"duplicate","version":"1.0.0","bin":{"r0000":"cli.js"}}"#.to_owned();
+            assert!(matches!(
+                populate_workspace(
+                    &managed,
+                    &root.join("workspace"),
+                    vec![duplicate],
+                    platform,
+                    &mut accumulator
+                ),
+                Err(PlanError::ShimCollision(_))
+            ));
+            assert_eq!(accumulator.outputs.generated, 10001 * width);
+            assert_eq!(accumulator.outputs.attempts, 10000 * width + 1);
+            let duplicate_keys =
+                shim_output_keys(&accumulator.entries[0].target, accumulator.strategy);
+            let mut late_comparisons = 0;
+            let collision = keys.iter().any(|previous| {
+                late_comparisons += 1;
+                duplicate_keys.iter().any(|key| previous.contains(key))
+            });
+            assert!(collision);
+            assert_eq!(late_comparisons, 1);
+            eprintln!(
+                "{platform:?}: keys={}, reservations={}, baseline={}, late_baseline={}",
+                accumulator.outputs.generated,
+                accumulator.outputs.attempts,
+                comparisons,
+                comparisons + late_comparisons
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_source_collision_identity_and_ordering() {
+        let fixture = tapid_test_support::TempProject::new("mixed-shims").unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        for (left, right, windows_collision) in [
+            ("tool", "tool", true),
+            ("Tool", "tool", true),
+            ("Ä", "ä", true),
+            ("ς", "σ", true),
+            ("tool", "tool.cmd", true),
+            ("tool.cmd", "tool.ps1", true),
+            ("ß", "SS", false),
+            ("𐐀", "𐐨", false),
+        ] {
+            let registry = shim_package(
+                &root,
+                "registry",
+                &format!(r#"{{"{left}":"cli.js"}}"#),
+                "registry",
+            );
+            let local = shim_package(
+                &root,
+                "local",
+                &format!(r#"{{"{right}":"cli.js"}}"#),
+                "workspace/local",
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    local.tree_root.join("cli.js"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+            let workspace = WorkspaceShimPackage {
+                tree_root: local.tree_root,
+                package_json: local.package_json,
+                link_root: root.join("node_modules/local"),
+                bin_dir: registry.bin_dir.clone(),
+            };
+            for platform in [Platform::Unix, Platform::Windows] {
+                let result = plan_shims_with_workspace_packages(
+                    ManagedRoot::new(&root).unwrap(),
+                    vec![registry.clone()],
+                    &root.join("workspace"),
+                    vec![workspace.clone()],
+                    platform,
+                );
+                let collision =
+                    left == right || (platform == Platform::Windows && windows_collision);
+                if collision {
+                    assert!(
+                        matches!(result, Err(PlanError::ShimCollision(_))),
+                        "{left}/{right}: {result:?}"
+                    );
+                } else {
+                    assert_eq!(result.unwrap().entries.len(), 2);
+                }
+                let mut separate = workspace.clone();
+                separate.bin_dir = root.join("nested/node_modules");
+                let first = plan_shims_with_workspace_packages(
+                    ManagedRoot::new(&root).unwrap(),
+                    vec![registry.clone()],
+                    &root.join("workspace"),
+                    vec![separate.clone()],
+                    platform,
+                )
+                .unwrap();
+                assert_eq!(first.entries.len(), 2);
+                assert!(
+                    first
+                        .entries
+                        .iter()
+                        .any(|entry| entry.source == separate.link_root.join("cli.js"))
+                );
+                let mut other_registry = registry.clone();
+                other_registry.bin_dir = root.join("other/node_modules");
+                let mut other_workspace = separate.clone();
+                other_workspace.bin_dir = root.join("another/node_modules");
+                let plan = |registries, workspaces| {
+                    plan_shims_with_workspace_packages(
+                        ManagedRoot::new(&root).unwrap(),
+                        registries,
+                        &root.join("workspace"),
+                        workspaces,
+                        platform,
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    plan(
+                        vec![registry.clone(), other_registry.clone()],
+                        vec![separate.clone(), other_workspace.clone()]
+                    ),
+                    plan(
+                        vec![other_registry, registry.clone()],
+                        vec![other_workspace, separate]
+                    )
+                );
+            }
         }
     }
 
