@@ -29,6 +29,10 @@ at most 32 MiB of decompressed responses across the collection, including invali
 and oversized responses. Each response still has the existing 262,144-byte
 verification limit. Results correspond to the processed input prefix; `not_checked`
 counts the remaining suffix, and `limit` explains request/response-budget exhaustion.
+`MAX_COLLECTION_REQUESTS` exposes the same bound so adapters can limit preparation
+before loading replay floors, freshness or consent for individual occurrences.
+Adapters that prepare a bounded prefix must retain the unprepared suffix count
+and cannot claim complete graph coverage from that prefix alone.
 The response that exhausts the aggregate read budget fails closed as unavailable.
 Processing is sequential, so a collection uses one transport request at a time.
 

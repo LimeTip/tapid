@@ -6,13 +6,36 @@ pub(crate) struct Args {
     /// Project directory containing package.json and tapid.lock.
     #[arg(long, default_value = ".", value_name = "PATH")]
     pub(crate) project_dir: PathBuf,
+    /// Write the versioned JSON result to a new file outside the project.
+    #[arg(long, value_name = "PATH", conflicts_with = "json")]
+    pub(crate) result_file: Option<PathBuf>,
 }
 
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+    let mut result_file = match args.result_file.as_deref() {
+        Some(path) => match crate::filesystem::result_file::create(path, &args.project_dir) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                eprintln!("Audit failed: cannot create result file: {error}");
+                return ExitCode::from(3);
+            }
+        },
+        None => None,
+    };
     let report = crate::application::audit::inspect(&args.project_dir);
     if json {
         return crate::output::json::audit(&args.project_dir, report);
     }
+    let file_status = if let Some(file) = &mut result_file {
+        let (value, status) = crate::output::json::audit_value(&args.project_dir, &report);
+        if let Err(error) = crate::filesystem::result_file::write(file, &value) {
+            eprintln!("Audit failed: cannot write result file: {error}");
+            return ExitCode::from(3);
+        }
+        Some(status)
+    } else {
+        None
+    };
     let mut status = 3;
     match report {
         Ok(report) => {
@@ -141,5 +164,5 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         }
         Err(code) => eprintln!("Audit failed: {code}"),
     }
-    ExitCode::from(status)
+    ExitCode::from(if file_status == Some(3) { 3 } else { status })
 }

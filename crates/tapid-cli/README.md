@@ -33,7 +33,7 @@ Automation clients can use the compact [agent guide v1](../../docs/agent-guide.m
 tapid init [PATH]
 tapid license
 tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
-tapid audit [--project-dir <PATH>] [--json]
+tapid audit [--project-dir <PATH>] [--json | --result-file <PATH>]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
@@ -470,14 +470,27 @@ recording. Corrupt or unreadable floors prevent transport for that occurrence;
 other occurrences retain their findings. The store replaces the injected recorder
 and never weakens a stricter injected freshness floor. Human and JSON
 renderers retain verified reports, check times, expiry and per-occurrence failures.
+The application prepares at most 1,000 occurrences per collection, using the
+provider's shared request limit before loading freshness, replay floors or consent.
+Remaining occurrences are reported as unchecked and force incomplete coverage,
+even when every processed occurrence has current signed clean evidence.
 The adapter is tested with raw signed fixtures; no command-line activation,
 production keys or credentials are supplied. Windows durable security state remains
 unimplemented.
 Imported selection traverses recorded root and workspace entry points without
 host filtering, preserves exact peer placements and excludes workspace sources
 and unrepresentable platform predicates. Local placement paths are hashed before
-projection; disclosure still requires separate authorization. Live activation and result-file delivery are pending;
+projection; disclosure still requires separate authorization. Live activation is pending;
 recorded subject counts are not a completed coverage assessment.
+
+`audit --result-file PATH` writes the same versioned envelope as `audit --json`
+while retaining human terminal output. It conflicts with `--json`. Choose a new
+filename in an existing caller-controlled directory outside the canonical project
+root. Existing destinations and final symlinks are rejected without overwriting.
+Files use mode `0600` on Unix and inherit the caller directory's ACL on Windows.
+Read only after Tapid exits and require a complete newline-terminated JSON object;
+an empty or partial file is a delivery failure. Creation or write failures exit 3.
+Input failures are delivered when the destination was successfully created.
 
 `tapid status [--project-dir PATH] [--workspace NAME] [--json]` inspects local
 project metadata offline. The project directory is the explicit workspace root,

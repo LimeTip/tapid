@@ -2,7 +2,9 @@ use std::io::Read;
 use tapid_attestations::{EvidenceFreshness, SecurityTrust};
 use tapid_policy::{AuditOutcome, AuditThreshold, evaluate_audit};
 use tapid_protocol::{SecurityRequest, SecurityResultV2};
-use tapid_security_provider::{CollectionInput, Disclosure, RetrievalError, collect_recorded};
+use tapid_security_provider::{
+    CollectionInput, Disclosure, MAX_COLLECTION_REQUESTS, RetrievalError, collect_recorded,
+};
 
 use super::requests::Inventory;
 
@@ -52,9 +54,10 @@ pub(super) fn collect(
             inventory.requests.len(),
         );
     };
+    let requests = &inventory.requests[..inventory.requests.len().min(MAX_COLLECTION_REQUESTS)];
+    let unprepared = inventory.requests.len() - requests.len();
     #[cfg(unix)]
-    let floors = inventory
-        .requests
+    let floors = requests
         .iter()
         .map(|(_, request)| {
             provider
@@ -62,8 +65,7 @@ pub(super) fn collect(
                 .map_or(Ok(None), |store| store.load(provider.trust.issuer, request))
         })
         .collect::<Vec<_>>();
-    let freshness = inventory
-        .requests
+    let freshness = requests
         .iter()
         .map(|(_, request)| (provider.freshness)(request))
         .collect::<Vec<_>>();
@@ -92,8 +94,7 @@ pub(super) fn collect(
         }
         freshness
     };
-    let inputs = inventory
-        .requests
+    let inputs = requests
         .iter()
         .zip(&freshness)
         .map(|((_, request), freshness)| CollectionInput {
@@ -111,10 +112,7 @@ pub(super) fn collect(
         &provider.trust,
         &mut |request| {
             #[cfg(unix)]
-            if let Some(index) = inventory
-                .requests
-                .iter()
-                .position(|(_, input)| input == request)
+            if let Some(index) = requests.iter().position(|(_, input)| input == request)
                 && state_failed[index]
             {
                 return Err(RetrievalError::StateUnavailable);
@@ -129,10 +127,10 @@ pub(super) fn collect(
             (provider.record)(issuer, request, sequence, digest)
         },
     );
-    let complete = graph_complete && inventory.excluded == 0 && collection.complete();
+    let complete =
+        graph_complete && inventory.excluded == 0 && unprepared == 0 && collection.complete();
     let mut failures = Vec::new();
-    let evidence = inventory
-        .requests
+    let evidence = requests
         .iter()
         .zip(collection.results)
         .filter_map(|((key, _), result)| match result {
@@ -168,5 +166,10 @@ pub(super) fn collect(
         complete,
         provider.threshold,
     );
-    (evidence, outcome, failures, collection.not_checked)
+    (
+        evidence,
+        outcome,
+        failures,
+        unprepared + collection.not_checked,
+    )
 }

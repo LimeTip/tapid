@@ -4,13 +4,13 @@ use serde_json::json;
 use std::{path::Path, process::ExitCode};
 
 pub(crate) fn audit(project: &Path, report: Result<AuditReport, &'static str>) -> ExitCode {
-    let (result, status) = audit_value(project, report);
+    let (result, status) = audit_value(project, &report);
     emit(result, status)
 }
 
 pub(crate) fn audit_value(
     project: &Path,
-    report: Result<AuditReport, &'static str>,
+    report: &Result<AuditReport, &'static str>,
 ) -> (serde_json::Value, u8) {
     let changes = OperationOutcome::unchanged(project);
     let mut result = envelope(

@@ -1,6 +1,114 @@
 use super::*;
 
 #[test]
+fn audit_result_file_uses_the_json_protocol_and_preserves_human_output() {
+    let project = tapid_test_support::TempProject::new("audit-result-project").unwrap();
+    let results = tapid_test_support::TempProject::new("audit-result-owner").unwrap();
+    let manifest = br#"{"name":"audit","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let path = results.path().join("result.json");
+    let output = run(
+        project.path(),
+        &["audit", "--result-file", path.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Audit: not checked"));
+    let result = fs::read(&path).unwrap();
+    assert!(result.ends_with(b"\n"));
+    let value: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    let json = run(project.path(), &["audit", "--json"]);
+    assert_eq!(
+        value,
+        serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap()
+    );
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["operation"], "audit");
+    assert_eq!(value["data"]["assessment"], "not_checked");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let existing = run(
+        project.path(),
+        &["audit", "--result-file", path.to_str().unwrap()],
+    );
+    assert_eq!(existing.status.code(), Some(3));
+    assert!(existing.stdout.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), result);
+
+    let inside = project.path().join("audit-result.json");
+    let denied = run(
+        project.path(),
+        &["audit", "--result-file", inside.to_str().unwrap()],
+    );
+    assert_eq!(denied.status.code(), Some(3));
+    assert!(!inside.exists());
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn audit_result_file_records_input_failures_and_rejects_conflicting_channels() {
+    let project = tapid_test_support::TempProject::new("audit-result-failure").unwrap();
+    let results = tapid_test_support::TempProject::new("audit-result-failure-owner").unwrap();
+    let path = results.path().join("failure.json");
+    let output = run(
+        project.path(),
+        &["audit", "--result-file", path.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(value["outcome"], "failure");
+    assert_eq!(value["errors"][0]["code"], "AUDIT_MANIFEST_UNREADABLE");
+    let conflict_path = results.path().join("conflict.json");
+    let conflict = run(
+        project.path(),
+        &[
+            "audit",
+            "--json",
+            "--result-file",
+            conflict_path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(!conflict_path.exists());
+    #[cfg(unix)]
+    {
+        let link = results.path().join("linked.json");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let denied = run(
+            project.path(),
+            &["audit", "--result-file", link.to_str().unwrap()],
+        );
+        assert_eq!(denied.status.code(), Some(3));
+        assert!(denied.stdout.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
 fn audit_without_provider_is_incomplete_and_does_not_recover_or_modify_state() {
     let project = tapid_test_support::TempProject::new("audit-unconfigured").unwrap();
     let manifest = br#"{"name":"audit","version":"1.0.0"}"#;

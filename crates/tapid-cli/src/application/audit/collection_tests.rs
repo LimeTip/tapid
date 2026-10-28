@@ -3,6 +3,144 @@ use std::io::Cursor;
 use tapid_signatures::{KeyRing, TrustEnvelope, TrustedKey};
 
 #[test]
+fn oversized_audit_bounds_preparation_and_reports_unchecked_occurrences() {
+    let project = tapid_test_support::TempProject::new("audit-request-budget").unwrap();
+    let manifest = br#"{"name":"audit","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = Lockfile::new(&digest_bytes(manifest)).unwrap();
+    let packages = (0..1001)
+        .map(|index| {
+            tapid_lockfile::LockedPackage::new_with_provenance(
+                "https://registry.example",
+                &format!("package-{index}"),
+                "1.0.0",
+                &format!("sha512-{}==", "A".repeat(86)),
+                &format!("sha256-{}", "a".repeat(64)),
+                tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let roots = packages
+        .iter()
+        .map(|package| package.key())
+        .collect::<Vec<_>>();
+    lock.insert_packages(packages).unwrap();
+    lock.set_roots(roots).unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let mut keys = KeyRing::new();
+    let public = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    keys.insert(TrustedKey {
+        key_id: "fixture".into(),
+        algorithm: "ed25519".into(),
+        public_key: std::array::from_fn(|i| {
+            u8::from_str_radix(&public[i * 2..i * 2 + 2], 16).unwrap()
+        }),
+    })
+    .unwrap();
+    let mut prepared = 0;
+    let mut authorized = 0;
+    let mut provider = Provider {
+        trust: tapid_attestations::SecurityTrust {
+            issuer: "fixture.example",
+            keys: &keys,
+            valid_until: 3000,
+        },
+        freshness: &mut |_| {
+            prepared += 1;
+            tapid_attestations::EvidenceFreshness {
+                now: 1100,
+                max_age: 500,
+                minimum_sequence: 0,
+                previous_digest: None,
+            }
+        },
+        authorize: &mut |_| {
+            authorized += 1;
+            false
+        },
+        transport: &mut |_| panic!("denied inventory cannot reach transport"),
+        record: &mut |_, _, _, _| panic!("denied inventory cannot record evidence"),
+        #[cfg(unix)]
+        replay: None,
+        threshold: tapid_policy::AuditThreshold::Any,
+    };
+    let report = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+    assert_eq!(report.outcome, tapid_policy::AuditOutcome::Incomplete);
+    assert_eq!(report.not_checked, 1);
+    assert_eq!(report.failures.len(), 1000);
+    assert!(
+        report
+            .failures
+            .iter()
+            .all(|failure| failure.code == "not_authorized")
+    );
+    assert_eq!(prepared, 1000, "unchecked suffix must not load freshness");
+    assert_eq!(
+        authorized, 1000,
+        "unchecked suffix must not request consent"
+    );
+
+    // A completely successful processed prefix still cannot establish coverage
+    // for the occurrence left outside the provider's request budget.
+    let seed = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+    let seed = std::array::from_fn(|i| u8::from_str_radix(&seed[i * 2..i * 2 + 2], 16).unwrap());
+    let mut transport = |request: &tapid_protocol::SecurityRequest| {
+        let claims = serde_json::json!({
+            "version":"tapid-security-v2", "request":request, "issuer":"fixture.example",
+            "scope":"package_version", "status":"no_known_findings",
+            "coverage":["advisory","reported_malware"], "limitations":[],
+            "checkedAt":1000, "issuedAt":1010, "expiresAt":2000,
+            "sequence":3, "scanner":"fixture", "scannerVersion":"1",
+            "ruleVersion":"1", "sourceRevision":"reports:3", "findings":[]
+        });
+        Ok(Box::new(Cursor::new(
+            serde_json::to_vec(
+                &TrustEnvelope::unsigned("tapid-security-v2", "version-scope", claims)
+                    .sign("fixture", &seed)
+                    .unwrap(),
+            )
+            .unwrap(),
+        )) as Box<dyn std::io::Read>)
+    };
+    let mut provider = Provider {
+        trust: tapid_attestations::SecurityTrust {
+            issuer: "fixture.example",
+            keys: &keys,
+            valid_until: 3000,
+        },
+        freshness: &mut |_| tapid_attestations::EvidenceFreshness {
+            now: 1100,
+            max_age: 500,
+            minimum_sequence: 0,
+            previous_digest: None,
+        },
+        authorize: &mut |_| true,
+        transport: &mut transport,
+        record: &mut |_, _, _, _| Ok(()),
+        #[cfg(unix)]
+        replay: None,
+        threshold: tapid_policy::AuditThreshold::Any,
+    };
+    let report = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
+    assert_eq!(report.evidence.len(), 1000);
+    assert!(report.failures.is_empty());
+    assert_eq!(report.not_checked, 1);
+    assert_eq!(report.outcome, tapid_policy::AuditOutcome::Incomplete);
+    let (value, status) = crate::output::json::audit_value(project.path(), &Ok(report));
+    assert_eq!(status, 3);
+    assert_eq!(value["data"]["not_checked"], 1);
+    assert_eq!(value["data"]["coverage"]["complete"], false);
+    let unconfigured = inspect(project.path()).unwrap();
+    assert_eq!(unconfigured.not_checked, 1001);
+    assert_eq!(
+        std::fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+}
+
+#[test]
 fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     let project = tapid_test_support::TempProject::new("audit-signed").unwrap();
     let home = tapid_test_support::TempHome::new("audit-signed").unwrap();
@@ -165,7 +303,7 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
         Some("renamed")
     );
     assert!(report.failures.is_empty());
-    let (value, status) = crate::output::json::audit_value(project.path(), Ok(report));
+    let (value, status) = crate::output::json::audit_value(project.path(), &Ok(report));
     assert_eq!(status, 1);
     assert_eq!(
         value["data"]["evidence"][0]["result"]["issuer"],
@@ -307,7 +445,8 @@ fn signed_collection_retains_exact_keys_and_preserves_project_and_store() {
     provider.transport = &mut unavailable;
     let failed = inspect_with_provider(project.path(), Some(&mut provider)).unwrap();
     assert_eq!(failed.failures[0].code, "unavailable");
-    let (failed_json, failed_status) = crate::output::json::audit_value(project.path(), Ok(failed));
+    let (failed_json, failed_status) =
+        crate::output::json::audit_value(project.path(), &Ok(failed));
     assert_eq!(failed_status, 3);
     assert!(failed_json["data"]["live_requests"].is_null());
     provider.authorize = &mut deny;

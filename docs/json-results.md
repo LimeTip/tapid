@@ -265,6 +265,24 @@ Operational codes are `INVALID_REQUEST`, `PROJECT_UNAVAILABLE`, `PROJECT_CHANGED
 
 Within schema version 1, existing field types, code meanings, transaction states, and exit semantics remain stable. Additive fields, new error or warning codes, and new command coverage are compatible. Consumers must ignore unknown fields and handle unknown codes conservatively. Removing or renaming fields or changing their meaning requires a new schema version. Schema versioning is independent of Tapid's package version.
 
+## Audit result files
+
+`tapid audit --result-file PATH` delivers the same schema-version-1 `audit`
+envelope as `audit --json`, including operational failures, and preserves human
+terminal output. These two options conflict. Use a fresh filename in an existing
+caller-controlled directory outside the canonical project root. The shared result
+writer exclusively creates the file, rejects existing destinations and final
+symlinks, uses mode `0600` on Unix, and inherits the directory ACL on Windows.
+It holds the same non-inheritable handle, writes one newline-terminated JSON object
+and synchronizes the file. This deliberately writes only the requested result
+outside the audited project; it does not authorize project or package-store writes.
+
+Read after Tapid exits, validate `schema_version` and `operation`, and reject empty,
+partial, missing or malformed records. Delivery errors exit 3 and are reported on
+stderr; failed writes attempt to truncate the destination. An invalid destination
+or argument-parsing failure cannot deliver a result. Other caller-authority
+processes and OS termination remain outside this channel's guarantees.
+
 ## Run child output and receipts
 
 `tapid run SCRIPT --result-file PATH` writes a separate, newline-terminated JSON result while preserving child stdout, stderr, and exit codes. It suppresses the usual stderr receipt and conflicts with `--receipt-json`. Global `--json` still rejects `run` before launch to preserve the package-result stdout guarantee. Legacy `--receipt-json` appends a receipt to arbitrary child stderr and cannot be used as a trusted result channel.

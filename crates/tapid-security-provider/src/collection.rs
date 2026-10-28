@@ -4,6 +4,10 @@ use tapid_protocol::{SecurityRequest, SecurityStatus};
 
 use crate::{Disclosure, RetrievalError, retrieve_recorded};
 
+/// Maximum processed occurrences, including denied or failed requests. Callers
+/// should apply this limit before loading per-request state or asking consent.
+pub const MAX_COLLECTION_REQUESTS: usize = 1000;
+
 /// Exact request authorization and independently loaded issuer/request replay floor.
 pub struct CollectionInput<'a> {
     pub request: &'a SecurityRequest,
@@ -53,7 +57,7 @@ pub fn collect_recorded<R: Read>(
 ) -> SecurityCollection {
     let remaining = Cell::new(32 * 1024 * 1024);
     let mut results = Vec::new();
-    for input in inputs.iter().take(1000) {
+    for input in inputs.iter().take(MAX_COLLECTION_REQUESTS) {
         if remaining.get() == 0 {
             break;
         }
