@@ -410,6 +410,10 @@ fn ci_rejects_invalid_locked_installs_without_replacing_previous_outputs() {
         }
         let output = run(&dir, &args);
         assert_eq!(output.status.code(), Some(1), "{failure}: {output:?}");
+        assert!(
+            output.stdout.is_empty(),
+            "failed work must not emit a success summary: {failure}: {output:?}"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(diagnostic), "{failure}: {stderr}");
         assert_eq!(

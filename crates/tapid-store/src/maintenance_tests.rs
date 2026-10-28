@@ -1,6 +1,76 @@
 use super::*;
 use tapid_test_support::{TempHome, TempProject};
 
+#[test]
+fn published_tree_identities_only_inspects_namespace_and_markers() {
+    let home = TempHome::new("tree-identities-empty").unwrap();
+    let empty = Store::new(home.path().join("absent"));
+    assert!(empty.published_tree_identities().unwrap().is_empty());
+    assert!(!empty.root().exists());
+    let (_home, store, _, tree) = populated();
+    let expected = tree.file_name().unwrap().to_str().unwrap().to_owned();
+    // Content is deliberately invalid and contains a dangling link: this is
+    // identity eligibility, never recursive content inspection or verification.
+    fs::write(tree.join("package.json"), b"changed").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("absent", tree.join("dangling")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let opaque = tree.join("opaque");
+        fs::create_dir(&opaque).unwrap();
+        fs::set_permissions(&opaque, fs::Permissions::from_mode(0o000)).unwrap();
+        let observed = store.published_tree_identities();
+        fs::set_permissions(&opaque, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(observed.unwrap(), [expected.clone()].into());
+    }
+    assert_eq!(
+        store.published_tree_identities().unwrap(),
+        [expected.clone()].into()
+    );
+    let baseline = store.published_tree_identities().unwrap();
+    let source = TempProject::new("later-tree").unwrap();
+    source.write("package.json", b"later").unwrap();
+    let later = tapid_archive::canonical_tree_digest(source.path())
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Publication also proves the baseline no longer holds its shared lock.
+    store.activate_verified_tree(&later, source.path()).unwrap();
+    assert!(!baseline.contains(later.as_str()));
+    assert_eq!(store.published_tree_identities().unwrap().len(), 2);
+    fs::remove_file(tree.join(".tapid-tree")).unwrap();
+    assert!(
+        !store
+            .published_tree_identities()
+            .unwrap()
+            .contains(&expected)
+    );
+}
+
+#[test]
+fn published_tree_identities_refuses_busy_pending_and_unsafe_stores() {
+    let (_home, store, _, _) = populated();
+    let file = open_store_lock(store.root(), false).unwrap();
+    FileExt::lock(&file).unwrap();
+    assert!(store.published_tree_identities().is_err());
+    FileExt::unlock(&file).unwrap();
+    fs::write(store.root().join(STORE_JOURNAL), b"pending").unwrap();
+    assert!(store.published_tree_identities().is_err());
+    fs::remove_file(store.root().join(STORE_JOURNAL)).unwrap();
+    #[cfg(unix)]
+    {
+        let home = TempHome::new("identity-unsafe").unwrap();
+        let linked = home.path().join("linked");
+        std::os::unix::fs::symlink(store.root(), &linked).unwrap();
+        assert!(Store::new(linked).published_tree_identities().is_err());
+        fs::remove_file(store.root().join(".store.lock")).unwrap();
+        std::os::unix::fs::symlink(home.path().join("absent"), store.root().join(".store.lock"))
+            .unwrap();
+        assert!(store.published_tree_identities().is_err());
+    }
+}
+
 fn populated() -> (TempHome, Store, PathBuf, PathBuf) {
     let home = TempHome::new("cache-maintenance").unwrap();
     let store = Store::new(home.path().join("store"));

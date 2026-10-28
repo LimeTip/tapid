@@ -1,6 +1,8 @@
 use super::*;
+use crate::application::artifact_statistics::{AcquisitionSource, ArtifactEvidence};
 
 pub(super) struct ArtifactFetcher<'a> {
+    pub(super) evidence: ArtifactEvidence,
     pub(super) store: &'a Store,
     pub(super) config: &'a crate::registry::RegistryConfig,
     pub(super) transports: BTreeMap<(String, String), HttpsTransport>,
@@ -24,6 +26,11 @@ impl ArtifactFetcher<'_> {
             match store.verified_tree_snapshot(&digest) {
                 Ok(snapshot) => {
                     let tree = store_transaction.stage_verified_tree(&digest, &snapshot)?;
+                    self.evidence.cached(&digest);
+                    if let Some(archive) = &record.copied_archive {
+                        self.evidence
+                            .verified_archive(&super::digest(&archive.bytes), archive.source);
+                    }
                     return Ok((
                         package
                             .artifact_integrity()
@@ -52,7 +59,7 @@ impl ArtifactFetcher<'_> {
             ));
         }
         let bytes = if let Some(bytes) = &record.copied_archive {
-            std::borrow::Cow::Borrowed(bytes.as_slice())
+            std::borrow::Cow::Borrowed(bytes.bytes.as_slice())
         } else {
             std::borrow::Cow::Owned(if record.fixture {
                 if let Some(encoded) = record.artifact.strip_prefix("base64:") {
@@ -174,6 +181,18 @@ impl ArtifactFetcher<'_> {
         let tree = store_transaction
             .stage_verified_tree(&tree_digest, &temp)
             .map_err(OperationalError::from)?;
+        self.evidence.acquired(
+            &digest(&bytes),
+            &tree_digest,
+            record.copied_archive.as_ref().map_or(
+                if record.fixture {
+                    AcquisitionSource::Local
+                } else {
+                    AcquisitionSource::Network
+                },
+                |archive| archive.source,
+            ),
+        );
         Ok((actual, tree_digest, tree))
     }
 }
