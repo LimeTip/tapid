@@ -6,6 +6,9 @@ use windows_sys::Win32::Security::TokenCapabilities;
 fn provider_helper() {
     super::registry_probe::probe();
     super::provider_probe::probe(&std::env::var("TAPID_TEST_MARKER").unwrap_or_default());
+    if let Ok(marker) = std::env::var("TAPID_TEST_MARKER") {
+        probe_com_activation(&marker);
+    }
 }
 
 #[test]
@@ -37,6 +40,7 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     );
     assert!(String::from_utf8_lossy(&host.stdout).contains("provider:host:socket-created"));
     assert!(String::from_utf8_lossy(&host.stdout).contains("registry:host-input:readable"));
+    assert!(String::from_utf8_lossy(&host.stdout).contains("com:shell-link:activated"));
     let program_units: Vec<_> = program.as_os_str().encode_wide().collect();
     let argument_units: Vec<Vec<u16>> = arguments
         .iter()
@@ -134,6 +138,7 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         assert!(stdout.contains("provider:startup:ok"), "{stdout}");
         assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
         assert!(stdout.contains("registry:host-input:"), "{stdout}");
+        assert!(stdout.contains("com:shell-link:"), "{stdout}");
         println!("registryRead={registry_read}: {stdout}");
         drop(child);
         job.wait_until_empty(5_000).unwrap();
@@ -141,4 +146,71 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         container.cleanup().unwrap();
     }
     registry.cleanup();
+}
+
+// Runs only in the disposable helper, after the existing provider probes. No shell
+// method is invoked: this samples activation, not broker response authority.
+fn probe_com_activation(marker: &str) {
+    use std::ffi::c_void;
+    use windows_sys::{
+        Win32::{
+            System::Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoUninitialize,
+            },
+            UI::Shell::ShellLink,
+        },
+        core::GUID,
+    };
+    if !matches!(
+        marker,
+        "provider-host" | "provider-contained" | "provider-capability-free"
+    ) {
+        return;
+    }
+    // SAFETY: this helper's test thread has no prior COM use; balance each
+    // successful initialization (including S_FALSE) on the same thread.
+    let initialized = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    assert!(initialized >= 0, "COM initialization: {initialized:#010x}");
+    let mut object = std::ptr::null_mut();
+    let unknown = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+    // SAFETY: valid CLSID/IID and writable output; only in-process activation
+    // is requested, never remote activation or an interactive shell operation.
+    let result = unsafe {
+        CoCreateInstance(
+            &ShellLink,
+            std::ptr::null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &unknown,
+            &mut object,
+        )
+    };
+    if result >= 0 {
+        assert!(!object.is_null());
+        // IUnknown has QueryInterface, AddRef, Release in that order. The
+        // unused slots preserve layout; only the typed Release entry is called.
+        #[repr(C)]
+        struct UnknownVtable {
+            query_interface: *const c_void,
+            add_ref: *const c_void,
+            release: unsafe extern "system" fn(*mut c_void) -> u32,
+        }
+        // SAFETY: successful IID_IUnknown activation owns one reference. Release
+        // it before uninitializing COM; never access the object afterward.
+        unsafe {
+            let vtable = *object.cast::<*const UnknownVtable>();
+            ((*vtable).release)(object);
+        }
+    }
+    // SAFETY: initialization succeeded on this thread and object was released.
+    unsafe { CoUninitialize() };
+    if marker == "provider-host" {
+        assert_eq!(result, 0, "host ShellLink fixture: {result:#010x}");
+    }
+    match result as u32 {
+        0 => println!("com:shell-link:activated"),
+        0x80070005 => println!("com:shell-link:access-denied"),
+        0x80040154 => println!("com:shell-link:class-unavailable"),
+        _ => panic!("unexpected ShellLink activation result: {result:#010x}"),
+    }
 }

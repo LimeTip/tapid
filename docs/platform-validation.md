@@ -171,7 +171,7 @@ runtime identity or prepared execution authority exists yet.
 | All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
 | Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | The native cross-run control derives each profile folder from the actual child token, writes and rereads a private sentinel, requires its removal after completion, and checks that a second execution gets a different folder and cannot read the previous sentinel. Native execution is pending. Full initial contents and deletion-failure controls remain unresolved. Unique names alone do not identify initial profile bytes or registry state. |
 | Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
-| COM / brokers | No complete activation or response inventory | Probe native activation independently of compatibility hooks. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
+| COM / brokers | Paired host/LPAC in-process ShellLink activation probe; no complete activation or response inventory | Native observations are pending. This samples one in-process class, not local-server/broker access. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
 | Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
 | KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
 | Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
@@ -257,6 +257,24 @@ an unavailable result does not establish denial of all host registry inputs,
 and a readable result identifies an input that must be denied or bound. Native
 observations remain pending. This control does not justify capability removal,
 complete registry identity, broker closure, or authenticated Windows builds.
+
+The same disposable helper now samples in-process `CLSID_ShellLink` activation
+with `IID_IUnknown`, after the existing registry and provider probes. The host
+must activate successfully. Each LPAC variant reports `com:shell-link:activated`,
+`access-denied`, or `class-unavailable`; other HRESULTs fail the control. A class
+registration failure is recorded separately from access denial. Each successful
+COM initialization is balanced on the same helper thread, and each returned
+interface is released before COM teardown. No shell methods, shortcut writes,
+UI, remote activation or existing user documents are used.
+
+This follows Microsoft's [ShellLink activation example](https://learn.microsoft.com/en-us/windows/win32/shell/links)
+and [CoCreateInstance contract](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cocreateinstance).
+Activation success identifies an additional loader/configuration channel to
+deny or bind; it does not demonstrate that later object methods succeed.
+In-process activation cannot establish local-server or broker closure. An
+isolated Rust local-server fixture with host-positive activation, native paired
+observations, and response/input binding remains required before identity work
+can claim closure. No native results for this additional probe exist yet.
 
 ## Private Windows dependency write and key validation
 
