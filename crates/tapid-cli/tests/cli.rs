@@ -1006,7 +1006,7 @@ fn registry_credential_environment_variables_are_denied_to_root_scripts() {
     )
     .unwrap();
     let secret = "synthetic-secret-value";
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+    let output = isolated_command(&dir, &[], false)
         .args(["run", "test", "--project-dir"])
         .arg(&dir)
         .env("TAPID_ISSUE164_CHILD_SECRET", secret)
@@ -5266,8 +5266,7 @@ fn run_preserves_non_utf8_forwarded_argument_through_cli_boundary() {
     fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
     let bad = std::ffi::OsString::from_vec(b"bad-\xff-arg".to_vec());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(&dir)
+    let output = isolated_command(&dir, &[], false)
         .env_clear()
         .args(["run", "dev", "--node-runtime"])
         .arg(&runtime)
@@ -5390,7 +5389,7 @@ fn run_fails_closed_before_spawn_without_printing_secret_values() {
     let secret = "tapid-super-secret-value";
     let runtime = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
     fs::copy(env!("CARGO_BIN_EXE_tapid"), &runtime).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+    let output = isolated_command(&dir, &[], false)
         .args([
             OsStr::new("run"),
             OsStr::new("dev"),
@@ -5469,7 +5468,7 @@ fn run_windows_existing_target_writes_preserve_binding_and_assurance_receipts() 
         fs::write(root.join("tapid.toml"), format!(
             "[run.scripts.probe]\nassurance = \"{assurance}\"\nread = [\".\"]\nwrite = [\"{target}\"]\nnetwork = false\n{limits}"
         )).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        let output = isolated_command(&root, &[], false)
             .args(["run", "probe", "--receipt-json", "--node-runtime"])
             .arg(&node)
             .current_dir(&root)
@@ -5968,8 +5967,7 @@ hook = "prepare"
 "#,
         )
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args(["install", "--store-dir"])
         .arg(home.path().join("store"))
         .output()
@@ -6000,8 +5998,7 @@ fn dependency_lifecycle_required_native_build_fails_without_approval() {
         &project,
         "H4sIAAAAAAAAE+3TTQrCMBAF4B5FZq3pS61d9DbRhhClk9DWghTvLv4spAhuahWcb/OG2cxsXjS7g3E2jfdU+zZwMjEAKPL8lgDGCWye5ute6yLTyQJTP/LKse1Mk2CWWz9oIDa1pZLYdL63q8rWgZbU26b1gakkraBA52//KT7j0ft067ny7JQ7xclvvO0/snH/82It/Z/DIM0WQoi/dAELlQxvAAwAAA==",
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args([
             "install",
             "--registry-fixture",
@@ -6040,8 +6037,7 @@ fn dependency_lifecycle_required_native_build_fails_without_approval() {
     project
         .write("tapid.lifecycle.toml", policy.as_bytes())
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args([
             "install",
             "--unsafe-no-dependency-sandbox",
@@ -6056,8 +6052,7 @@ fn dependency_lifecycle_required_native_build_fails_without_approval() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("lifecycle tool digest mismatch for sh")
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args([
             "install",
             "--json",
@@ -6104,8 +6099,7 @@ fn dependency_lifecycle_failed_unsafe_hook_preserves_previous_install() {
         "H4sIAAAAAAAAE+3PQQrCMBAF0B6l/HWNEy1Z5DahBom2ScjEUii9u1AXgrgRirrI2/zhb2Ymmu5qznYfHykuHHy1MSIi1bZrEtFrkpTPee2lVFJVNW19yDs3ziZV9JVdf2iGN4OFhjfZjXZ3skNAg9EmdsFDQwoShAbcJRczQ89wnrPpe2jYyeX6cMSy/PqPoiiK4jN3HmGcyAAIAAA=",
     );
     let install = |flags: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        isolated_command(project.path(), &[], false)
             .args([
                 "install",
                 "--registry-fixture",
@@ -6186,9 +6180,8 @@ fn dependency_override_warnings_preserve_json_and_human_output_contracts() {
         .write("package.json", br#"{"name":"demo","version":"1.0.0"}"#)
         .unwrap();
     let install = |json: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tapid"));
+        let mut command = isolated_command(project.path(), &[], false);
         command
-            .current_dir(project.path())
             .args([
                 "install",
                 "--allow-unapproved-dependency-scripts",
@@ -6258,8 +6251,7 @@ fn dependency_review_regression_workspace_selection_retains_json_override_warnin
             br#"{"name":"local","version":"1.0.0"}"#,
         )
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args([
             "install",
             "--json",
@@ -6303,8 +6295,7 @@ fn dependency_review_regression_workspace_override_does_not_read_live_members() 
         &project,
         "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
     );
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args([
             "install",
             "--allow-unapproved-dependency-scripts",
@@ -6356,8 +6347,7 @@ fn dependency_review_regression_workspace_override_does_not_read_live_members() 
     project
         .write("tapid.lifecycle.toml", policy.as_bytes())
         .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args([
             "install",
             "--unsafe-no-dependency-sandbox",
@@ -6428,8 +6418,7 @@ fn dependency_review_regression_implicit_node_gyp_uses_private_bundled_modules()
         "H4sIAAAAAAAAE+3TTQrCMBAF4B5FZq3pS61d9DbRhhClk9DWghTvLv4spAhuahWcb/OG2cxsXjS7g3E2jfdU+zZwMjEAKPL8lgDGCWye5ute6yLTyQJTP/LKse1Mk2CWWz9oIDa1pZLYdL63q8rWgZbU26b1gakkraBA52//KT7j0ft067ny7JQ7xclvvO0/snH/82It/Z/DIM0WQoi/dAELlQxvAAwAAA==",
     );
     let install = || {
-        Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        isolated_command(project.path(), &[], false)
             .args([
                 "install",
                 "--allow-unapproved-dependency-scripts",
@@ -6480,8 +6469,7 @@ fn dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations() 
     let archive = "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=";
     write_dependency_script_fixture(&project, archive);
     let install = |flags: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        isolated_command(project.path(), &[], false)
             .args([
                 "install",
                 "--registry-fixture",
@@ -6847,8 +6835,7 @@ fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
         vec!["ci", "--registry-fixture", "registry.json"],
         vec!["ci", "--offline", "--registry-fixture", "registry.json"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        let output = isolated_command(project.path(), &[], false)
             .args(flags)
             .arg("--store-dir")
             .arg(home.path().join("store"))
@@ -6883,8 +6870,7 @@ fn dependency_lifecycle_hooks_are_reported_and_never_run_by_default() {
                 .exists()
         );
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args(["install", "--offline", "--frozen", "--json", "--store-dir"])
         .arg(home.path().join("store"))
         .output()
@@ -6963,8 +6949,7 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
         )
         .unwrap();
     let before = fs::read(project.path().join("tapid.lock")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let output = isolated_command(project.path(), &[], false)
         .args(["install", "--offline", "--frozen", "--json", "--store-dir"])
         .arg(home.path().join("store"))
         .output()
@@ -6986,8 +6971,7 @@ tools = [{{ name = "sh", path = {}, digest = "sha256-{}" }}]
         vec!["ci", "--registry-fixture", "registry.json"],
         vec!["ci", "--offline", "--registry-fixture", "registry.json"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        let output = isolated_command(project.path(), &[], false)
             .args(args)
             .arg("--store-dir")
             .arg(home.path().join("store"))
@@ -7382,9 +7366,8 @@ fn lifecycle_workspace_symlink_escape_preserves_external_project() {
         vec!["prune", "--workspace", "member"],
         vec!["outdated", "--workspace", "member"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        let output = isolated_command(root.path(), &[], false)
             .args(args)
-            .current_dir(root.path())
             .output()
             .unwrap();
         assert!(!output.status.success());
@@ -7595,8 +7578,7 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
         .unwrap();
     project.write("registry.json", &serde_json::to_vec(&serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org","name":"native-demo","version":"1.0.0","integrity":format!("sha512-{}", STANDARD.encode(Sha512::digest(&bytes))),"artifact":format!("base64:{archive}")}]})).unwrap()).unwrap();
     let install = |flags: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        isolated_command(project.path(), &[], false)
             .arg("install")
             .args(flags)
             .arg("--store-dir")
@@ -7648,8 +7630,7 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
         serde_json::from_slice::<serde_json::Value>(&lock_bytes).unwrap()["lockfileVersion"],
         9
     );
-    let verified = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .current_dir(project.path())
+    let verified = isolated_command(project.path(), &[], false)
         .args(["lock", "verify"])
         .output()
         .unwrap();
@@ -7662,8 +7643,7 @@ tools = [{{name="sh", path="{}", digest="sha256-{:x}"}}, {{name="node", path="{}
         vec!["--registry-fixture", "registry.json"],
         vec!["--offline", "--registry-fixture", "registry.json"],
     ] {
-        let replay = Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .current_dir(project.path())
+        let replay = isolated_command(project.path(), &[], false)
             .args(["ci", "--json"])
             .args(flags)
             .arg("--store-dir")

@@ -17,6 +17,7 @@ pub(super) struct Inputs {
     pub policy: tapid_runner::DependencyLifecyclePolicy,
     pub config: crate::registry::RegistryConfig,
     root: PathBuf,
+    selection: crate::registry::ConfigSelection,
 }
 
 fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, OperationalError> {
@@ -41,6 +42,10 @@ fn routing(config: &crate::registry::RegistryConfig) -> Value {
         .as_object_mut()
         .expect("registry projection")
         .remove("credentials");
+    value
+        .as_object_mut()
+        .expect("registry projection")
+        .remove("layers");
     for route in value["routes"].as_array_mut().expect("registry routes") {
         let route = route.as_object_mut().expect("registry route");
         route.remove("layer");
@@ -54,7 +59,11 @@ fn routing(config: &crate::registry::RegistryConfig) -> Value {
 }
 
 impl Inputs {
-    pub fn capture(project: &Path, target: &Path) -> Result<Self, OperationalError> {
+    pub fn capture(
+        project: &Path,
+        target: &Path,
+        selection: &crate::registry::ConfigSelection,
+    ) -> Result<Self, OperationalError> {
         let root = fs::canonicalize(project)
             .map_err(|e| OperationalError::from_source(ErrorKind::Manifest, e))?;
         let mut files = BTreeMap::new();
@@ -84,7 +93,8 @@ impl Inputs {
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
         files.insert(root.join("tapid.lock"), lock.as_deref().map(digest_bytes));
         let policy = super::super::dependency_scripts::load_policy(&root)?;
-        let config = crate::registry::RegistryConfig::load(&root)
+        let config = selection
+            .load(Some(&root))
             .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
         let policy_bytes = read(&root.join("tapid.lifecycle.toml"), 1024 * 1024)?;
         files.insert(
@@ -92,6 +102,7 @@ impl Inputs {
             policy_bytes.as_deref().map(digest_bytes),
         );
         let result = Self {
+            selection: selection.clone(),
             workspace,
             lock,
             manifests,
@@ -172,8 +183,12 @@ impl Inputs {
                     .map(|m| m.path())
                     .collect::<BTreeSet<_>>()
             || members.iter().any(|(p, d)| self.files.get(p) != Some(d))
-            || routing(&crate::registry::RegistryConfig::load(&self.root).map_err(|_| changed())?)
-                != self.registry
+            || routing(
+                &self
+                    .selection
+                    .load(Some(&self.root))
+                    .map_err(|_| changed())?,
+            ) != self.registry
             || super::super::dependency_scripts::load_policy(&self.root)
                 .map_err(|_| changed())?
                 .digest()

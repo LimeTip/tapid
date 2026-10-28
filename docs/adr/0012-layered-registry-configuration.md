@@ -1,9 +1,9 @@
 # Layered registry configuration and explicit network trust
 
 Accepted direction for [issue #346](https://github.com/LimeTip/tapid/issues/346),
-2026-10-28. Implementation remains incomplete: transport options and the layered
-resolver exist, but production user/explicit selection, network configuration
-plumbing and standalone inspection are still pending.
+2026-10-28. The CLI resolves operation-scoped configuration for project commands,
+standalone tools and offline inspection. Native platform and release verification
+remain separate gates; this decision does not establish enterprise pilot evidence.
 
 Corporate registry access must work without Tapid Cloud and without granting
 scripts global execution authority. Keep configuration discovery, layer merging

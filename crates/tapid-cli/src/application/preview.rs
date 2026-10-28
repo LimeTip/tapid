@@ -87,6 +87,7 @@ pub(crate) fn run(
     mode: InstallMode,
     fixture: Option<&Path>,
     allow_unverified: bool,
+    configuration: &crate::registry::ConfigSelection,
 ) -> Result<PreviewReport, OperationFailure> {
     inspect(
         project,
@@ -96,6 +97,7 @@ pub(crate) fn run(
         mode,
         fixture,
         allow_unverified,
+        configuration,
         || {},
     )
     .map_err(|error| OperationFailure::unchanged(project, error))
@@ -110,6 +112,7 @@ fn inspect(
     mode: InstallMode,
     fixture: Option<&Path>,
     allow_unverified: bool,
+    configuration: &crate::registry::ConfigSelection,
     before_recheck: impl FnOnce(),
 ) -> Result<PreviewReport, OperationalError> {
     let canonical_project = fs::canonicalize(project)
@@ -144,7 +147,7 @@ fn inspect(
     } else {
         project.join(target)
     };
-    let inputs = inputs::Inputs::capture(project, &target)?;
+    let inputs = inputs::Inputs::capture(project, &target, configuration)?;
     if inputs.manifest(&target) != before {
         return Err(OperationalError::new(
             ErrorKind::ProjectChanged,
@@ -483,6 +486,7 @@ mod tests {
                 InstallMode::Online,
                 Some(&project.path().join("registry.json")),
                 false,
+                &Default::default(),
                 || match mutation {
                     "root" => {
                         project

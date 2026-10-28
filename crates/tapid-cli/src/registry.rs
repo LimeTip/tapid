@@ -87,6 +87,7 @@ pub(crate) struct RegistryConfig {
     route_layers: BTreeMap<String, &'static str>,
     route_sources: BTreeMap<String, String>,
     credential_names: BTreeSet<String>,
+    layer_availability: BTreeMap<&'static str, (&'static str, Option<String>)>,
 }
 
 impl std::fmt::Debug for RegistryConfig {
@@ -97,14 +98,18 @@ impl std::fmt::Debug for RegistryConfig {
     }
 }
 
-impl RegistryConfig {
-    // Caller migration must enable this together with layered execution-secret denial.
-    #[allow(
-        dead_code,
-        reason = "staged resolver; production caller migration is pending"
-    )]
-    pub(crate) fn load_selected(
-        project: Option<&Path>,
+#[derive(Clone, Default)]
+pub(crate) struct ConfigSelection {
+    user: Option<std::path::PathBuf>,
+    explicit: Option<std::path::PathBuf>,
+}
+impl ConfigSelection {
+    pub(crate) fn discover(explicit: Option<&Path>) -> Result<Self, String> {
+        let cwd = env::current_dir()
+            .map_err(|_| "cannot select configuration working directory".to_owned())?;
+        Self::selected(explicit, &cwd, env::consts::OS, |name| env::var_os(name))
+    }
+    fn selected(
         explicit: Option<&Path>,
         cwd: &Path,
         platform: &str,
@@ -113,10 +118,43 @@ impl RegistryConfig {
         if !cwd.is_absolute() {
             return Err("configuration working directory must be absolute".into());
         }
-        let user = user_config_path(platform, read_env)?;
-        let explicit = explicit.map(|path| cwd.join(path));
+        Ok(Self {
+            user: user_config_path(platform, read_env)?,
+            explicit: explicit.map(|path| cwd.join(path)),
+        })
+    }
+    pub(crate) fn load_for_script(
+        &self,
+        project: &Path,
+        bytes: &[u8],
+    ) -> Result<RegistryConfig, String> {
+        RegistryConfig::load_layers_with_project_bytes(
+            self.user.as_deref(),
+            Some(&project.join("tapid.toml")),
+            self.explicit.as_deref(),
+            Some(bytes),
+        )
+    }
+    pub(crate) fn load(&self, project: Option<&Path>) -> Result<RegistryConfig, String> {
         let project = project.map(|path| path.join("tapid.toml"));
-        Self::load_layers(user.as_deref(), project.as_deref(), explicit.as_deref())
+        RegistryConfig::load_layers(
+            self.user.as_deref(),
+            project.as_deref(),
+            self.explicit.as_deref(),
+        )
+    }
+}
+
+impl RegistryConfig {
+    #[cfg(test)]
+    pub(crate) fn load_selected(
+        project: Option<&Path>,
+        explicit: Option<&Path>,
+        cwd: &Path,
+        platform: &str,
+        read_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Self, String> {
+        ConfigSelection::selected(explicit, cwd, platform, read_env)?.load(project)
     }
     /// Resolve selected filenames in increasing precedence, validating even shadowed
     /// documents. Location discovery belongs to the caller; this never reads tokens.
@@ -125,16 +163,55 @@ impl RegistryConfig {
         project: Option<&Path>,
         explicit: Option<&Path>,
     ) -> Result<Self, String> {
+        Self::load_layers_with_project_bytes(user, project, explicit, None)
+    }
+
+    fn load_layers_with_project_bytes(
+        user: Option<&Path>,
+        project: Option<&Path>,
+        explicit: Option<&Path>,
+        project_bytes: Option<&[u8]>,
+    ) -> Result<Self, String> {
+        if project_bytes.is_some_and(|bytes| bytes.len() > MAX_CONFIG_BYTES as usize) {
+            return Err("registry configuration exceeds 64 KiB".into());
+        }
         let mut effective = Self::default();
         for (layer, path, optional) in [
             ("user", user, true),
             ("project", project, true),
             ("explicit", explicit, false),
         ] {
-            let Some(path) = path else { continue };
-            let Some(input) = Self::read_layer(path, optional)? else {
+            let Some(path) = path else {
+                effective.layer_availability.insert(
+                    layer,
+                    (
+                        if layer == "project" {
+                            "excluded"
+                        } else {
+                            "unavailable"
+                        },
+                        None,
+                    ),
+                );
                 continue;
             };
+            let input = if layer == "project" {
+                project_bytes
+                    .map(|bytes| Some(bytes.to_vec()))
+                    .map(Ok)
+                    .unwrap_or_else(|| Self::read_layer(path, optional))?
+            } else {
+                Self::read_layer(path, optional)?
+            };
+            let Some(input) = input else {
+                effective
+                    .layer_availability
+                    .insert(layer, ("absent", Some(sanitized_path(path))));
+                continue;
+            };
+            effective
+                .layer_availability
+                .insert(layer, ("loaded", Some(sanitized_path(path))));
             let input = std::str::from_utf8(&input)
                 .map_err(|_| "registry configuration is not valid UTF-8".to_owned())?;
             let document: RegistryDocument =
@@ -170,6 +247,7 @@ impl RegistryConfig {
         Ok(effective)
     }
 
+    #[cfg(test)]
     pub(crate) fn load(project: &std::path::Path) -> Result<Self, String> {
         Self::load_layers(None, Some(&project.join("tapid.toml")), None)
     }
@@ -196,12 +274,14 @@ impl RegistryConfig {
         Ok(Some(input))
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_toml_bytes(input: &[u8]) -> Result<Self, String> {
         let input = std::str::from_utf8(input)
             .map_err(|_| "registry configuration is not valid UTF-8".to_owned())?;
         Self::parse(input)
     }
 
+    #[cfg(test)]
     fn parse(input: &str) -> Result<Self, String> {
         let document: RegistryDocument =
             toml::from_str(input).map_err(|_| "invalid registry configuration".to_owned())?;
@@ -247,6 +327,7 @@ impl RegistryConfig {
             network_provenance: BTreeMap::new(),
             routes,
             credential_names,
+            layer_availability: BTreeMap::new(),
             route_layers: BTreeMap::new(),
             route_sources: BTreeMap::new(),
         })
@@ -376,7 +457,7 @@ impl RegistryConfig {
     /// Origins and token variable names describe configuration only; no credential
     /// values, network reachability, or authentication success are established.
     pub(crate) fn inspection(&self) -> serde_json::Value {
-        let provenance = self
+        let mut provenance = self
             .network_provenance
             .iter()
             .map(|(setting, (layer, source))| {
@@ -386,12 +467,24 @@ impl RegistryConfig {
                 )
             })
             .collect::<serde_json::Map<String, serde_json::Value>>();
+        for setting in ["proxy", "ca-files"] {
+            provenance
+                .entry(setting)
+                .or_insert_with(|| serde_json::json!({"layer":"builtin", "source":null}));
+        }
+        let mut layers =
+            vec![serde_json::json!({"layer":"builtin", "state":"loaded", "source":null})];
+        layers.extend(["user", "project", "explicit"].into_iter().filter_map(|layer| self.layer_availability.get(layer).map(|(state, source)| serde_json::json!({"layer":layer, "state":state, "source":source}))));
         let routes = self.routes.iter().map(|(scope, entry)| serde_json::json!({
             "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env,
             "layer": self.route_layers.get(scope).copied().unwrap_or("project"),
             "source": self.route_sources.get(scope)
         })).collect::<Vec<_>>();
         serde_json::json!({
+            "layers": layers,
+            "bounds": {"config_bytes":MAX_CONFIG_BYTES, "ca_files":16, "ca_file_bytes":1048576, "ca_total_bytes":4194304, "ca_certificates":128, "request_timeout_seconds":20, "redirect_hops":10, "get_attempts":3, "retry_delays_ms":[100,200], "retry_after_seconds":60, "metadata_bytes":33554432, "artifact_bytes":536870912},
+            "npm_configuration":"ignored",
+            "unsupported":["proxy_authentication", "https_proxy", "pac", "socks", "client_certificates", "insecure_tls", "credential_helpers"],
             "network": {
                 "proxy": self.network.proxy.as_deref().unwrap_or("direct"),
                 "ca_files": self.network.ca_files.iter().map(|path| sanitized_path(path)).collect::<Vec<_>>(),
@@ -511,6 +604,62 @@ fn valid_env_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn effective_inspection_reports_layer_availability_and_fixed_bounds() {
+        let project = tapid_test_support::TempProject::new("configuration-layers").unwrap();
+        let explicit = project
+            .write("explicit.toml", b"[network]\nproxy='direct'\n")
+            .unwrap();
+        let config = ConfigSelection {
+            user: Some(project.path().join("missing.toml")),
+            explicit: Some(explicit),
+        }
+        .load(None)
+        .unwrap();
+        let inspection = config.inspection();
+        let layers = inspection["layers"].as_array().unwrap();
+        for (name, state) in [
+            ("builtin", "loaded"),
+            ("user", "absent"),
+            ("project", "excluded"),
+            ("explicit", "loaded"),
+        ] {
+            assert!(
+                layers
+                    .iter()
+                    .any(|layer| layer["layer"] == name && layer["state"] == state),
+                "{inspection}"
+            );
+        }
+        assert_eq!(
+            inspection["network"]["provenance"]["ca-files"]["layer"],
+            "builtin"
+        );
+        assert_eq!(inspection["bounds"]["get_attempts"], 3);
+        assert_eq!(inspection["bounds"]["ca_files"], 16);
+        assert_eq!(inspection["npm_configuration"], "ignored");
+    }
+
+    #[test]
+    fn script_credentials_use_the_same_project_bytes_as_run_policy() {
+        let project = tapid_test_support::TempProject::new("script-config-snapshot").unwrap();
+        let original =
+            b"[registries.default]\nurl='https://registry.example'\ntoken-env='ORIGINAL_SECRET'\n";
+        project
+            .write(
+                "tapid.toml",
+                b"[registries.default]\nurl='https://replacement.example'\n",
+            )
+            .unwrap();
+        let config = ConfigSelection::default()
+            .load_for_script(project.path(), original)
+            .unwrap();
+        assert_eq!(config.credential_environment_names(), ["ORIGINAL_SECRET"]);
+        assert!(config.allowlist_contains_registry_credentials(&["original_secret".into()], true));
+        assert!(
+            !config.allowlist_contains_registry_credentials(&["original_secret".into()], false)
+        );
+    }
 
     #[test]
     fn ca_snapshot_is_lazy_bounded_and_stable() {

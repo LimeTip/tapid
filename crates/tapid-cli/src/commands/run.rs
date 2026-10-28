@@ -53,7 +53,7 @@ fn config_error_category(category: tapid_runner::ConfigErrorCategory) -> &'stati
     }
 }
 
-pub(crate) fn run(args: Args) -> ExitCode {
+pub(crate) fn run(args: Args, configuration: &crate::registry::ConfigSelection) -> ExitCode {
     let mut result_file = match args.result_file.as_deref() {
         Some(path) => match result::create_file(path, &args.project_dir) {
             Ok(file) => Some(file),
@@ -65,7 +65,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
         None => None,
     };
     let mut policy_inputs = None;
-    let outcome = execute(&args, &mut policy_inputs);
+    let outcome = execute(&args, &mut policy_inputs, configuration);
     if let Some(file) = &mut result_file
         && let Err(error) = result::write(file, &outcome, policy_inputs.as_ref())
     {
@@ -87,6 +87,7 @@ pub(crate) fn run(args: Args) -> ExitCode {
 fn execute(
     args: &Args,
     policy_inputs: &mut Option<serde_json::Value>,
+    configuration: &crate::registry::ConfigSelection,
 ) -> Result<tapid_runner::ExecutionOutcome, RunFailure> {
     let project_dir = match fs::canonicalize(&args.project_dir) {
         Ok(path) if path.is_dir() => path,
@@ -201,7 +202,7 @@ fn execute(
         }
     };
     *policy_inputs = Some(selection.provenance(&args.permissions));
-    let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
+    let registry_config = match configuration.load_for_script(&project_dir, &config_bytes) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("error: {error}");

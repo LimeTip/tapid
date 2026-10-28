@@ -28,6 +28,7 @@ pub(crate) fn explain(
     project: &Path,
     metadata_file: Option<&Path>,
     artifact_file: Option<&Path>,
+    configuration: &crate::registry::ConfigSelection,
 ) -> Result<ExplainReport, OperationalError> {
     let (package, version) = crate::package_spec::parse(spec);
     let version: PackageVersion = version.parse().map_err(|_| {
@@ -42,7 +43,8 @@ pub(crate) fn explain(
             "explain currently supports npm packages only",
         ));
     }
-    let config = crate::registry::RegistryConfig::load(project)
+    let config = configuration
+        .load(Some(project))
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let (origin, name) = config
         .identity_for_spec(package)

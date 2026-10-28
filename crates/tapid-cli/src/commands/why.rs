@@ -15,11 +15,16 @@ pub(crate) struct Args {
     pub(crate) workspace: Option<String>,
 }
 
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+pub(crate) fn run(
+    args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     match crate::application::why::explain(
         &args.project_dir,
         args.workspace.as_deref(),
         &args.package,
+        configuration,
     ) {
         Ok(report) => {
             if json {

@@ -314,7 +314,7 @@ The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
 A selected member does not limit full-workspace checks. Registry data includes
 origins, credential variable names, and `credentials: "not_read"`. Each configured
-route also identifies its configuration `layer` (`project` for project configuration)
+route also identifies its configuration `layer` (`user`, `project`, or `explicit`)
 and `source` (the declaring filename with terminal control characters escaped, or
 null for configuration parsed from an in-memory document). Provenance is inspection
 metadata and is excluded from preview's semantic registry routing identity.
@@ -322,6 +322,14 @@ metadata and is excluded from preview's semantic registry routing identity.
 resolved `ca_files`, per-field `provenance`, `ambient_proxy: "ignored"`, and
 `ca_contents: "not_read"`. Inspection does not open CA files. Network provenance
 is excluded from preview identity; effective proxy and CA filenames remain included.
+`registries.layers` records built-in/user/project/explicit availability and sanitized
+source locations; `bounds` records the fixed configuration, CA, HTTP, retry and
+response limits. `npm_configuration: "ignored"` and `unsupported` describe exclusions.
+Capabilities add `configuration_layers` and `standalone_configuration`.
+With `status --standalone`, `workspace.selected` is `standalone`, manifest/lock
+agreement is `not_applicable`, recovery is `not_inspected`, and verification depth
+is `effective_configuration_only`. Project state is not inspected, and project or
+workspace selectors conflict with standalone mode. The existing schema remains v1.
 Root peer dependencies remain declarations rather than installable specs; member
 peer declarations still undergo compatibility checks. Recovery blocker locations
 identify the primary or backup journal whose metadata was inspected.

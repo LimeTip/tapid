@@ -212,6 +212,7 @@ fn install_reclassifies_the_lock_after_recovery() {
                 without_containment: overrides,
                 ..Default::default()
             },
+            RegistryConfiguration::Selected(&Default::default()),
             |_| {},
         );
         let outcome = if restore_imported && (ci || overrides) {
@@ -839,8 +840,14 @@ fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
             )
             .unwrap_err()
         } else {
-            crate::application::lifecycle::outdated_report(project.path(), None, None, false)
-                .unwrap_err()
+            crate::application::lifecycle::outdated_report(
+                project.path(),
+                None,
+                None,
+                false,
+                &Default::default(),
+            )
+            .unwrap_err()
         };
         assert_eq!(failure.error.kind, ErrorKind::Recovery);
         assert_eq!(failure.outcome.state, ChangeState::RecoveryRequired);

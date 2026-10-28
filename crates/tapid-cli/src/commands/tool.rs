@@ -47,14 +47,35 @@ pub(crate) fn execute(args: ExecArgs) -> ExitCode {
         }
     }
 }
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+pub(crate) fn run(
+    args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     let (action, install) = match &args.command {
         ToolCommand::Install(a) => (Action::Install(a.package.as_str()), Some(a)),
         ToolCommand::Update(a) => (Action::Update(a.package.as_str()), Some(a)),
         ToolCommand::Remove { package } => (Action::Remove(package.as_str()), None),
         ToolCommand::List => (Action::List, None),
     };
+    let registry_config = match configuration.load(None) {
+        Ok(config) => config,
+        Err(error) => {
+            return crate::output::json::failure_or_human(
+                &crate::application::outcome::OperationFailure::unchanged(
+                    std::path::Path::new("."),
+                    crate::application::outcome::OperationalError::new(
+                        crate::application::outcome::ErrorKind::RegistryConfiguration,
+                        error,
+                    ),
+                ),
+                "tool",
+                json,
+            );
+        }
+    };
     let options = Options {
+        registry_config: &registry_config,
         tools_dir: args.tools_dir.as_deref(),
         store_dir: install.and_then(|a| a.store_dir.as_deref()),
         registry_fixture: install.and_then(|a| a.registry_fixture.as_deref()),

@@ -101,7 +101,11 @@ fn fingerprint(path: &Path, limit: usize) -> String {
 /// store, acquires transaction locks, resolves credentials, or starts installation.
 /// Rechecking identities catches persistent replacements, but does not exclude
 /// writers or detect every change followed by restoration.
-pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
+pub(crate) fn inspect(
+    project: &Path,
+    selector: Option<&str>,
+    configuration: &crate::registry::ConfigSelection,
+) -> StatusReport {
     let project = fs::canonicalize(project).unwrap_or_else(|_| {
         if project.is_absolute() {
             project.to_path_buf()
@@ -109,40 +113,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             std::env::current_dir().unwrap_or_default().join(project)
         }
     });
-    let mut report = StatusReport {
-        assessment: "no_local_blockers",
-        manifest_lock_agreement: "unknown",
-        workspace: json!({"selected": selector, "manifest": null, "members": [], "linking": "not_verified"}),
-        installation: Vec::new(),
-        recovery: "unknown",
-        recovery_guidance: None,
-        registries: Value::Null,
-        blockers: Vec::new(),
-        truncated: false,
-        snapshot: Value::Null,
-        verification_depth: "local_metadata_and_ownership_only",
-        checks_not_performed: vec![
-            "atomic_snapshot_or_concurrent_writer_exclusion",
-            "installed_tree_integrity_and_lock_correspondence",
-            "workspace_links",
-            "shared_store_contents_and_recovery",
-            "registry_access_and_credentials",
-            "dependency_resolution_and_transitive_compatibility",
-            "artifact_bytes_and_copied_sources",
-            "lifecycle_approvals_and_derived_outputs",
-            "runner_runtime_policy_and_platform_assurance",
-            "package_engine_and_target_platform_requirements",
-        ],
-        capabilities: json!({
-            "experimental": true,
-            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
-            "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
-            "package_manager": "local_preflight_only", "runner": "not_assessed",
-            "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
-            "registry_routing": "experimental"
-        }),
-        project: project.clone(),
-    };
+    let mut report = empty_report(&project, selector);
     let mut snapshots = BTreeMap::new();
     for (name, limit) in [
         ("package.json", MAX_FILE_BYTES),
@@ -187,7 +158,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
     if manifest.is_none() {
         report.block("MANIFEST_INVALID_OR_MISSING", &manifest_path);
     }
-    let config = match RegistryConfig::load(&project) {
+    let config = match configuration.load(Some(&project)) {
         Ok(config) => {
             report.registries = config.inspection();
             Some(config)
@@ -327,6 +298,67 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         json!({"consistency": "not_atomic", "changes_detected": changed, "files": files});
     if !report.blockers.is_empty() || report.truncated {
         report.assessment = "blocked";
+    }
+    report
+}
+
+fn empty_report(project: &Path, selector: Option<&str>) -> StatusReport {
+    StatusReport {
+        assessment: "no_local_blockers",
+        manifest_lock_agreement: "unknown",
+        workspace: json!({"selected": selector, "manifest": null, "members": [], "linking": "not_verified"}),
+        installation: Vec::new(),
+        recovery: "unknown",
+        recovery_guidance: None,
+        registries: Value::Null,
+        blockers: Vec::new(),
+        truncated: false,
+        snapshot: Value::Null,
+        verification_depth: "local_metadata_and_ownership_only",
+        checks_not_performed: vec![
+            "atomic_snapshot_or_concurrent_writer_exclusion",
+            "installed_tree_integrity_and_lock_correspondence",
+            "workspace_links",
+            "shared_store_contents_and_recovery",
+            "registry_access_and_credentials",
+            "dependency_resolution_and_transitive_compatibility",
+            "artifact_bytes_and_copied_sources",
+            "lifecycle_approvals_and_derived_outputs",
+            "runner_runtime_policy_and_platform_assurance",
+            "package_engine_and_target_platform_requirements",
+        ],
+        capabilities: json!({
+            "experimental": true,
+            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
+            "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
+            "package_manager": "local_preflight_only", "runner": "not_assessed",
+            "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
+            "registry_routing": "experimental",
+            "configuration_layers": ["builtin", "user", "project", "explicit"],
+            "standalone_configuration": true
+        }),
+        project: project.to_path_buf(),
+    }
+}
+
+pub(crate) fn inspect_standalone(configuration: &crate::registry::ConfigSelection) -> StatusReport {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut report = empty_report(&cwd, None);
+    report.workspace =
+        json!({"selected":"standalone", "manifest":null, "members":[], "linking":"not_applicable"});
+    report.manifest_lock_agreement = "not_applicable";
+    report.recovery = "not_inspected";
+    report.verification_depth = "effective_configuration_only";
+    report.snapshot = json!({"consistency":"not_atomic", "changes_detected":false, "files":[]});
+    report
+        .checks_not_performed
+        .push("project_configuration_and_state");
+    match configuration.load(None) {
+        Ok(config) => report.registries = config.inspection(),
+        Err(_) => {
+            report.block("REGISTRY_CONFIGURATION_INVALID", &cwd);
+            report.assessment = "blocked";
+        }
     }
     report
 }
@@ -586,7 +618,7 @@ mod tests {
         MANIFEST_REPLACEMENT
             .with(|pending| *pending.borrow_mut() = Some((path.clone(), replacement.to_vec())));
         let _guard = FaultGuard;
-        let report = inspect(project.path(), None);
+        let report = inspect(project.path(), None, &Default::default());
         assert_eq!(report.assessment, "blocked");
         assert!(report.blockers.iter().any(|b| b.code == "SNAPSHOT_CHANGED"));
         assert_eq!(report.snapshot["changes_detected"], true);
@@ -628,7 +660,7 @@ mod tests {
             project.write("node_modules/keep", b"untouched").unwrap();
             MARKER_CHANGE.set(Some(change));
             let _guard = FaultGuard;
-            let report = inspect(project.path(), None);
+            let report = inspect(project.path(), None, &Default::default());
             assert_eq!(report.assessment, "blocked");
             assert!(report.blockers.iter().any(|b| b.code == "SNAPSHOT_CHANGED"));
             assert_eq!(report.snapshot["changes_detected"], true);

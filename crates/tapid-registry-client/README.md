@@ -41,6 +41,11 @@ Live JSR installation and live integrity behavior are not verified. Local fixtur
 
 The crate-level `download_artifact` operation accepts canonical HTTPS URLs, uses an injected transport, and requires HTTP 200. The npm and JSR convenience methods delegate to it. `HttpsTransport` allows only configured exact origins, permits at most 10 same-origin redirect hops, rejects cross-origin and credentialed redirects, and bounds response bodies. `authenticated_metadata` and `authenticated_artifact` accept caller-supplied bearer credentials bound to exact configured origins; credentials are never forwarded to another origin. Standard metadata reads are limited to 32 MiB and archive reads are separately limited to 512 MiB. Idempotent GETs use at most three attempts with deterministic 100 ms and 200 ms delays for timeouts, connection or request failures, response-read failures, HTTP 429, and selected transient HTTP 5xx responses. Permanent status, origin, redirect-policy, and response-limit failures are not broadened into unbounded retries. The standard origins include npmjs.org, jsr.io, and npm.jsr.io. Malformed JSON, URLs, identities, dependencies, and integrity values are rejected.
 
+Metadata errors render only their category and numeric HTTP status in Debug and
+Display. Structured payload fields remain available to Rust callers, but are
+untrusted input and must not be interpolated into diagnostics: rejected URLs and
+response text can contain secrets.
+
 The crate is read-only. It does not publish, mutate registry state, choose credential sources, or mirror. Unit tests use local fixtures and do not call live registries.
 
 All `HttpsTransport` constructors use direct connections by default and ignore

@@ -26,6 +26,8 @@ fn npm_import_update_converts_to_a_native_lock() {
             .env("HOME", home.path())
             .env("XDG_CACHE_HOME", home.path())
             .env("LOCALAPPDATA", home.path())
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .env_remove("TAPID_NPM_TOKEN")
             .current_dir(project.path())
             .output()
@@ -162,7 +164,11 @@ fn reference_project(label: &str) -> TempProject {
     project
 }
 fn invoke(project: &TempProject, args: &[&str]) -> std::process::Output {
+    let home = TempHome::new("npm-import-command").unwrap();
     Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .env("HOME", home.path())
+        .env("APPDATA", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .args(args)
         .current_dir(project.path())
         .output()
@@ -909,6 +915,8 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
             .env("HOME", home.path())
             .env("XDG_CACHE_HOME", home.path())
             .env("LOCALAPPDATA", home.path())
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .current_dir(project.path())
             .output()
             .unwrap()
@@ -1153,7 +1161,9 @@ fn npm_import_workspace_crash_recovery_settles_every_managed_tree() {
                     .current_dir(project.path())
                     .env("HOME", home.path())
                     .env("XDG_CACHE_HOME", home.path())
-                    .env("LOCALAPPDATA", home.path());
+                    .env("LOCALAPPDATA", home.path())
+                    .env("APPDATA", home.path())
+                    .env("XDG_CONFIG_HOME", home.path().join(".config"));
                 command
             };
             assert!(
@@ -1273,7 +1283,9 @@ fn npm_import_workspace_activation_failure_restores_member_and_root() {
             .current_dir(project.path())
             .env("HOME", home.path())
             .env("XDG_CACHE_HOME", home.path())
-            .env("LOCALAPPDATA", home.path());
+            .env("LOCALAPPDATA", home.path())
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"));
         command
     };
     assert!(
@@ -1333,7 +1345,9 @@ fn npm_import_native_update_clears_owned_member_selections() {
             .current_dir(project.path())
             .env("HOME", home.path())
             .env("XDG_CACHE_HOME", home.path())
-            .env("LOCALAPPDATA", home.path());
+            .env("LOCALAPPDATA", home.path())
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"));
         command
     };
     assert!(
@@ -1500,7 +1514,9 @@ fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() 
                 .current_dir(project.path())
                 .env("HOME", home.path())
                 .env("XDG_CACHE_HOME", home.path())
-                .env("LOCALAPPDATA", home.path());
+                .env("LOCALAPPDATA", home.path())
+                .env("APPDATA", home.path())
+                .env("XDG_CONFIG_HOME", home.path().join(".config"));
             command
         };
         assert!(

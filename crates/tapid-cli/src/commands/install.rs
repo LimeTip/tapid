@@ -55,9 +55,13 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 }
 
 /// Runs installation or lockfile replay and reports progress, warnings, and the outcome.
-pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
+pub(crate) fn run(
+    mut args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     if args.dry_run {
-        return preview(&args, json);
+        return preview(&args, json, configuration);
     }
     let mut reporter = crate::output::install::Reporter::new(json);
     let overrides = crate::application::ExecutionOverrides {
@@ -110,6 +114,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
             allow_unverified_registry_artifacts: args.allow_unverified_registry_artifacts,
         },
         overrides,
+        crate::application::install::RegistryConfiguration::Selected(configuration),
         |event| reporter.progress(event),
     );
     match result {
@@ -128,7 +133,7 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     }
 }
 
-fn preview(args: &Args, json: bool) -> ExitCode {
+fn preview(args: &Args, json: bool, configuration: &crate::registry::ConfigSelection) -> ExitCode {
     let result = (|| {
         let selection = crate::application::lifecycle::resolve_workspace(
             &args.project_dir,
@@ -173,6 +178,7 @@ fn preview(args: &Args, json: bool) -> ExitCode {
             },
             args.registry_fixture.as_deref(),
             args.allow_unverified_registry_artifacts,
+            configuration,
         )
     })();
     match result {

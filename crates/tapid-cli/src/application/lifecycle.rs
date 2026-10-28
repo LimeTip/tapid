@@ -500,6 +500,7 @@ pub(crate) fn outdated_report(
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
     offline: bool,
+    configuration: &crate::registry::ConfigSelection,
 ) -> Result<OutdatedReport, OperationFailure> {
     let mut outcome = OperationOutcome::unchanged(project_dir);
     match outdated_entries(
@@ -507,6 +508,7 @@ pub(crate) fn outdated_report(
         workspace_selector,
         registry_fixture,
         offline,
+        configuration,
         &mut outcome,
     ) {
         Ok(entries) => Ok(OutdatedReport { entries, outcome }),
@@ -524,13 +526,15 @@ fn outdated_entries(
     workspace_selector: Option<&str>,
     registry_fixture: Option<&Path>,
     offline: bool,
+    configuration: &crate::registry::ConfigSelection,
     outcome: &mut OperationOutcome,
 ) -> Result<Vec<OutdatedEntry>, OperationalError> {
     let selection = resolve_workspace(project_dir, workspace_selector)?;
     outcome.project_dir = selection.root_dir.clone();
     let project_dir = selection.root_dir.as_path();
     let manifest = selection.manifest;
-    let registry_config = crate::registry::RegistryConfig::load(project_dir)
+    let registry_config = configuration
+        .load(Some(project_dir))
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     if crate::filesystem::lifecycle_journal::has_pending(project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
@@ -887,7 +891,8 @@ mod tests {
             r#"{"name":"app","version":"1.0.0"}"#,
         )
         .unwrap();
-        let failure = outdated_report(project.path(), None, None, false).unwrap_err();
+        let failure =
+            outdated_report(project.path(), None, None, false, &Default::default()).unwrap_err();
         assert_eq!(failure.error.kind, ErrorKind::LockfileMissing);
         assert_eq!(
             failure.outcome.state,

@@ -18,12 +18,17 @@ pub(crate) struct Args {
     pub(crate) artifact_file: Option<PathBuf>,
 }
 
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+pub(crate) fn run(
+    args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
     let report = match crate::application::explain::explain(
         &args.package,
         &args.project_dir,
         args.registry_metadata.as_deref(),
         args.artifact_file.as_deref(),
+        configuration,
     ) {
         Ok(report) => report,
         Err(error) => {
