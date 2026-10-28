@@ -39,8 +39,12 @@ Npm alias requirements retain the actual target name alongside the parsed versio
 Selected graphs retain `ResolvedDeclaration` facts: the exact declaring package
 (or root entry), local name, parsed requirement, exact target and dependency or
 peer kind. Existing resolver inputs declare required dependencies; the online
-adapter restores optional dependency kinds after candidate normalization. Root
-and workspace optional entry-point classification still belongs to the caller.
+adapter restores optional dependency kinds after candidate normalization. The
+online adapter also captures root and workspace sections before merging root
+constraints, retaining exact workspace keys and separate required and
+optional declarations when they share a selected binding. Copied entry points
+retain their prepared exact source identity. These facts are not yet persisted
+as an omission/replay contract.
 
 `Resolution::prune_unavailable` is a pure graph operation for already classified
 failures. It checks declaration coverage against the selected graph, propagates

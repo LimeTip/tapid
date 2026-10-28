@@ -28,6 +28,7 @@ pub(super) fn resolve_package_graph(
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> Result<ResolvedGraph, OperationalError> {
     let WorkspaceRootResolution {
+        mut entry_points,
         mut roots,
         direct_root_identities: mut root_registry_identities,
         workspace_root_keys,
@@ -129,6 +130,30 @@ pub(super) fn resolve_package_graph(
     let mut copied_records = BTreeMap::new();
     for (dependency, record) in copied_roots {
         root_registry_identities.insert((dependency.registry.clone(), record.name.clone()));
+        for (section, map) in [
+            (
+                tapid_resolver::EntryPointSection::Dependencies,
+                manifest.dependencies(),
+            ),
+            (
+                tapid_resolver::EntryPointSection::DevDependencies,
+                manifest.dev_dependencies(),
+            ),
+            (
+                tapid_resolver::EntryPointSection::OptionalDependencies,
+                manifest.optional_dependencies(),
+            ),
+        ] {
+            if map.contains_key(dependency.name.as_str()) {
+                entry_points.push((
+                    dependency.clone(),
+                    tapid_resolver::EntryPoint {
+                        workspace: None,
+                        section,
+                    },
+                ));
+            }
+        }
         roots.push(dependency);
         copied_records.insert(
             (
@@ -308,7 +333,7 @@ pub(super) fn resolve_package_graph(
         }
     }
     resolving.set(true);
-    let (resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
+    let (mut resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
         &overrides,
@@ -330,6 +355,43 @@ pub(super) fn resolve_package_graph(
         }
         error
     })?;
+    // Reattach manifest facts captured before root constraint deduplication.
+    let entry_bindings: BTreeSet<_> = entry_points
+        .iter()
+        .map(|(dependency, _)| (dependency.registry.clone(), dependency.name.clone()))
+        .collect();
+    resolution.declarations.retain(|edge| {
+        edge.parent.is_some()
+            || !entry_bindings.contains(&(edge.target.registry.clone(), edge.name.clone()))
+    });
+    for (dependency, entry_point) in entry_points {
+        let target = resolution
+            .root_bindings
+            .get(&(dependency.registry, dependency.name.clone()))
+            .ok_or_else(|| {
+                OperationalError::new(
+                    ErrorKind::Resolution,
+                    "missing selected entry-point binding",
+                )
+            })?;
+        resolution
+            .declarations
+            .push(tapid_resolver::ResolvedDeclaration {
+                parent: None,
+                entry_point: Some(entry_point.clone()),
+                name: dependency.name,
+                requirement: dependency.requirement,
+                target: target.clone(),
+                kind: if entry_point.section
+                    == tapid_resolver::EntryPointSection::OptionalDependencies
+                {
+                    tapid_resolver::DeclarationKind::Optional
+                } else {
+                    tapid_resolver::DeclarationKind::Required
+                },
+            });
+    }
+    resolution.declarations.sort();
     resolving.set(false);
     validate_workspace_peer_providers(
         &workspace_peer_dependencies,
@@ -383,6 +445,82 @@ pub(super) fn workspace_registry_target<'a>(
 mod tests {
     use super::*;
     use crate::application::lifecycle::{SavePolicy, plan_update};
+
+    #[test]
+    fn root_workspace_overlap_retains_required_and_optional_entry_points() {
+        for (workspace_required, optional_only) in [(false, false), (true, false), (true, true)] {
+            let project = tapid_test_support::TempProject::new("entry-overlap").unwrap();
+            let root = if workspace_required {
+                r#"{"name":"app","version":"1.0.0","workspaces":["member"],"optionalDependencies":{"shared":"1"}}"#
+            } else {
+                r#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1"},"optionalDependencies":{"shared":"1"}}"#
+            };
+            project.write("package.json", root.as_bytes()).unwrap();
+            if workspace_required {
+                let member = if optional_only {
+                    r#"{"name":"member","version":"1.0.0","optionalDependencies":{"shared":"1"}}"#
+                } else {
+                    r#"{"name":"member","version":"1.0.0","dependencies":{"shared":"1"}}"#
+                };
+                project
+                    .write("member/package.json", member.as_bytes())
+                    .unwrap();
+            }
+            let fixture = serde_json::json!({"packages":[{"registry":NPM,"name":"shared","version":"1.0.0","integrity":integrity(b"shared").to_string(),"artifact":"never-download"}]});
+            let fixture = project
+                .write("registry.json", fixture.to_string().as_bytes())
+                .unwrap();
+            let manifest = PackageManifest::parse(root).unwrap();
+            let config = crate::registry::RegistryConfig::default();
+            let mut graph = resolve_package_graph(
+                project.path(),
+                &manifest,
+                workspace_materialization(project.path(), &config).unwrap(),
+                Some(&fixture),
+                false,
+                &config,
+                None,
+                None,
+                |_| {},
+            )
+            .unwrap();
+            let entries = &graph.resolution.declarations;
+            assert_eq!(entries.len(), 2);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|edge| edge.kind == tapid_resolver::DeclarationKind::Optional)
+                    .count(),
+                if optional_only { 2 } else { 1 }
+            );
+            assert!(entries.iter().all(|edge| edge.entry_point.is_some()));
+            let failed = graph.resolution.selected.iter().cloned().collect();
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|edge| edge.entry_point.as_ref().unwrap().workspace.is_some())
+                    .count(),
+                usize::from(workspace_required)
+            );
+            for reverse in [false, true] {
+                if reverse {
+                    graph.resolution.declarations.reverse();
+                }
+                let result = graph.resolution.prune_unavailable(&failed);
+                if optional_only {
+                    let pruned = result.unwrap();
+                    assert!(pruned.resolution.selected.is_empty());
+                    assert_eq!(pruned.cuts.len(), 2);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(tapid_resolver::PruneError::RequiredDeclaration(_))
+                    ));
+                }
+            }
+            assert!(graph.resolution.prune_unavailable(&BTreeSet::new()).is_ok());
+        }
+    }
 
     #[test]
     fn peer_only_save_reuses_metadata_retrieved_for_a_transitive_dependency() {

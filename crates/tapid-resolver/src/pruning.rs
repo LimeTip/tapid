@@ -9,11 +9,27 @@ pub enum DeclarationKind {
     OptionalPeer,
 }
 
+/// Manifest section owning an entry-point declaration.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EntryPointSection {
+    Dependencies,
+    DevDependencies,
+    OptionalDependencies,
+}
+
+/// Project root or exact workspace key, before resolver constraints are merged.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EntryPoint {
+    pub workspace: Option<String>,
+    pub section: EntryPointSection,
+}
+
 /// A declaration and its exact selected target. Root names retain alias bindings.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ResolvedDeclaration {
     /// Absent for a manifest entry point.
     pub parent: Option<RegistryPackageId>,
+    pub entry_point: Option<EntryPoint>,
     pub name: PackageName,
     pub requirement: Requirement,
     pub target: RegistryPackageId,
@@ -175,12 +191,24 @@ impl Resolution {
             .map(|id| (id.clone(), PeerContext::default()))
             .collect();
         for edge in &self.declarations {
+            if edge.entry_point.as_ref().is_some_and(|entry| {
+                edge.parent.is_some()
+                    || edge.kind
+                        != if entry.section == EntryPointSection::OptionalDependencies {
+                            DeclarationKind::Optional
+                        } else {
+                            DeclarationKind::Required
+                        }
+            }) {
+                return Err(PruneError::InvalidGraph);
+            }
             let peer = matches!(
                 edge.kind,
                 DeclarationKind::Peer | DeclarationKind::OptionalPeer
             );
             let key = (
                 edge.parent.clone(),
+                edge.entry_point.clone(),
                 edge.name.clone(),
                 peer,
                 if edge.parent.is_none() {

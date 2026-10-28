@@ -7,7 +7,10 @@ use std::{
     str::FromStr,
 };
 mod pruning;
-pub use pruning::{DeclarationKind, PruneError, PrunedResolution, ResolvedDeclaration};
+pub use pruning::{
+    DeclarationKind, EntryPoint, EntryPointSection, PruneError, PrunedResolution,
+    ResolvedDeclaration,
+};
 
 use tapid_core::{PackageName, PackageSource, PackageVersion, PeerContext};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
@@ -770,6 +773,7 @@ where
         let id = RegistryPackageId::from_source(registry.clone(), name, package.version.clone());
         for requirement in requirements {
             declarations.push(ResolvedDeclaration {
+                entry_point: None,
                 parent: None,
                 name: local_name.clone(),
                 requirement,
@@ -833,6 +837,7 @@ where
                 child_package.version.clone(),
             );
             declarations.push(ResolvedDeclaration {
+                entry_point: None,
                 parent: Some(parent.clone()),
                 name: dependency.clone(),
                 requirement,
@@ -911,6 +916,7 @@ where
                 });
             }
             declarations.push(ResolvedDeclaration {
+                entry_point: None,
                 parent: Some(id.clone()),
                 name: peer.clone(),
                 requirement: requirement.clone(),

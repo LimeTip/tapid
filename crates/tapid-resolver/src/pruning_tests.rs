@@ -398,3 +398,40 @@ fn pruning_rejects_unreachable_selected_instances() {
         Err(PruneError::InvalidGraph)
     );
 }
+
+#[test]
+fn pruning_rejects_entry_point_facts_on_package_edges_or_wrong_section() {
+    let source = "https://registry.npmjs.org";
+    let graph = resolve_graph(
+        &[dep(source, "parent", "1")],
+        &[registry(
+            source,
+            vec![
+                package("parent", "1.0.0", &[("child", "1")]),
+                package("child", "1.0.0", &[]),
+            ],
+        )],
+        ResolutionOptions::default(),
+    )
+    .unwrap();
+    for package_edge in [false, true] {
+        let mut invalid = graph.clone();
+        let edge = invalid
+            .declarations
+            .iter_mut()
+            .find(|edge| edge.parent.is_some() == package_edge)
+            .unwrap();
+        edge.entry_point = Some(EntryPoint {
+            workspace: None,
+            section: if package_edge {
+                EntryPointSection::Dependencies
+            } else {
+                EntryPointSection::OptionalDependencies
+            },
+        });
+        assert_eq!(
+            invalid.prune_unavailable(&BTreeSet::new()),
+            Err(PruneError::InvalidGraph)
+        );
+    }
+}
