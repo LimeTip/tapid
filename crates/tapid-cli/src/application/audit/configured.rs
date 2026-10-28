@@ -6,6 +6,9 @@ use tapid_security_provider::{CredentialMode, ProviderConfig};
 use super::AuditReport;
 use crate::filesystem::read::read_bounded_file;
 
+#[cfg(all(test, unix))]
+mod tests;
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TrustDocument {
@@ -36,6 +39,46 @@ pub(crate) fn inspect_configured(
     trust_path: &Path,
     state_path: &Path,
     mode: CredentialMode,
+) -> Result<AuditReport, &'static str> {
+    inspect_configured_using(
+        project,
+        config_path,
+        consent_path,
+        trust_path,
+        state_path,
+        mode,
+        |config, consented, mode| {
+            let https = tapid_security_provider::HttpsProvider::new(
+                config,
+                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(60),
+            )
+            .map_err(|_| "AUDIT_PROVIDER_UNAVAILABLE")?;
+            Ok(Box::new(move |request| {
+                https
+                    .query(request, &consented, mode, &mut |name| {
+                        std::env::var(name).ok()
+                    })
+                    .map(|response| Box::new(response) as Box<dyn std::io::Read>)
+            }))
+        },
+    )
+}
+
+// Keep the external byte-stream boundary injectable while using the same input
+// validation, consent, signature verification and durable recording in tests.
+fn inspect_configured_using(
+    project: &Path,
+    config_path: &Path,
+    consent_path: &Path,
+    trust_path: &Path,
+    state_path: &Path,
+    mode: CredentialMode,
+    make_transport: impl FnOnce(
+        ProviderConfig,
+        Vec<tapid_protocol::SecurityRequest>,
+        CredentialMode,
+    ) -> Result<Box<super::collection::Transport<'static>>, &'static str>,
 ) -> Result<AuditReport, &'static str> {
     for path in [config_path, consent_path, trust_path] {
         external_path(project, path)?;
@@ -82,19 +125,14 @@ pub(crate) fn inspect_configured(
     }
     #[cfg(not(unix))]
     {
-        let _ = (mode, config, consented, keys);
+        let _ = (mode, config, consented, keys, make_transport);
         Err("AUDIT_REPLAY_PLATFORM_UNSUPPORTED")
     }
     #[cfg(unix)]
     {
-        use tapid_security_provider::{HttpsProvider, ReplayStore, RetrievalError};
+        use tapid_security_provider::{ReplayStore, RetrievalError};
         let replay = ReplayStore::open(state_path).map_err(|_| "AUDIT_REPLAY_STATE_INVALID")?;
-        let https = HttpsProvider::new(
-            config,
-            std::time::Duration::from_secs(15),
-            std::time::Duration::from_secs(60),
-        )
-        .map_err(|_| "AUDIT_PROVIDER_UNAVAILABLE")?;
+        let mut transport = make_transport(config, consented.clone(), mode)?;
         let mut freshness =
             |_: &tapid_protocol::SecurityRequest| tapid_attestations::EvidenceFreshness {
                 now,
@@ -103,13 +141,6 @@ pub(crate) fn inspect_configured(
                 previous_digest: None,
             };
         let mut authorize = |request: &tapid_protocol::SecurityRequest| consented.contains(request);
-        let mut transport = |request: &tapid_protocol::SecurityRequest| {
-            https
-                .query(request, &consented, mode, &mut |name| {
-                    std::env::var(name).ok()
-                })
-                .map(|response| Box::new(response) as Box<dyn std::io::Read>)
-        };
         let mut record = |_: &str, _: &tapid_protocol::SecurityRequest, _: u64, _: &str| {
             Err(RetrievalError::StateUnavailable)
         };

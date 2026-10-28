@@ -8,7 +8,8 @@ use tapid_security_provider::{
 
 use super::requests::Inventory;
 
-type Transport<'a> = dyn FnMut(&SecurityRequest) -> Result<Box<dyn Read>, RetrievalError> + 'a;
+pub(super) type Transport<'a> =
+    dyn FnMut(&SecurityRequest) -> Result<Box<dyn Read>, RetrievalError> + 'a;
 type Recorder<'a> = dyn FnMut(&str, &SecurityRequest, u64, &str) -> Result<(), RetrievalError> + 'a;
 
 /// Internal injection seam. Authorization is exact-request disclosure consent,
