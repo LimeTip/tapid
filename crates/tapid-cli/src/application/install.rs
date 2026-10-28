@@ -509,7 +509,7 @@ fn perform_install(
     });
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
-        match lock.validate_replay(lock.root_manifest_digest()) {
+        match super::replay::validate_install_selection(lock, lock.root_manifest_digest()) {
             Ok(()) => {}
             Err(tapid_lockfile::LockfileError::UnverifiedRegistryArtifact(_))
                 if allow_unverified_registry_artifacts
@@ -593,6 +593,10 @@ fn perform_install(
             )?
         };
         session.candidate_exclusions = candidate_exclusions;
+        session.outcome.record_selection(&lock);
+        if let Some(imported) = &imported {
+            session.outcome.record_imported_selection(imported);
+        }
 
         session
             .outcome
@@ -760,12 +764,14 @@ fn perform_install(
             OperationalError::from_source(ErrorKind::Manifest, error)
                 .context("cannot read root manifest for lockfile replay")
         })?;
-    lock.validate_replay(&current_manifest_digest)
-        .map_err(|error| {
+    super::replay::validate_install_selection(&lock, &current_manifest_digest).map_err(
+        |error| {
             OperationalError::from(error)
                 .at_manifest(&project_dir.join("package.json"))
                 .context(format!("invalid lockfile {}", lock_path.display()))
-        })?;
+        },
+    )?;
+    session.outcome.record_selection(&lock);
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
@@ -1001,7 +1007,7 @@ fn parse_install_lock(
         .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
     let lock = if serde_json::from_str::<serde_json::Value>(input)
         .ok()
-        .is_some_and(|value| value["lockfileVersion"] == 8)
+        .is_some_and(|value| value["lockfileVersion"] == 8 || value["lockfileVersion"] == 12)
     {
         tapid_lockfile::ImportedNpmLockfile::from_json(input)
             .map(InstallLock::Imported)

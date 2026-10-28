@@ -150,6 +150,20 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
     }
     warnings.sort_unstable();
 
+    let mut selection = changes
+        .and_then(|c| c.selection.as_ref())
+        .map(|s| {
+            let mut value = serde_json::to_value(s).expect("selection report");
+            value["details_complete"] = json!(s.omitted_records == 0);
+            value
+        })
+        .unwrap_or(Value::Null);
+    let before = truncated_fields.len();
+    status_text(&mut selection, "/selection", &mut truncated_fields);
+    if !selection.is_null() && truncated_fields.len() != before {
+        selection["details_complete"] = json!(false);
+    }
+
     warnings.dedup();
     truncated_fields.sort_unstable();
     json!({
@@ -165,6 +179,7 @@ fn envelope(operation: &str, outcome: &str, changes: Option<&OperationOutcome>) 
         "warning_details_complete": warning_details_complete,
         "warning_details_omitted": changes.map_or(0, |c| c.omitted_warnings + c.warnings.len().saturating_sub(1024)),
         "lifecycle": lifecycle,
+        "selection": selection,
         "errors": [],
         "retry": null,
         "data": null,
@@ -335,6 +350,39 @@ mod tests {
     use super::*;
     use crate::application::outcome::{ErrorKind, OperationalError};
     use std::path::Path;
+
+    #[test]
+    fn recorded_selection_results_bound_omissions_and_mark_incomplete_details() {
+        use tapid_lockfile::*;
+        let mut lock = Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+        lock.set_selection(LockedSelection {
+            target: SelectionTarget {
+                os: "linux".into(),
+                cpu: "x86_64".into(),
+                libc: None,
+            },
+            profile: SelectionProfile::Development,
+            declarations: vec![],
+            omissions: (0..51)
+                .map(|index| AcceptedOmission {
+                    origin: OmissionOrigin::Root,
+                    name: format!("optional-{index:02}"),
+                    requirement: "^1".into(),
+                    registry: "https://registry.npmjs.org".into(),
+                    target: None,
+                    reason: OmissionReason::MetadataAbsent,
+                })
+                .collect(),
+        })
+        .unwrap();
+        let mut outcome = OperationOutcome::unchanged(Path::new("."));
+        outcome.record_selection(&lock);
+        let wire = envelope("install", "success", Some(&outcome));
+        assert_eq!(wire["selection"]["omissions"].as_array().unwrap().len(), 50);
+        assert_eq!(wire["selection"]["omitted_records"], 1);
+        assert_eq!(wire["selection"]["details_complete"], false);
+        assert_eq!(wire["selection"]["omissions"][49]["name"], "optional-49");
+    }
 
     #[test]
     fn typed_failure_context_is_bounded_redacted_and_separate_per_phase() {

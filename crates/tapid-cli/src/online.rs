@@ -33,8 +33,8 @@ use routing::transport_for_route;
 use routing::{artifact_transport_for_package, registry_for_requirement};
 
 mod platform;
-pub(crate) use platform::current_libc;
 use platform::current_platform_matches;
+pub(crate) use platform::{current_libc, selection_target};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;

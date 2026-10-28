@@ -4,6 +4,16 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 
 ## Coverage
 
+Install outcomes add top-level `selection`, null for older lock schemas. For
+recorded selections it contains `target`, `profile`, `omissions`,
+`omitted_records` and `details_complete`. At most 50 persisted omission records
+are returned in lock order. Ordinary records retain exact origin/registry/target
+identity; imported records retain `declaringPlacement`. Reasons use the lockfile
+allowlist. `details_complete` is false when records or scalar text are shortened;
+`truncated_fields` identifies shortened scalars. Omission details do not convert
+failed artifact verification or failed replay into success. These fields report
+existing ledger facts; normal CLI selection does not yet generate the ledger.
+
 | Command | Global `--json` |
 | --- | --- |
 | `install`, alias `i` | Install or replay result; resolved dependency preview with `--dry-run` |

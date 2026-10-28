@@ -105,4 +105,8 @@ rejects the new ledger, schema 12 requires it, and `validate_replay` explicitly
 rejects schema 12. `validate_replay_with_selection` checks exact target/profile facts and the
 ledger before existing imported manifest validation. Neither opt-in API performs
 CLI manifest declaration matching, artifact hydration, or omission reporting.
-Normal CLI imports still emit schema 8.
+Normal CLI imports still emit schema 8. The CLI now opts into both recorded replay
+APIs for the current build-host target and development profile. It retains
+ordinary root/member declaration checks, imported manifest/placement checks,
+selected artifact verification and bounded omission reporting. These replay paths
+do not add new accepted failure reasons or generate selection ledgers.

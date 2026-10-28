@@ -8943,6 +8943,211 @@ fn why_reports_an_incomplete_empty_search_as_success() {
 }
 
 #[test]
+fn imported_recorded_omissions_replay_without_restoring_absent_placements() {
+    use tapid_lockfile::*;
+    let project = tapid_test_support::TempProject::new("imported-recorded-omissions").unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"native":"^1"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{"":serde_json::from_str::<serde_json::Value>(manifest).unwrap()}});
+    let mut lock = ImportedNpmLockfile::import(
+        &npm.to_string(),
+        manifest,
+        lock_for_manifest(manifest).root_manifest_digest(),
+    )
+    .unwrap();
+    lock.set_placement_selection(ImportedSelection {
+        target: SelectionTarget {
+            os: std::env::consts::OS.into(),
+            cpu: std::env::consts::ARCH.into(),
+            libc: if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                Some("glibc".into())
+            } else if cfg!(all(target_os = "linux", target_env = "musl")) {
+                Some("musl".into())
+            } else {
+                None
+            },
+        },
+        profile: SelectionProfile::Development,
+        omissions: vec![ImportedOmission {
+            declaring_placement: "".into(),
+            name: "native".into(),
+            requirement: "^1".into(),
+            reason: OmissionReason::MetadataAbsent,
+        }],
+    })
+    .unwrap();
+    project
+        .write("tapid.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+    let verified = run(project.path(), &["lock", "verify", "--json"]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stdout)
+    );
+    for args in [
+        vec!["install", "--offline", "--json"],
+        vec!["install", "--frozen", "--json"],
+    ] {
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(wire["selection"]["omissions"][0]["declaringPlacement"], "");
+        assert_eq!(wire["selection"]["omissions"][0]["name"], "native");
+        let restored = ImportedNpmLockfile::from_json(
+            &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.placement_selection(), lock.placement_selection());
+    }
+    let bytes = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+    let ci = run(project.path(), &["ci", "--offline", "--json"]);
+    assert!(!ci.status.success());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    for field in ["profile", "os"] {
+        let mut wire: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        if field == "profile" {
+            wire["placementSelection"][field] = "production".into();
+        } else {
+            wire["placementSelection"]["target"][field] = "different_os".into();
+        }
+        let changed = serde_json::to_string(&wire).unwrap();
+        project.write("tapid.lock", changed.as_bytes()).unwrap();
+        let output = run(project.path(), &["install", "--offline", "--json"]);
+        assert!(!output.status.success(), "{field}");
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            changed
+        );
+        assert_eq!(
+            fs::read(project.path().join(".tapid-managed")).unwrap(),
+            marker
+        );
+    }
+}
+
+#[test]
+fn recorded_optional_omissions_replay_offline_and_remain_visible() {
+    use tapid_lockfile::*;
+    let project = tapid_test_support::TempProject::new("recorded-omission-replay").unwrap();
+    project
+        .write("registry.json", br#"{"packages":[]}"#)
+        .unwrap();
+    let manifest = r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"native":"^1"}}"#;
+    project.write("package.json", manifest.as_bytes()).unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    lock.set_selection(LockedSelection {
+        target: SelectionTarget {
+            os: std::env::consts::OS.into(),
+            cpu: std::env::consts::ARCH.into(),
+            libc: if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                Some("glibc".into())
+            } else if cfg!(all(target_os = "linux", target_env = "musl")) {
+                Some("musl".into())
+            } else {
+                None
+            },
+        },
+        profile: SelectionProfile::Development,
+        declarations: vec![],
+        omissions: vec![AcceptedOmission {
+            origin: OmissionOrigin::Root,
+            name: "native".into(),
+            requirement: "^1".into(),
+            registry: "https://registry.npmjs.org".into(),
+            target: None,
+            reason: OmissionReason::MetadataAbsent,
+        }],
+    })
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    for args in [
+        vec!["install", "--offline", "--json"],
+        vec!["ci", "--offline", "--json"],
+        vec!["install", "--frozen", "--json"],
+        vec!["install", "--registry-fixture", "registry.json", "--json"],
+    ] {
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(wire["selection"]["omissions"][0]["name"], "native");
+        assert_eq!(
+            wire["selection"]["omissions"][0]["reason"],
+            "metadataAbsent"
+        );
+        assert_eq!(wire["selection"]["details_complete"], true);
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            bytes
+        );
+    }
+    let output = run(project.path(), &["install", "--offline"]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Optional dependency native@^1 from project root omitted: MetadataAbsent.")
+    );
+
+    let layout = fs::read(project.path().join(".tapid-managed")).unwrap();
+    let override_attempt = run(
+        project.path(),
+        &[
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--registry-fixture",
+            "registry.json",
+            "--json",
+        ],
+    );
+    assert!(
+        !override_attempt.status.success(),
+        "execution overrides must not silently reselect recorded omissions"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        bytes
+    );
+    for (field, value) in [
+        ("profile", "production"),
+        ("os", "different_os"),
+        ("cpu", "different_cpu"),
+        ("libc", "different_libc"),
+    ] {
+        let mut wire: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        if field == "profile" {
+            wire["selection"][field] = value.into();
+        } else {
+            wire["selection"]["target"][field] = value.into();
+        }
+        let changed = serde_json::to_string(&wire).unwrap();
+        project.write("tapid.lock", changed.as_bytes()).unwrap();
+        let output = run(project.path(), &["install", "--offline", "--json"]);
+        assert!(!output.status.success(), "{field}");
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            changed
+        );
+        assert_eq!(
+            fs::read(project.path().join(".tapid-managed")).unwrap(),
+            layout
+        );
+    }
+}
+
+#[test]
 fn why_reports_recorded_omissions_in_human_and_json_output_without_mutation() {
     use tapid_lockfile::{
         AcceptedOmission, LockedSelection, OmissionOrigin, OmissionReason, SelectionProfile,

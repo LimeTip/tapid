@@ -45,6 +45,137 @@ fn locked_project() -> tapid_test_support::TempProject {
 }
 
 #[test]
+fn recorded_omissions_preserve_selected_artifacts_across_cold_replay_and_failure() {
+    use tapid_lockfile::*;
+    for optional in [false, true] {
+        let project = locked_project();
+        let manifest = if optional {
+            r#"{"name":"demo","version":"1.0.0","optionalDependencies":{"foo":"^1.0.0","native":"^1"}}"#
+        } else {
+            r#"{"name":"demo","version":"1.0.0","dependencies":{"foo":"^1.0.0"},"optionalDependencies":{"native":"^1"}}"#
+        };
+        project.write("package.json", manifest.as_bytes()).unwrap();
+        let mut wire: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+        wire["rootManifestDigest"] = lock_for_manifest(manifest).root_manifest_digest().into();
+        let mut lock = Lockfile::from_json(&wire.to_string()).unwrap();
+        let foo = lock.roots()[0].clone();
+        lock.set_root_bindings(std::collections::BTreeMap::from([(
+            "foo".into(),
+            foo.clone(),
+        )]))
+        .unwrap();
+        lock.set_selection(LockedSelection {
+            target: SelectionTarget {
+                os: std::env::consts::OS.into(),
+                cpu: std::env::consts::ARCH.into(),
+                libc: if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                    Some("glibc".into())
+                } else if cfg!(all(target_os = "linux", target_env = "musl")) {
+                    Some("musl".into())
+                } else {
+                    None
+                },
+            },
+            profile: SelectionProfile::Development,
+            declarations: vec![RetainedDeclaration {
+                origin: OmissionOrigin::Root,
+                section: if optional {
+                    DeclarationSection::OptionalDependencies
+                } else {
+                    DeclarationSection::Dependencies
+                },
+                name: "foo".into(),
+                requirement: "^1.0.0".into(),
+                target: foo,
+            }],
+            omissions: vec![AcceptedOmission {
+                origin: OmissionOrigin::Root,
+                name: "native".into(),
+                requirement: "^1".into(),
+                registry: "https://registry.npmjs.org".into(),
+                target: None,
+                reason: OmissionReason::MetadataAbsent,
+            }],
+        })
+        .unwrap();
+        let bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", bytes.as_bytes()).unwrap();
+        let cold = project.path().join("cold-store");
+        let output = run(
+            project.path(),
+            &[
+                "install",
+                "--frozen",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                cold.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["data"]["package_count"], 1);
+        assert_eq!(result["selection"]["omissions"][0]["name"], "native");
+        assert!(!project.path().join("node_modules/native").exists());
+        assert!(
+            project
+                .path()
+                .join("node_modules/foo/package.json")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            bytes
+        );
+
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.path().join("registry.json")).unwrap())
+                .unwrap();
+        fixture["packages"][0]["artifact"] =
+            format!("base64:{}", STANDARD.encode(b"corrupt")).into();
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let marker = fs::read(project.path().join(".tapid-managed")).unwrap();
+        let failed = run(
+            project.path(),
+            &[
+                "install",
+                "--frozen",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                project.path().join("failed-store").to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(!failed.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+        assert_eq!(result["errors"][0]["code"], "INTEGRITY_MISMATCH");
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            fs::read(project.path().join(".tapid-managed")).unwrap(),
+            marker
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/foo/package.json")
+                .is_file()
+        );
+    }
+}
+
+#[test]
 fn ci_validates_fixture_exceptions_on_warm_and_offline_paths() {
     for offline in [false, true] {
         for fixture_case in [

@@ -127,7 +127,7 @@ impl Reporter {
     }
 
     fn lifecycle_lines(outcome: &crate::application::outcome::OperationOutcome) -> Vec<String> {
-        let mut lines = Vec::new();
+        let mut lines = Self::selection_lines(outcome);
         if let Some(report) = &outcome.lifecycle {
             lines.push(format!("Dependency lifecycle: {} hook(s) executed, {} authenticated output(s) reused, {} hook(s) skipped.", report.executed, report.reused, report.skipped));
             for package in &report.packages {
@@ -146,6 +146,56 @@ impl Reporter {
                 lines.push(format!("Lifecycle details incomplete: {} package(s) and {} warning occurrence(s) omitted.", report.omitted_packages, outcome.omitted_warnings));
             }
             lines.push(format!("Hook discovery: {} ({} package(s) inspected). Application readiness is not established.", report.coverage, report.inspected_packages));
+        }
+        lines
+    }
+
+    fn selection_lines(outcome: &crate::application::outcome::OperationOutcome) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(selection) = &outcome.selection {
+            let (target, _) = super::json::text(format!(
+                "{}/{}, libc={}",
+                selection.target.os,
+                selection.target.cpu,
+                selection.target.libc.as_deref().unwrap_or("unspecified")
+            ));
+            lines.push(format!(
+                "Recorded selection: {target}, profile={:?}.",
+                selection.profile
+            ));
+            for omission in &selection.omissions {
+                let (name, requirement, reason) = omission.declaration();
+                let origin = match omission {
+                    crate::application::outcome::SelectionOmission::Native(fact) => match &fact
+                        .origin
+                    {
+                        tapid_lockfile::OmissionOrigin::Root => "project root".to_string(),
+                        tapid_lockfile::OmissionOrigin::Workspace { key } => {
+                            format!("workspace {key}")
+                        }
+                        tapid_lockfile::OmissionOrigin::Package { key } => format!("package {key}"),
+                    },
+                    crate::application::outcome::SelectionOmission::Imported(fact) => {
+                        if fact.declaring_placement.is_empty() {
+                            "project root".to_string()
+                        } else {
+                            format!("npm placement {}", fact.declaring_placement)
+                        }
+                    }
+                };
+                let (origin, _) = super::json::text(origin);
+                let (name, _) = super::json::text(name);
+                let (requirement, _) = super::json::text(requirement);
+                lines.push(format!(
+                    "Optional dependency {name}@{requirement} from {origin} omitted: {reason:?}."
+                ));
+            }
+            if selection.omitted_records > 0 {
+                lines.push(format!(
+                    "Selection details incomplete: {} omission record(s) omitted.",
+                    selection.omitted_records
+                ));
+            }
         }
         lines
     }

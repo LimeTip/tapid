@@ -352,6 +352,18 @@ With a native lock, `--frozen` can download a missing tree from its pinned HTTPS
 
 Ordinary installation also replays a matching lock. Changed manifests retain compatible locked roots and transitive selections while resolving necessary changes. `tapid update` without names explicitly refreshes the graph; named updates preserve unrelated compatible pins. Unsupported or noncanonical locks require a verified backup and deliberate removal before generating a replacement. These are Tapid's supported lock semantics, not the complete npm frozen-lockfile policy.
 
+Recorded-selection locks (ordinary schema 11 and imported schema 12) replay only
+when their recorded OS, CPU, libc and development profile match the current build
+host. Native locks retain exact root/member declaration validation. Matching
+ordinary install, frozen/offline install and native ci preserve accepted omissions;
+missing selected artifacts still fail offline and may be hydrated during frozen
+installation. Imported locks retain their existing ci restriction. Replay does
+not retry omitted branches. Human and JSON install outcomes include the recorded
+target/profile and at most 50 omission records, with explicit incomplete-detail
+counts. Normal resolution/import does not yet produce these selection schemas;
+artifact/hook omission selection and complete optional-failure semantics remain
+unfinished. Preview and status integration is not established by this replay API.
+
 ## Experimental Node.js root-script runner and `.bin` handling
 
 The invocation permission names are the same on Windows, macOS and Linux:

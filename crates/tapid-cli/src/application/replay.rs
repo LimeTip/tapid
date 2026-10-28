@@ -189,6 +189,23 @@ pub(super) fn can_replay_online(
     can_replay_inspected(project, lock, config, policy, &root_digest, &workspace)
 }
 
+/// Installation supports the development profile and the effective build host.
+/// Inspection may describe other selections but must not authorize their replay.
+pub(crate) fn validate_install_selection(
+    lock: &Lockfile,
+    digest: &str,
+) -> Result<(), tapid_lockfile::LockfileError> {
+    if lock.selection().is_some() {
+        lock.validate_replay_with_selection(
+            digest,
+            &online::selection_target(),
+            tapid_lockfile::SelectionProfile::Development,
+        )
+    } else {
+        lock.validate_replay(digest)
+    }
+}
+
 pub(super) fn can_replay_inspected(
     project: &Path,
     lock: &Lockfile,
@@ -204,11 +221,12 @@ pub(super) fn can_replay_inspected(
         online::validate_locked_files(project, lock)?;
     }
     Ok(routes_match
-        && policy.approvals().is_empty()
-        && lock
-            .packages()
-            .values()
-            .all(|p| p.derived_hooks().is_empty())
+        && (lock.selection().is_some()
+            || policy.approvals().is_empty()
+                && lock
+                    .packages()
+                    .values()
+                    .all(|p| p.derived_hooks().is_empty()))
         && digest_matches
         && online::workspace_matches_lock(workspace, lock))
 }
