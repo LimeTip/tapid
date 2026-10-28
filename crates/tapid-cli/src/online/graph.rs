@@ -115,7 +115,11 @@ pub(super) fn resolve_package_graph(
                     peer_dependencies: p.peer_dependencies.clone(),
                     optional_peer_dependencies: p.optional_peer_dependencies.clone(),
                     optional_dependencies: p.optional_dependencies.clone(),
-                    platform: PackagePlatform::unrestricted(),
+                    platform: PackagePlatform {
+                        os: p.os.clone(),
+                        cpu: p.cpu.clone(),
+                        libc: p.libc.clone(),
+                    },
                     fixture: true,
                 },
             );
@@ -381,10 +385,35 @@ pub(super) fn resolve_package_graph(
             {
                 continue;
             }
-            // Only a confirmed empty response qualifies here. Transport, identity,
-            // authentication and malformed metadata errors still propagate.
+            // Fetch errors remain fatal. Candidate eligibility uses the same typed
+            // normalization as resolution, without interpreting display strings.
             let candidates = fetch_records(&dependency.registry, actual)?;
-            if candidates.is_empty() {
+            let matching = candidates
+                .iter()
+                .filter(|candidate| {
+                    dependency
+                        .requirement
+                        .matches_tagged_version(&candidate.version, &candidate.dist_tags)
+                })
+                .collect::<Vec<_>>();
+            let reason = if candidates.is_empty() {
+                Some(tapid_lockfile::OmissionReason::MetadataAbsent)
+            } else if !matching.is_empty()
+                && matching
+                    .iter()
+                    .all(|candidate| !current_platform_matches(&candidate.platform))
+            {
+                Some(tapid_lockfile::OmissionReason::IncompatiblePlatform)
+            } else if matching.iter().all(|candidate| {
+                let mut candidate = (*candidate).clone();
+                resolution::apply_overrides(&mut candidate, &overrides);
+                resolution::normalize_record(&candidate).is_err()
+            }) {
+                Some(tapid_lockfile::OmissionReason::NoUsableCandidate)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
                 absent.insert((dependency.registry.clone(), dependency.name.clone()));
                 omissions.push(tapid_lockfile::AcceptedOmission {
                     origin: tapid_lockfile::OmissionOrigin::Root,
@@ -392,7 +421,7 @@ pub(super) fn resolve_package_graph(
                     requirement: dependency.requirement.raw.clone(),
                     registry: dependency.registry.to_string(),
                     target: None,
-                    reason: tapid_lockfile::OmissionReason::MetadataAbsent,
+                    reason,
                 });
             } else {
                 seed.extend(candidates);

@@ -175,6 +175,12 @@ struct FixturePackage {
     optional_peer_dependencies: BTreeSet<String>,
     #[serde(default, rename = "optionalDependencies")]
     optional_dependencies: BTreeMap<String, String>,
+    #[serde(default)]
+    os: Vec<String>,
+    #[serde(default)]
+    cpu: Vec<String>,
+    #[serde(default)]
+    libc: Vec<String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {

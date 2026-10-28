@@ -197,6 +197,22 @@ thread_local! {
     pub(super) static RESOLVER_METADATA_PARENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+pub(super) fn apply_overrides(
+    package: &mut PackageRecord,
+    overrides: &BTreeMap<PackageName, Requirement>,
+) {
+    if package.registry.to_string() == NPM {
+        for (name, requirement) in overrides {
+            if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
+                *dependency = overridden_requirement(name, dependency, requirement);
+            }
+            if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
+                *dependency = overridden_requirement(name, dependency, requirement);
+            }
+        }
+    }
+}
+
 fn insert_records<F>(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
@@ -211,16 +227,7 @@ where
     let mut inserted_keys = BTreeSet::new();
     let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
     for mut package in packages {
-        if package.registry.to_string() == NPM {
-            for (name, requirement) in overrides {
-                if let Some(dependency) = package.dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-                if let Some(dependency) = package.optional_dependencies.get_mut(name.as_str()) {
-                    *dependency = overridden_requirement(name, dependency, requirement);
-                }
-            }
-        }
+        apply_overrides(&mut package, overrides);
         let registry = package.registry.to_string();
         let key = (
             registry.clone(),

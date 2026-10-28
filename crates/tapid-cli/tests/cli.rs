@@ -9130,6 +9130,119 @@ fn install_records_absent_optional_root_but_preserves_required_overlap() {
 }
 
 #[test]
+fn install_records_unusable_optional_roots_without_weakening_required_aliases() {
+    for (case, reason) in [
+        ("platform", "incompatiblePlatform"),
+        ("range", "noUsableCandidate"),
+        ("unsupported-child", "noUsableCandidate"),
+    ] {
+        for required in [false, true] {
+            let project = tapid_test_support::TempProject::new("optional-root-candidates").unwrap();
+            let requirement = if case == "range" {
+                "npm:h3@^9"
+            } else {
+                "npm:h3@1.0.0"
+            };
+            let mut manifest = serde_json::json!({"name":"demo","version":"1.0.0","optionalDependencies":{"local":requirement}});
+            if required {
+                manifest["dependencies"] = serde_json::json!({"other":requirement});
+            }
+            project
+                .write("package.json", manifest.to_string().as_bytes())
+                .unwrap();
+            let mut registry: serde_json::Value =
+                serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+            for package in registry["packages"].as_array_mut().unwrap() {
+                if package["name"] == "h3" {
+                    if case == "platform" {
+                        package["os"] = serde_json::json!(["tapid-incompatible-test-os"]);
+                    } else if case == "unsupported-child" {
+                        package["dependencies"] =
+                            serde_json::json!({"child":"git+ssh://example.test/child"});
+                    }
+                }
+            }
+            project
+                .write("registry.json", registry.to_string().as_bytes())
+                .unwrap();
+            let output = run(
+                project.path(),
+                &["install", "--registry-fixture", "registry.json", "--json"],
+            );
+            assert_eq!(
+                output.status.success(),
+                !required,
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            if required {
+                assert!(!project.path().join("tapid.lock").exists());
+                assert!(!project.path().join(".tapid-managed").exists());
+                continue;
+            }
+            let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+            let lock: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                lock["selection"]["omissions"][0]["reason"], reason,
+                "{case}"
+            );
+            assert!(!project.path().join("node_modules/local").exists());
+            // Recovery of metadata must not cause cache-dependent reselection.
+            project
+                .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+                .unwrap();
+            for args in [
+                vec!["ci", "--offline", "--json"],
+                vec!["install", "--frozen", "--json"],
+            ] {
+                let replay = run(project.path(), &args);
+                assert!(
+                    replay.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&replay.stdout)
+                );
+                assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn optional_root_candidate_normalization_preserves_supported_overrides() {
+    let project = tapid_test_support::TempProject::new("optional-root-overrides").unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","optionalDependencies":{"h3":"1.0.0"},"overrides":{"@actual/scoped":"1.2.0"}}"#).unwrap();
+    let mut registry: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    for package in registry["packages"].as_array_mut().unwrap() {
+        if package["name"] == "h3" {
+            package["dependencies"] =
+                serde_json::json!({"@actual/scoped":"git+ssh://example.test/child"});
+        }
+    }
+    project
+        .write("registry.json", registry.to_string().as_bytes())
+        .unwrap();
+    let output = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/h3/package.json")
+            .is_file()
+    );
+    let lock = Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+        .unwrap();
+    assert!(lock.root_bindings().contains_key("h3"));
+}
+
+#[test]
 fn install_records_transitive_optional_metadata_absence_for_replay() {
     let project = tapid_test_support::TempProject::new("optional-first-selection").unwrap();
     project

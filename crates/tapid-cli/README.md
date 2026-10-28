@@ -362,8 +362,9 @@ not retry omitted branches. Human and JSON install outcomes include the recorded
 target/profile and at most 50 omission records, with explicit incomplete-detail
 counts. Ordinary registry-only graphs without workspace members now emit schema
 11 when recording omitted transitive optional declarations. They also accept and
-record confirmed metadata absence for optional-only root declarations; a required
-declaration to the same registry/package keeps absence fatal, including through
+record confirmed metadata absence, incompatible-platform candidates, and no
+usable matching candidate for optional-only root declarations; a required
+declaration to the same registry/package keeps unavailability fatal, including through
 another alias. Metadata transport errors remain fatal. Existing transitive
 candidate/platform exclusions retain their reasons in the ledger. Workspace and
 copied-source selection generation, imported schema 12 generation, artifact/hook
