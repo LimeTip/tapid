@@ -52,6 +52,7 @@ pub(super) fn transport_for_route<'a>(
     route: crate::registry::RegistryRoute,
     allowed_origins: &[String],
     artifact: bool,
+    network: &tapid_registry_client::NetworkOptions,
 ) -> Result<&'a HttpsTransport, OperationalError> {
     let origin = route.origin.to_string();
     let key = (origin.clone(), route.policy);
@@ -61,9 +62,17 @@ pub(super) fn transport_for_route<'a>(
             .map(|token| vec![(origin.clone(), token)])
             .unwrap_or_default();
         let transport = if artifact {
-            HttpsTransport::authenticated_artifact(allowed_origins.to_vec(), credentials)
+            HttpsTransport::authenticated_artifact_with_network(
+                allowed_origins.to_vec(),
+                credentials,
+                network,
+            )
         } else {
-            HttpsTransport::authenticated_metadata(allowed_origins.to_vec(), credentials)
+            HttpsTransport::authenticated_metadata_with_network(
+                allowed_origins.to_vec(),
+                credentials,
+                network,
+            )
         }
         .map_err(|error| {
             OperationalError::from_source(ErrorKind::RegistryTransport, error)
@@ -84,7 +93,10 @@ pub(crate) fn metadata_transport_for_package<'a>(
     allowed_origins: &[String],
 ) -> Result<&'a HttpsTransport, OperationalError> {
     let route = package_registry_route(registry_config, registry, name)?;
-    transport_for_route(cache, route, allowed_origins, false)
+    let network = registry_config
+        .network_options()
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+    transport_for_route(cache, route, allowed_origins, false, network)
 }
 
 pub(super) fn artifact_transport_for_package<'a>(
@@ -95,5 +107,8 @@ pub(super) fn artifact_transport_for_package<'a>(
     allowed_origins: &[String],
 ) -> Result<&'a HttpsTransport, OperationalError> {
     let route = package_registry_route(registry_config, registry, name)?;
-    transport_for_route(cache, route, allowed_origins, true)
+    let network = registry_config
+        .network_options()
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+    transport_for_route(cache, route, allowed_origins, true, network)
 }

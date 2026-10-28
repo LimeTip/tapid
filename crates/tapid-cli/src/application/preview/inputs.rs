@@ -46,6 +46,10 @@ fn routing(config: &crate::registry::RegistryConfig) -> Value {
         route.remove("layer");
         route.remove("source");
     }
+    value["network"]
+        .as_object_mut()
+        .expect("registry network")
+        .remove("provenance");
     value
 }
 
@@ -218,7 +222,7 @@ mod tests {
     #[test]
     fn registry_semantic_identity_excludes_source_locations_and_layers() {
         let project = tapid_test_support::TempProject::new("preview-registry-provenance").unwrap();
-        let input = b"[registries.default]\nurl='https://mirror.example'\n";
+        let input = b"[registries.default]\nurl='https://mirror.example'\n[network]\nproxy='direct'\nca-files=['root.pem']\n";
         let user = project.write("user.toml", input).unwrap();
         let explicit = project.write("explicit.toml", input).unwrap();
         let a = crate::registry::RegistryConfig::load_layers(Some(&user), None, None).unwrap();

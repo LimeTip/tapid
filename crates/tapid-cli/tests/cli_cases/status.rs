@@ -391,7 +391,7 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
             br#"{"name":"b","version":"1.0.0"}"#,
         )
         .unwrap();
-    project.write("tapid.toml", b"[registries.default]\nurl = \"https://registry.example\"\ntoken-env = \"TAPID_STATUS_TEST_SECRET\"\n").unwrap();
+    project.write("tapid.toml", b"[registries.default]\nurl = \"https://registry.example\"\ntoken-env = \"TAPID_STATUS_TEST_SECRET\"\n[network]\nproxy = 'direct'\nca-files = ['missing.pem']\n").unwrap();
     let (_, value) = status(project.path(), &["--workspace", "b"]);
     assert_eq!(value["data"]["workspace"]["selected"], "b");
     assert_eq!(value["data"]["workspace"]["linking"], "not_verified");
@@ -418,6 +418,16 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
         "TAPID_STATUS_TEST_SECRET"
     );
     assert_eq!(value["data"]["snapshot"]["consistency"], "not_atomic");
+    assert_eq!(value["data"]["registries"]["network"]["proxy"], "direct");
+    assert_eq!(
+        value["data"]["registries"]["network"]["ca_contents"],
+        "not_read"
+    );
+    assert_eq!(
+        value["data"]["registries"]["network"]["provenance"]["ca-files"]["layer"],
+        "project"
+    );
+    assert_eq!(value["data"]["registries"]["credentials"], "not_read");
 }
 
 #[test]

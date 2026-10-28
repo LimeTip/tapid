@@ -41,9 +41,25 @@ fn user_config_path(
 #[serde(deny_unknown_fields)]
 struct RegistryDocument {
     #[serde(default)]
+    network: NetworkDocument,
+    #[serde(default)]
     registries: BTreeMap<String, RegistryEntry>,
     #[serde(default, rename = "run")]
     _run: Option<toml::Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkDocument {
+    proxy: Option<String>,
+    #[serde(rename = "ca-files")]
+    ca_files: Option<Vec<std::path::PathBuf>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NetworkConfig {
+    proxy: Option<String>,
+    ca_files: Vec<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -61,12 +77,24 @@ pub(crate) struct RegistryRoute {
     pub(crate) policy: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RegistryConfig {
+    network: NetworkConfig,
+    network_snapshot:
+        std::sync::Arc<std::sync::OnceLock<Result<tapid_registry_client::NetworkOptions, String>>>,
+    network_provenance: BTreeMap<&'static str, (&'static str, String)>,
     routes: BTreeMap<String, RegistryEntry>,
     route_layers: BTreeMap<String, &'static str>,
     route_sources: BTreeMap<String, String>,
     credential_names: BTreeSet<String>,
+}
+
+impl std::fmt::Debug for RegistryConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegistryConfig")
+            .finish_non_exhaustive()
+    }
 }
 
 impl RegistryConfig {
@@ -114,7 +142,22 @@ impl RegistryConfig {
             if layer != "project" && document._run.is_some() {
                 return Err("global registry configuration cannot contain run policy".into());
             }
+            let network = document.network.clone();
             let config = Self::from_document(document)?;
+            if let Some(proxy) = network.proxy {
+                effective.network.proxy = (proxy != "direct").then_some(proxy);
+                effective
+                    .network_provenance
+                    .insert("proxy", (layer, sanitized_path(path)));
+            }
+            if let Some(paths) = network.ca_files {
+                let directory = path.parent().unwrap_or_else(|| Path::new("."));
+                effective.network.ca_files =
+                    paths.iter().map(|path| directory.join(path)).collect();
+                effective
+                    .network_provenance
+                    .insert("ca-files", (layer, sanitized_path(path)));
+            }
             effective.credential_names.extend(config.credential_names);
             for (scope, entry) in config.routes {
                 effective.route_layers.insert(scope.clone(), layer);
@@ -166,6 +209,13 @@ impl RegistryConfig {
     }
 
     fn from_document(document: RegistryDocument) -> Result<Self, String> {
+        let proxy = document.network.proxy.filter(|proxy| proxy != "direct");
+        tapid_registry_client::NetworkOptions::new(proxy.as_deref(), &[])
+            .map_err(|_| "invalid registry network configuration".to_owned())?;
+        let ca_files = document.network.ca_files.unwrap_or_default();
+        if ca_files.len() > 16 || ca_files.iter().any(|path| path.as_os_str().is_empty()) {
+            return Err("invalid registry CA file collection".into());
+        }
         let mut routes = BTreeMap::new();
         for (scope, entry) in document.registries {
             if scope != "default" && !valid_scope(&scope) {
@@ -192,11 +242,36 @@ impl RegistryConfig {
             .filter_map(|entry| entry.token_env.clone())
             .collect();
         Ok(Self {
+            network: NetworkConfig { proxy, ca_files },
+            network_snapshot: Default::default(),
+            network_provenance: BTreeMap::new(),
             routes,
             credential_names,
             route_layers: BTreeMap::new(),
             route_sources: BTreeMap::new(),
         })
+    }
+
+    /// Reads and validates additional trust once, only when online transport is needed.
+    pub(crate) fn network_options(&self) -> Result<&tapid_registry_client::NetworkOptions, String> {
+        self.network_snapshot
+            .get_or_init(|| {
+                let mut bundles = Vec::new();
+                let mut total = 0;
+                for path in &self.network.ca_files {
+                    let bytes = crate::filesystem::read::read_bounded_file(path, 1024 * 1024)
+                        .map_err(|_| "cannot read registry CA file".to_owned())?;
+                    total += bytes.len();
+                    if total > 4 * 1024 * 1024 {
+                        return Err("registry CA input limit exceeded".into());
+                    }
+                    bundles.push(bytes);
+                }
+                tapid_registry_client::NetworkOptions::new(self.network.proxy.as_deref(), &bundles)
+                    .map_err(|_| "invalid registry CA configuration".to_owned())
+            })
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     fn selected_entry<'a>(&'a self, name: &PackageName) -> (Option<&'a RegistryEntry>, &'a str) {
@@ -301,12 +376,29 @@ impl RegistryConfig {
     /// Origins and token variable names describe configuration only; no credential
     /// values, network reachability, or authentication success are established.
     pub(crate) fn inspection(&self) -> serde_json::Value {
+        let provenance = self
+            .network_provenance
+            .iter()
+            .map(|(setting, (layer, source))| {
+                (
+                    (*setting).to_owned(),
+                    serde_json::json!({"layer": layer, "source": source}),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
         let routes = self.routes.iter().map(|(scope, entry)| serde_json::json!({
             "scope": scope, "origin": entry.url, "credential_environment_name": entry.token_env,
             "layer": self.route_layers.get(scope).copied().unwrap_or("project"),
             "source": self.route_sources.get(scope)
         })).collect::<Vec<_>>();
         serde_json::json!({
+            "network": {
+                "proxy": self.network.proxy.as_deref().unwrap_or("direct"),
+                "ca_files": self.network.ca_files.iter().map(|path| sanitized_path(path)).collect::<Vec<_>>(),
+                "provenance": provenance,
+                "ambient_proxy": "ignored",
+                "ca_contents": "not_read"
+            },
             "origins": self.configured_origins(),
             "routes": routes,
             "default_origin": self.routes.get("default").map_or(NPM, |entry| entry.url.as_str()),
@@ -419,6 +511,119 @@ fn valid_env_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ca_snapshot_is_lazy_bounded_and_stable() {
+        let home = tapid_test_support::TempProject::new("registry-ca-snapshot").unwrap();
+        let document = home
+            .write("tapid.toml", b"[network]\nca-files = ['root.pem']\n")
+            .unwrap();
+        let config = RegistryConfig::load_layers(None, Some(&document), None).unwrap();
+        let cloned = config.clone();
+        let ca = include_bytes!("../../tapid-registry-client/tests/fixtures/local-test-ca.pem");
+        let root = home.write("root.pem", ca).unwrap();
+        assert!(config.network_options().is_ok());
+        std::fs::remove_file(&root).unwrap();
+        assert!(config.network_options().is_ok());
+        assert!(cloned.network_options().is_ok());
+        let fresh = RegistryConfig::load_layers(None, Some(&document), None).unwrap();
+        assert_eq!(
+            fresh.network_options().err().unwrap(),
+            "cannot read registry CA file"
+        );
+        home.write("root.pem", &vec![b'x'; 1024 * 1024 + 1])
+            .unwrap();
+        let oversized = RegistryConfig::load_layers(None, Some(&document), None).unwrap();
+        assert_eq!(
+            oversized.network_options().err().unwrap(),
+            "cannot read registry CA file"
+        );
+    }
+
+    #[test]
+    fn network_fields_inherit_clear_and_resolve_declaring_paths() {
+        let home = tapid_test_support::TempProject::new("registry-network-layers").unwrap();
+        let user = home
+            .write(
+                "user.toml",
+                b"[network]\nproxy = 'http://proxy.example:8080'\nca-files = ['certs/root.pem']\n",
+            )
+            .unwrap();
+        let project = home
+            .write("project.toml", b"[network]\nproxy = 'direct'\n")
+            .unwrap();
+        let explicit = home
+            .write("explicit.toml", b"[network]\nca-files = []\n")
+            .unwrap();
+        let inherited = RegistryConfig::load_layers(Some(&user), None, None).unwrap();
+        assert_eq!(
+            inherited.network.proxy.as_deref(),
+            Some("http://proxy.example:8080")
+        );
+        assert_eq!(
+            inherited.network.ca_files,
+            vec![home.path().join("certs/root.pem")]
+        );
+        let direct = RegistryConfig::load_layers(Some(&user), Some(&project), None).unwrap();
+        assert!(direct.network.proxy.is_none());
+        assert_eq!(direct.network.ca_files, inherited.network.ca_files);
+        let cleared =
+            RegistryConfig::load_layers(Some(&user), Some(&project), Some(&explicit)).unwrap();
+        assert!(cleared.network.proxy.is_none());
+        assert!(cleared.network.ca_files.is_empty());
+    }
+
+    #[test]
+    fn network_inspection_reports_winners_without_opening_ca_files() {
+        let home = tapid_test_support::TempProject::new("registry-network-inspection").unwrap();
+        let user = home
+            .write(
+                "user.toml",
+                b"[network]\nproxy = 'http://proxy.example:8080'\nca-files = ['missing.pem']\n",
+            )
+            .unwrap();
+        let explicit = home
+            .write("explicit.toml", b"[network]\nproxy = 'direct'\n")
+            .unwrap();
+        let config = RegistryConfig::load_layers(Some(&user), None, Some(&explicit)).unwrap();
+        let value = config.inspection();
+        assert_eq!(value["network"]["proxy"], "direct");
+        assert_eq!(value["network"]["provenance"]["proxy"]["layer"], "explicit");
+        assert_eq!(value["network"]["provenance"]["ca-files"]["layer"], "user");
+        assert_eq!(
+            value["network"]["ca_files"][0],
+            sanitized_path(&home.path().join("missing.pem"))
+        );
+        assert_eq!(value["credentials"], "not_read");
+    }
+
+    #[test]
+    fn shadowed_network_configuration_is_strict_and_redacted() {
+        let home = tapid_test_support::TempProject::new("registry-hostile-network").unwrap();
+        let explicit = home
+            .write(
+                "explicit.toml",
+                b"[network]\nproxy = 'direct'\nca-files = []\n",
+            )
+            .unwrap();
+        for input in [
+            "[network]\nproxy = 'http://secret-sentinel@proxy.example:8080'\n",
+            "[network]\nsecret-sentinel = true\n",
+            "[network]\nca-files = ['']\n",
+            "[network]\nproxy = 'https://secret-sentinel.example:8080'\n",
+        ] {
+            let user = home.write("user.toml", input.as_bytes()).unwrap();
+            let error =
+                RegistryConfig::load_layers(Some(&user), None, Some(&explicit)).unwrap_err();
+            assert!(!error.contains("secret-sentinel"));
+        }
+        let input = format!(
+            "[network]\nca-files = [{}]\n",
+            vec!["'root.pem'"; 17].join(",")
+        );
+        let user = home.write("user.toml", input.as_bytes()).unwrap();
+        assert!(RegistryConfig::load_layers(Some(&user), None, Some(&explicit)).is_err());
+    }
     use std::{
         fs,
         path::PathBuf,

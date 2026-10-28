@@ -316,6 +316,31 @@ The only supported credential provider is an environment variable selected by `t
 
 Do not put tokens in `package.json`, `tapid.toml`, command-line arguments, or `tapid.lock`. Offline and warm replay use the registry identities already pinned in the lockfile without credentials or registry requests. Frozen hydration uses credentials only for the configured origin of a missing pinned artifact. Changed registry routing fails explicitly. Registry credentials are excluded from root-script environments even if a run policy tries to allowlist the corresponding variable. Private-registry support is under development and is not a production-support claim.
 
+Registry metadata and artifact transports also accept project network settings:
+
+```toml
+[network]
+proxy = "http://proxy.example.test:8080"
+ca-files = ["certs/corporate.pem"]
+```
+
+Only unauthenticated HTTP CONNECT proxies with an explicit port are supported.
+Use `proxy = "direct"` for direct connections, the default. Ambient proxy and bypass
+variables are ignored. CA filenames resolve against the declaring configuration
+file; no environment or shell expansion occurs. Additional roots supplement public
+trust and preserve certificate and hostname checks. Selecting a corporate root
+allows that operator's TLS interception. There is no insecure TLS bypass.
+
+Online routing snapshots at most 16 regular CA files, 1 MiB each, 4 MiB total,
+and 128 certificates. Empty or malformed bundles fail closed. Offline replay and
+status do not open CA files. Standard request timeouts remain 20 seconds, redirects
+are limited to ten same-origin hops, and GET requests use at most three attempts;
+these bounds do not impose a 20-second operation deadline. Metadata and artifact
+responses remain limited to 32 MiB and 512 MiB respectively. Proxy authentication,
+PAC, SOCKS, HTTPS proxies, and client certificates are unsupported. User/explicit
+configuration discovery and standalone selection are still pending integration;
+these examples currently apply to project `tapid.toml` only.
+
 ## Legacy registry identities
 
 Locks containing noncanonical persisted registry origins (such as uppercase hosts

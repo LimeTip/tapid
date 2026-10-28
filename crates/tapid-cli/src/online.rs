@@ -721,7 +721,8 @@ pub(crate) fn validate_manifest_roots(
     manifest: &PackageManifest,
 ) -> Result<(), OperationalError> {
     let invalid = |error| OperationalError::new(ErrorKind::InvalidRequest, error);
-    let registry_config = crate::registry::RegistryConfig::load(project).map_err(invalid)?;
+    let registry_config = crate::registry::RegistryConfig::load(project)
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     copied::validate_declarations(project, manifest).map_err(invalid)?;
     let workspace = workspace_materialization(project, &registry_config).map_err(|mut error| {
         // Preserve the request-validation category while retaining typed evidence.

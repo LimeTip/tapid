@@ -318,6 +318,10 @@ route also identifies its configuration `layer` (`project` for project configura
 and `source` (the declaring filename with terminal control characters escaped, or
 null for configuration parsed from an in-memory document). Provenance is inspection
 metadata and is excluded from preview's semantic registry routing identity.
+`registries.network` reports `proxy` (`"direct"` when unset), declaring-file-relative
+resolved `ca_files`, per-field `provenance`, `ambient_proxy: "ignored"`, and
+`ca_contents: "not_read"`. Inspection does not open CA files. Network provenance
+is excluded from preview identity; effective proxy and CA filenames remain included.
 Root peer dependencies remain declarations rather than installable specs; member
 peer declarations still undergo compatibility checks. Recovery blocker locations
 identify the primary or backup journal whose metadata was inspected.

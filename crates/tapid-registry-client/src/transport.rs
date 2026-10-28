@@ -412,16 +412,30 @@ impl HttpsTransport {
         extra_origins: impl IntoIterator<Item = String>,
         credentials: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, TransportError> {
+        Self::authenticated_metadata_with_network(
+            extra_origins,
+            credentials,
+            &NetworkOptions::default(),
+        )
+    }
+
+    /// Creates standard bounded metadata transport with explicit network settings.
+    pub fn authenticated_metadata_with_network(
+        extra_origins: impl IntoIterator<Item = String>,
+        credentials: impl IntoIterator<Item = (String, String)>,
+        network: &NetworkOptions,
+    ) -> Result<Self, TransportError> {
         let origins = STANDARD_ALLOWED_ORIGINS
             .into_iter()
             .map(str::to_owned)
             .chain(extra_origins)
             .collect::<Vec<_>>();
-        Self::new_authenticated(
+        Self::new_authenticated_with_network(
             origins,
             credentials,
             Duration::from_secs(20),
             STANDARD_METADATA_MAX_RESPONSE_BYTES,
+            network,
         )
     }
 
@@ -430,16 +444,30 @@ impl HttpsTransport {
         extra_origins: impl IntoIterator<Item = String>,
         credentials: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, TransportError> {
+        Self::authenticated_artifact_with_network(
+            extra_origins,
+            credentials,
+            &NetworkOptions::default(),
+        )
+    }
+
+    /// Creates standard bounded artifact transport with explicit network settings.
+    pub fn authenticated_artifact_with_network(
+        extra_origins: impl IntoIterator<Item = String>,
+        credentials: impl IntoIterator<Item = (String, String)>,
+        network: &NetworkOptions,
+    ) -> Result<Self, TransportError> {
         let origins = STANDARD_ALLOWED_ORIGINS
             .into_iter()
             .map(str::to_owned)
             .chain(extra_origins)
             .collect::<Vec<_>>();
-        Self::new_authenticated(
+        Self::new_authenticated_with_network(
             origins,
             credentials,
             Duration::from_secs(20),
             STANDARD_ARTIFACT_MAX_RESPONSE_BYTES,
+            network,
         )
     }
 
