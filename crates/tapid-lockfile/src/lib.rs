@@ -31,5 +31,6 @@ const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;
 
 pub use npm_import::{
     ImportedNpmArtifactReceipt, ImportedNpmEntryPoints, ImportedNpmGraph, ImportedNpmLockfile,
-    ImportedNpmPackage, NpmImportError,
+    ImportedNpmPackage, ImportedSelectionComparison, ImportedSelectionCounts,
+    ImportedSelectionUnavailable, NpmImportError,
 };

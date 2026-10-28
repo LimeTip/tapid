@@ -62,3 +62,40 @@ Import failures leave root and member manifests, the previous lock, store, and a
 After an install, restore the saved lock and matching manifest, then replay their verified trees, or restore the saved npm project and run `npm ci`. Keep the npm lock backup until you have checked your application with its chosen runtime and tools.
 
 Imported locks use Tapid schema 8, separately from ordinary schema 7 verified-tree locks. Schema 8 retains the npm selections and stores tree verification receipts by package placement, bound to each receipt's tarball URL and integrity value. Older Tapid clients reject this schema. Receipts can change on the first frozen install; selected versions, sources, integrity values, and constraints do not. See [ADR 0008](adr/0008-offline-npm-lock-import.md) and the [npm lockfile format](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/).
+
+## Selection summaries
+
+Successful human install output compares the recovered persisted lock with the
+final persisted lock, rather than with `node_modules`. An imported lock already
+contains selections before its first installation. Acquiring artifact or tree
+verification receipts therefore reports those placements as reused, even when
+artifacts are downloaded and every file is materialized again.
+
+For imported-to-imported comparisons, the counted unit is a registry package
+placement in the complete lock. Nested duplicates count separately. Optional
+placements excluded on the current platform still count; installed package totals
+can consequently differ. Workspace links and local workspace sources do not count.
+
+Placements match by validated root-relative path. A new path is added, a missing
+path is removed, and a move is one removal plus one addition. At the same path,
+changes to registry origin, actual package name, version, artifact URL/integrity,
+named dependency or peer targets, optional edge membership, package optionality,
+or OS/CPU/libc constraints count once as changed. Platform lists compare as sets.
+Alias names and peer provider placements retain their graph meaning. A target
+version change does not also change ancestors whose target paths stay equal.
+Descriptive npm metadata and verification receipts do not change selections.
+
+The entire comparison is unavailable if root/member entry points or optional
+membership, workspace selection metadata, or workspace link mappings differ.
+Unchanged workspace topology permits comparison of its registry placements.
+Workspace manifest digests retain their replay validation but are not selections.
+Missing imported baselines and imported/native comparisons are unavailable.
+Human output explicitly says `Lock selections: unavailable` with a fixed reason.
+Native/native comparisons retain exact-record rules, including version changes
+counting as an addition and removal, and a missing baseline counting as additions.
+
+These four counts establish neither npm graph parity nor application readiness.
+Reused selections are separate from cache hits, filesystem work, and lifecycle
+output reuse. Summaries appear only on success. This feature changes human output
+only: JSON schema version 1, `package_count`, and `replayed` keep their existing
+meanings and contain no selection-count extension.

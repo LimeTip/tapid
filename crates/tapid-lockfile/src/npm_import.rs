@@ -4,6 +4,10 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion};
 
+mod comparison;
+pub use comparison::{
+    ImportedSelectionComparison, ImportedSelectionCounts, ImportedSelectionUnavailable,
+};
 mod json;
 mod parse;
 mod workspace;
@@ -56,7 +60,7 @@ pub struct ImportedNpmPackage {
 }
 
 /// Registry entry points for one project manifest, with npm optional overrides.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ImportedNpmEntryPoints {
     pub dependencies: BTreeMap<String, String>,
     pub optional_dependencies: BTreeSet<String>,

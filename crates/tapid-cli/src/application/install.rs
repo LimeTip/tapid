@@ -34,8 +34,52 @@ pub(crate) struct InstallReport {
     pub(crate) candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
-    pub(crate) package_changes: Option<PackageChanges>,
+    pub(crate) package_changes: SelectionComparison,
     pub(crate) outcome: OperationOutcome,
+}
+
+#[derive(Debug)]
+pub(crate) enum SelectionComparison {
+    Available(PackageChanges),
+    Unavailable(&'static str),
+}
+
+impl SelectionComparison {
+    fn native(previous: Option<&[u8]>, current: &Lockfile) -> Self {
+        match PackageChanges::between(previous, current) {
+            Some(counts) => Self::Available(counts),
+            None => Self::Unavailable("lock formats are not comparable"),
+        }
+    }
+
+    fn imported(
+        before: Option<&tapid_lockfile::ImportedNpmLockfile>,
+        after: &tapid_lockfile::ImportedNpmLockfile,
+    ) -> Result<Self, OperationalError> {
+        use tapid_lockfile::{ImportedSelectionComparison, ImportedSelectionUnavailable};
+        let Some(before) = before else {
+            return Ok(Self::Unavailable("no imported baseline"));
+        };
+        match before
+            .compare_selections(after)
+            .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))?
+        {
+            ImportedSelectionComparison::Available(counts) => Ok(Self::Available(PackageChanges {
+                added: counts.added,
+                changed: counts.changed,
+                reused: counts.reused,
+                removed: counts.removed,
+            })),
+            ImportedSelectionComparison::Unavailable(reason) => {
+                Ok(Self::Unavailable(match reason {
+                    ImportedSelectionUnavailable::EntryPointsChanged => "entry points changed",
+                    ImportedSelectionUnavailable::WorkspaceTopologyChanged => {
+                        "workspace topology changed"
+                    }
+                }))
+            }
+        }
+    }
 }
 
 /// Counts exact registry lock records, not filesystem or cache reuse. A version
@@ -83,7 +127,7 @@ struct InstallSession {
     outcome: OperationOutcome,
     mutated: bool,
     committed: bool,
-    package_changes: Option<PackageChanges>,
+    package_changes: SelectionComparison,
 }
 impl InstallSession {
     fn new(project: &Path) -> Self {
@@ -99,7 +143,7 @@ impl InstallSession {
             },
             mutated: false,
             committed: false,
-            package_changes: None,
+            package_changes: SelectionComparison::Unavailable("comparison not prepared"),
             candidate_exclusions: Default::default(),
         }
     }
@@ -447,6 +491,7 @@ fn perform_install(
         Some(InstallLock::Imported(lock)) => (None, Some(lock)),
         None => (None, None),
     };
+    let imported_baseline = imported.clone();
     if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
         imported = None;
     }
@@ -651,6 +696,12 @@ fn perform_install(
                 &mut session.outcome,
             )?;
         }
+        // Finish all fallible comparison work before publishing or activating state.
+        let selection_comparison = if let Some(current) = imported.as_ref() {
+            SelectionComparison::imported(imported_baseline.as_ref(), current)?
+        } else {
+            SelectionComparison::native(original_lock.as_deref(), &lock)
+        };
         let lock_json = if let Some(imported) = imported.as_ref() {
             imported
                 .to_json()
@@ -733,7 +784,7 @@ fn perform_install(
         journal
             .finish()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-        session.package_changes = PackageChanges::between(original_lock.as_deref(), &lock);
+        session.package_changes = selection_comparison;
         return Ok((lock.packages().len(), imported.is_some()));
     }
     if !lock_path.is_file() {
@@ -753,7 +804,7 @@ fn perform_install(
         ));
     }
     let lock = read_lock(&lock_path)?;
-    session.package_changes = PackageChanges::between(original_lock.as_deref(), &lock);
+    session.package_changes = SelectionComparison::native(original_lock.as_deref(), &lock);
     let current_manifest_digest = fs::read(project_dir.join("package.json"))
         .map(|bytes| crate::filesystem::atomic::digest_bytes(&bytes))
         .map_err(|error| {

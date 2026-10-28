@@ -59,3 +59,16 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+`ImportedNpmLockfile::compare_selections` compares validated schema 8 placement
+graphs without filesystem or artifact work. It returns complete
+`ImportedSelectionCounts` or a typed unavailable reason, keeping graph-validation
+errors separate. Registry placements match by path; identity, pinned source,
+named dependency/peer edges, optional membership, and platform sets determine
+selection equality. Verification receipts and descriptive metadata are excluded.
+All persisted registry placements count, including platform-skipped optionals;
+workspace links and local sources do not. Changed root/member entry points or
+workspace topology make the whole comparison unavailable. Manifest digests retain
+their independent replay contract. See [selection counting rules and limits](../../docs/npm-lockfile-import.md#selection-summaries), including native-format differences
+and the unchanged JSON contract. Later comparison consumers should reuse this
+operation rather than reconstruct imported graph semantics.

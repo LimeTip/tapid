@@ -50,6 +50,10 @@ fn npm_import_update_converts_to_a_native_lock() {
         "{}",
         String::from_utf8_lossy(&updated.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&updated.stdout)
+            .contains("Lock selections: unavailable (lock formats are not comparable)")
+    );
     let lock = tapid_lockfile::Lockfile::from_json(
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
@@ -394,6 +398,10 @@ fn npm_import_preserves_nested_versions_peers_sources_and_optional_constraints()
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Lock selections: 0 added, 0 changed, 5 reused, 0 removed")
+    );
     let imported = tapid_lockfile::ImportedNpmLockfile::from_json(
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
@@ -575,6 +583,7 @@ fn npm_import_frozen_rejects_corrupt_or_misidentified_archives_without_activatio
             ],
         );
         assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Lock selections:"));
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(if corrupt_bytes {
                 "integrity mismatch"
@@ -931,7 +940,7 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
     );
     let store = project.path().join("store");
     let store = store.to_str().unwrap();
-    for offline in [false, true] {
+    for offline in [false, false, true] {
         let args = if offline {
             vec!["install", "--frozen", "--offline", "--store-dir", store]
         } else {
@@ -945,6 +954,12 @@ fn npm_import_workspace_links_install_and_replay_without_resolution() {
             ]
         };
         let output = invoke(&args);
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("Lock selections: 0 added, 0 changed, 6 reused, 0 removed"),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
         assert!(
             output.status.success(),
             "{}",
@@ -1303,6 +1318,7 @@ fn npm_import_workspace_activation_failure_restores_member_and_root() {
     project.write(".tapid-managed", b"invalid marker").unwrap();
     let output = command().args(install).output().unwrap();
     assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Lock selections:"));
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
     assert_eq!(
         fs::read(project.path().join("node_modules/sentinel")).unwrap(),
@@ -1543,5 +1559,72 @@ fn npm_import_workspace_hoisting_preserves_direct_registry_and_local_bindings() 
             "{local}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+}
+
+#[test]
+fn npm_import_alias_selection_summaries_preserve_actual_identity() {
+    let project = reference_project("npm-import-alias-summary");
+    let mut npm: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package-lock.json")).unwrap())
+            .unwrap();
+    let root = &mut npm["packages"][""]["dependencies"];
+    root.as_object_mut().unwrap().remove("parent");
+    root["local-parent"] = serde_json::json!("npm:parent@1.0.0");
+    let packages = npm["packages"].as_object_mut().unwrap();
+    let mut parent = packages.remove("node_modules/parent").unwrap();
+    parent["name"] = serde_json::json!("parent");
+    packages.insert("node_modules/local-parent".into(), parent);
+    let nested = packages
+        .remove("node_modules/parent/node_modules/shared")
+        .unwrap();
+    packages.insert(
+        "node_modules/local-parent/node_modules/shared".into(),
+        nested,
+    );
+    project
+        .write("package.json", npm["packages"][""].to_string().as_bytes())
+        .unwrap();
+    project
+        .write("package-lock.json", npm.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    let store = project.path().join("store");
+    for offline in [false, true] {
+        let mut args = vec![
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        if offline {
+            args.push("--offline");
+        } else {
+            args.extend(["--registry-fixture", "registry.json"]);
+        }
+        let output = invoke(&project, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("Lock selections: 0 added, 0 changed, 5 reused, 0 removed")
+        );
+        let installed: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                project
+                    .path()
+                    .join("node_modules/local-parent/package.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(installed["name"], "parent");
     }
 }

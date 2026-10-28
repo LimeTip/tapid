@@ -508,3 +508,317 @@ fn graph_cache_is_reused_and_deserialization_still_validates_graph() {
     let unchecked: ImportedNpmLockfile = serde_json::from_value(invalid).unwrap();
     assert!(unchecked.graph().is_err());
 }
+
+#[test]
+fn imported_selection_comparison_ignores_verification_receipts() {
+    let before = ImportedNpmLockfile::import(INPUT, MANIFEST, DIGEST).unwrap();
+    let mut after = before.clone();
+    let trees = before
+        .graph()
+        .unwrap()
+        .packages
+        .keys()
+        .map(|path| (path.clone(), DIGEST.to_owned()))
+        .collect();
+    after.record_verified_trees(trees).unwrap();
+    let receipts = before
+        .graph()
+        .unwrap()
+        .packages
+        .iter()
+        .map(|(path, package)| {
+            (
+                path.clone(),
+                ImportedNpmArtifactReceipt {
+                    tree_digest: DIGEST.into(),
+                    resolved: package.resolved.clone(),
+                    integrity: package.integrity.to_string(),
+                },
+            )
+        })
+        .collect();
+    after.record_verified_artifacts(receipts).unwrap();
+    let after = ImportedNpmLockfile::from_json(&after.to_json().unwrap()).unwrap();
+    assert_eq!(
+        before.compare_selections(&after).unwrap(),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            added: 0,
+            changed: 0,
+            reused: before.graph().unwrap().packages.len(),
+            removed: 0
+        })
+    );
+}
+
+fn compare_inputs(before: &Value, after: &Value) -> ImportedSelectionComparison {
+    let import = |input: &Value| {
+        ImportedNpmLockfile::import(
+            &input.to_string(),
+            &input["packages"][""].to_string(),
+            DIGEST,
+        )
+        .unwrap()
+    };
+    let before = import(before);
+    let after = import(after);
+    let comparison = before.compare_selections(&after).unwrap();
+    if let ImportedSelectionComparison::Available(counts) = comparison {
+        assert_eq!(
+            before.graph().unwrap().packages.len(),
+            counts.removed + counts.changed + counts.reused
+        );
+        assert_eq!(
+            after.graph().unwrap().packages.len(),
+            counts.added + counts.changed + counts.reused
+        );
+    }
+    comparison
+}
+
+#[test]
+fn imported_selection_comparison_normalizes_platform_sets() {
+    let mut before: Value = serde_json::from_str(INPUT).unwrap();
+    before["packages"]["node_modules/native"]["os"] = serde_json::json!(["linux", "darwin"]);
+    let mut after = before.clone();
+    after["packages"]["node_modules/native"]["os"] =
+        serde_json::json!(["darwin", "linux", "linux"]);
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            reused: 5,
+            ..Default::default()
+        })
+    );
+}
+
+#[test]
+fn imported_selection_comparison_classifies_pins_placements_and_topology() {
+    let before: Value = serde_json::from_str(INPUT).unwrap();
+    let mut after = before.clone();
+    after["packages"]["node_modules/parent"]["resolved"] =
+        serde_json::json!("https://registry.example.com/parent/-/parent-1.0.0.tgz");
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            changed: 1,
+            reused: 4,
+            ..Default::default()
+        })
+    );
+    let mut after = before.clone();
+    after["packages"]["node_modules/parent/node_modules/shared"]["version"] =
+        serde_json::json!("2.0.1");
+    after["packages"]["node_modules/parent/node_modules/shared"]["resolved"] =
+        serde_json::json!("https://registry.npmjs.org/shared/-/shared-2.0.1.tgz");
+    after["packages"]["node_modules/parent"]["dependencies"]["shared"] = serde_json::json!("^2");
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            changed: 1,
+            reused: 4,
+            ..Default::default()
+        })
+    );
+    let mut after = before.clone();
+    let moved = after["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_modules/parent/node_modules/shared")
+        .unwrap();
+    after["packages"]["node_modules/shared-two"] = moved;
+    // An alias edge preserves the actual identity at its new placement.
+    after["packages"]["node_modules/shared-two"]["name"] = serde_json::json!("shared");
+    after["packages"]["node_modules/parent"]["dependencies"] =
+        serde_json::json!({"shared-two":"npm:shared@2.0.0"});
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            added: 1,
+            removed: 1,
+            changed: 1,
+            reused: 3
+        })
+    );
+    let mut after = before.clone();
+    after["packages"][""]["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("consumer");
+    after["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_modules/consumer");
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Unavailable(ImportedSelectionUnavailable::EntryPointsChanged)
+    );
+    let empty = serde_json::json!({"lockfileVersion":3,"packages":{"":{}}});
+    assert_eq!(
+        compare_inputs(&empty, &empty),
+        ImportedSelectionComparison::Available(Default::default())
+    );
+}
+
+#[test]
+fn imported_selection_comparison_detects_each_selection_field() {
+    let before: Value = serde_json::from_str(INPUT).unwrap();
+    for (field, value) in [
+        (
+            "resolved",
+            serde_json::json!("https://other.example/parent/-/parent-1.0.0.tgz"),
+        ),
+        (
+            "integrity",
+            before["packages"]["node_modules/shared"]["integrity"].clone(),
+        ),
+        ("optional", serde_json::json!(true)),
+        ("os", serde_json::json!(["linux"])),
+        ("cpu", serde_json::json!(["x64"])),
+        ("libc", serde_json::json!(["glibc"])),
+    ] {
+        let mut after = before.clone();
+        after["packages"]["node_modules/parent"][field] = value;
+        assert_eq!(
+            compare_inputs(&before, &after),
+            ImportedSelectionComparison::Available(ImportedSelectionCounts {
+                changed: 1,
+                reused: 4,
+                ..Default::default()
+            }),
+            "{field}"
+        );
+    }
+    let mut after = before.clone();
+    after["packages"]["node_modules/parent"]["optionalDependencies"] =
+        serde_json::json!({"shared":"2.0.0"});
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            changed: 1,
+            reused: 4,
+            ..Default::default()
+        })
+    );
+    let mut after = before.clone();
+    after["packages"]["node_modules/consumer"]["peerDependenciesMeta"] =
+        serde_json::json!({"shared":{"optional":true}});
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            changed: 1,
+            reused: 4,
+            ..Default::default()
+        })
+    );
+}
+
+#[test]
+fn imported_selection_comparison_guards_workspace_topology() {
+    let before = member_placement_lock();
+    assert_eq!(
+        compare_inputs(&before, &before),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            reused: 3,
+            ..Default::default()
+        })
+    );
+    let mut after = before.clone();
+    after["packages"]["packages/a"]["version"] = serde_json::json!("1.0.1");
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Unavailable(
+            ImportedSelectionUnavailable::WorkspaceTopologyChanged
+        )
+    );
+    let mut after = before.clone();
+    after["packages"]["packages/a"]["dependencies"] = serde_json::json!({});
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Unavailable(ImportedSelectionUnavailable::EntryPointsChanged)
+    );
+}
+
+#[test]
+fn imported_selection_comparison_retains_alias_identity_and_peer_context() {
+    let reference: Value = serde_json::from_str(INPUT).unwrap();
+    let mut before = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":{"dependencies":{"local":"npm:shared@1"}},
+        "node_modules/local":reference["packages"]["node_modules/shared"]
+    }});
+    before["packages"]["node_modules/local"]["name"] = serde_json::json!("shared");
+    let mut after = before.clone();
+    after["packages"][""]["dependencies"]["local"] = serde_json::json!("npm:parent@1");
+    let mut parent = reference["packages"]["node_modules/parent"].clone();
+    parent.as_object_mut().unwrap().remove("dependencies");
+    parent["name"] = serde_json::json!("parent");
+    after["packages"]["node_modules/local"] = parent;
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            changed: 1,
+            ..Default::default()
+        })
+    );
+
+    let mut parent = reference["packages"]["node_modules/parent"].clone();
+    parent["dependencies"]["consumer"] = serde_json::json!("1");
+    let mut consumer = reference["packages"]["node_modules/consumer"].clone();
+    consumer["peerDependencies"]["shared"] = serde_json::json!("2");
+    let before = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":{"dependencies":{"parent":"1"}},
+        "node_modules/parent":parent,
+        "node_modules/parent/node_modules/consumer":consumer,
+        "node_modules/shared":reference["packages"]["node_modules/parent/node_modules/shared"]
+    }});
+    let mut after = before.clone();
+    let shared = after["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_modules/shared")
+        .unwrap();
+    after["packages"]["node_modules/parent/node_modules/shared"] = shared;
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Available(ImportedSelectionCounts {
+            added: 1,
+            changed: 2,
+            reused: 0,
+            removed: 1
+        })
+    );
+}
+
+#[test]
+fn imported_selection_comparison_guards_optional_entry_points_and_links() {
+    let before: Value = serde_json::from_str(INPUT).unwrap();
+    let mut after = before.clone();
+    after["packages"][""]
+        .as_object_mut()
+        .unwrap()
+        .remove("optionalDependencies");
+    after["packages"][""]["dependencies"]["native"] = serde_json::json!("1.0.0");
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Unavailable(ImportedSelectionUnavailable::EntryPointsChanged)
+    );
+    let before = member_placement_lock();
+    let mut after = before.clone();
+    after["packages"]["packages/a/children/b"]
+        .as_object_mut()
+        .unwrap()
+        .remove("optionalDependencies");
+    after["packages"]["packages/a/children/b"]["dependencies"]["native"] = serde_json::json!("1");
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Unavailable(ImportedSelectionUnavailable::EntryPointsChanged)
+    );
+    let mut after = before.clone();
+    after["packages"]["packages/a/node_modules/b"] =
+        serde_json::json!({"resolved":"packages/a/children/b","link":true});
+    assert_eq!(
+        compare_inputs(&before, &after),
+        ImportedSelectionComparison::Unavailable(
+            ImportedSelectionUnavailable::WorkspaceTopologyChanged
+        )
+    );
+}
