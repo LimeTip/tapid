@@ -801,3 +801,22 @@ Future deterministic tests must cover configuration precedence and zero requests
 all excluded contexts, 24-hour boundaries, rollback clocks, persistence failure,
 concurrent attempts, total deadlines, invalid signatures, no archive requests,
 dated cache output, stderr-only rendering and unchanged command exit/project state.
+
+## Optional consumer skill asset
+
+Releases after 0.0.13 add `tapid-skill-VERSION.zip`, generated from the exact reviewed
+release source. Historical inventories are unchanged. This documentation asset is
+separate from the six binary archives, binary-only SHA256SUMS, signed release
+record, installers, and updater. Candidate fingerprints include its bytes and
+provider identity. Candidate/draft verification compares the ZIP with deterministic
+regeneration from pinned source; a rewritten self-contained manifest cannot pass.
+
+The closed compatibility review in `skills/tapid/compatibility.json` must be
+refreshed with source workflow and literal-command evidence for each supported
+CLI version before release packaging succeeds. It is not published-binary or
+native runtime certification. A version bump alone does not add compatibility.
+The ZIP is bounded at 2 MiB compressed/expanded, contains only regular
+non-executable documentation, and requires no account or integration. See
+[manual setup, updates and removal](agent-skill.md) and the separate
+[evaluation protocol](agent-skill-evaluation.md). Actual publication remains a
+release gate; this documentation does not assert the asset already exists.

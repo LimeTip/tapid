@@ -85,11 +85,20 @@ test('recovery generation and attestation use the same tagged templates after ma
     await git('config', 'user.name', 'Fixture');
     await git('config', 'user.email', 'fixture@example.test');
     await mkdir(join(directory, 'scripts'));
+    await cp(fileURLToPath(new URL('../../scripts/check-doc-examples.ts', import.meta.url)), join(directory, 'scripts/check-doc-examples.ts'));
     await mkdir(join(directory, 'tools'));
     await cp(fileURLToPath(new URL('.', import.meta.url)), join(directory, 'tools/release'), { recursive: true });
     for (const name of ['install.sh', 'install.ps1']) {
       await writeFile(join(directory, 'scripts', name), '# tagged template\n' + await readFile(new URL(`../../scripts/${name}`, import.meta.url), 'utf8'));
     }
+    // A future release includes its reviewed consumer documentation as well.
+    for (const name of ['docs', 'skills']) await cp(fileURLToPath(new URL(`../../${name}`, import.meta.url)), join(directory, name), { recursive: true });
+    await cp(fileURLToPath(new URL('../../LICENSE', import.meta.url)), join(directory, 'LICENSE'));
+    await mkdir(join(directory, 'crates/tapid-cli'), { recursive: true });
+    await cp(fileURLToPath(new URL('../../crates/tapid-cli/README.md', import.meta.url)), join(directory, 'crates/tapid-cli/README.md'));
+    await writeFile(join(directory, 'crates/tapid-cli/Cargo.toml'), '[package]\nname = "tapid"\nversion = "1.2.3"\n');
+    const compatibilityPath = join(directory, 'skills/tapid/compatibility.json');
+    await writeFile(compatibilityPath, (await readFile(compatibilityPath, 'utf8')).replaceAll('0.0.13', '1.2.3'));
     await git('add', '.');
     await git('commit', '-m', 'tagged release source');
     const source = await git('rev-parse', 'HEAD');
@@ -112,6 +121,8 @@ test('recovery generation and attestation use the same tagged templates after ma
     const node = (...args: string[]) => exec(process.execPath, ['--experimental-strip-types', ...args], { cwd: directory, env: environment });
     const bootstrap = join(directory, 'tools/release/bootstrap.ts');
     const attest = () => node(join(directory, 'tools/release/candidate.ts'), 'unsigned', assets, notes, plan, 'v1.2.3', source, object);
+    await node(join(directory, 'tools/release/skill.ts'), 'build-release', assets, 'v1.2.3', source);
+    await node(join(directory, 'tools/release/skill.ts'), 'verify-release', assets, 'v1.2.3', source);
     // Current-main generation demonstrates the original recovery mismatch.
     await node(bootstrap, assets, '1.2.3', base);
     await rejects(attest(), /generated installer mismatch/);
@@ -119,7 +130,7 @@ test('recovery generation and attestation use the same tagged templates after ma
     for (const name of ['install.sh', 'install.ps1']) {
       strictEqual((await readFile(join(assets, name), 'utf8')).startsWith('# tagged template\n'), true);
     }
-    strictEqual(JSON.parse((await attest()).stdout).candidate.assets.length, 10);
+    strictEqual(JSON.parse((await attest()).stdout).candidate.assets.length, 11);
     await rejects(node(bootstrap, assets, '1.2.3', base, 'main'), /invalid template source commit/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

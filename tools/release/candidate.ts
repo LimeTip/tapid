@@ -1,7 +1,8 @@
+import { skillAsset, verifySkill, sourceAtCommit, type ReadSource } from './skill.ts';
 import { compareStableVersions } from './versions.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { copyFile, lstat, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -71,7 +72,7 @@ export function validateReleaseIntent(input: unknown): ReleaseIntent {
 }
 export function expectedAssets(tag: string): string[] {
   source(tag,'0'.repeat(40));
-  return [...TARGETS.map(t=>`tapid-${tag.slice(1)}-${t}.tar.gz`),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1'].sort();
+  return [...TARGETS.map(t=>`tapid-${tag.slice(1)}-${t}.tar.gz`),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1',...skillAsset(tag)].sort();
 }
 export async function selectCandidate(api: ReleaseAdapter, tag: string, commit: string) {
   source(tag,commit); repository(api.repository);
@@ -102,7 +103,7 @@ export function validateCandidate(value: unknown): Candidate {
   if(typeof value.tag_object!=='string' || !/^[a-f0-9]{40}$/.test(value.tag_object) || value.title!==value.tag) throw Error('invalid candidate tag object or title');
   numeric(value.release_id as number);
   for(const name of ['notes_sha256','plan_sha256']) if(typeof value[name]!=='string' || !/^[a-f0-9]{64}$/.test(value[name] as string)) throw Error('invalid candidate digest');
-  if(!Array.isArray(value.assets) || value.assets.length!==11) throw Error('invalid candidate asset set');
+  if(!Array.isArray(value.assets) || value.assets.length!==expectedAssets(value.tag as string).length) throw Error('invalid candidate asset set');
   const ids=new Set<number>();
   for(const asset of value.assets) {
     keys(asset,['id','name','size','sha256']); numeric(asset.id as number);
@@ -113,7 +114,7 @@ export function validateCandidate(value: unknown): Candidate {
   if(JSON.stringify(value.assets.map(a=>a.name))!==JSON.stringify(expectedAssets(value.tag))) throw Error('invalid candidate asset names or order');
   return value as Candidate;
 }
-function limit(name: string): number { return name.endsWith('.tar.gz') ? 512*1024*1024 : 256*1024; }
+function limit(name: string): number { return name.endsWith('.tar.gz') ? 512*1024*1024 : name.endsWith('.zip') ? 2*1024*1024 : 256*1024; }
 async function fileDigest(path: string, max: number): Promise<{sha256:string;size:number}> {
   const info=await lstat(path);
   if(!info.isFile() || info.size<=0 || info.size>max) throw Error(`invalid regular file: ${path}`);
@@ -148,18 +149,25 @@ export function validateUnsignedCandidate(value: unknown): UnsignedCandidate {
   const synthetic=value.assets.map((asset,index)=>{
     keys(asset,['name','size','sha256']); return {...asset,id:index+1};
   });
-  synthetic.push({name:'tapid-release-v1.tsv.sig',size:1,sha256:'0'.repeat(64),id:11});
+  synthetic.push({name:'tapid-release-v1.tsv.sig',size:1,sha256:'0'.repeat(64),id:synthetic.length+1});
   synthetic.sort((a,b)=>String(a.name)<String(b.name)?-1:1);
   validateCandidate({...value,schema:'tapid-release-candidate-v1',release_id:1,assets:synthetic});
   return value as UnsignedCandidate;
 }
-export async function attestUnsignedCandidate(directory:string,notes:string,plan:string,repo:string,tag:string,commit:string,tagObject:string,templates?:InstallerTemplates):Promise<UnsignedCandidate> {
+async function verifyDocumentation(directory:string,tag:string,commit:string,read?:ReadSource):Promise<void> {
+  for(const name of skillAsset(tag)) {
+    await fileDigest(join(directory,name),limit(name));
+    await verifySkill(await readFile(join(directory,name)),read ?? sourceAtCommit(commit),{tag,commit,cliVersion:tag.slice(1),schemaVersion:1});
+  }
+}
+export async function attestUnsignedCandidate(directory:string,notes:string,plan:string,repo:string,tag:string,commit:string,tagObject:string,templates?:InstallerTemplates,readSkillSource?:ReadSource):Promise<UnsignedCandidate> {
   source(tag,commit);repository(repo);
   const names=expectedAssets(tag).filter(name=>!name.endsWith('.sig'));
   const local=(await readdir(directory)).filter(name=>name!=='tapid-release-v1.tsv.sig').sort();
-  if(JSON.stringify(local)!==JSON.stringify(names)) throw Error('unsigned candidate must contain exactly ten files');
+  if(JSON.stringify(local)!==JSON.stringify(names)) throw Error('unsigned candidate must contain the exact expected files');
   const assets=[];
   for(const name of names) assets.push({name,...await fileDigest(join(directory,name),limit(name))});
+  await verifyDocumentation(directory,tag,commit,readSkillSource);
   const base=`https://github.com/${repo}/releases/download/${tag}`;
   if(await smallFile(join(directory,'SHA256SUMS'))!==await checksumLines(directory,tag.slice(1))) throw Error('archive checksum mismatch');
   if(await smallFile(join(directory,'tapid-release-v1.tsv'))!==await releaseRecord(directory,tag.slice(1),base)) throw Error('release record mismatch');
@@ -171,9 +179,9 @@ export async function attestUnsignedCandidate(directory:string,notes:string,plan
   }finally{await rm(regenerated,{recursive:true,force:true});}
   return validateUnsignedCandidate({schema:'tapid-release-unsigned-candidate-v1',repository:repo,tag,commit,tag_object:tagObject,title:tag,notes_sha256:digest(await smallFile(notes)),plan_sha256:digest(await smallFile(plan)),assets});
 }
-export async function validateUnsignedFiles(directory:string,notes:string,plan:string,input:UnsignedCandidate,templates?:InstallerTemplates):Promise<string> {
+export async function validateUnsignedFiles(directory:string,notes:string,plan:string,input:UnsignedCandidate,templates?:InstallerTemplates,readSkillSource?:ReadSource):Promise<string> {
   const candidate=validateUnsignedCandidate(input);
-  const actual=await attestUnsignedCandidate(directory,notes,plan,candidate.repository,candidate.tag,candidate.commit,candidate.tag_object,templates);
+  const actual=await attestUnsignedCandidate(directory,notes,plan,candidate.repository,candidate.tag,candidate.commit,candidate.tag_object,templates,readSkillSource);
   if(candidateFingerprint(candidate)!==candidateFingerprint(actual)) throw Error('unsigned candidate changed after approval');
   return candidateFingerprint(actual);
 }
@@ -188,10 +196,10 @@ export async function downloadCandidate(api:ReleaseAdapter,id:number,directory:s
   for(const asset of state.assets){numeric(asset.id);if(ids.has(asset.id))throw Error('duplicate asset ID');ids.add(asset.id);if(!Number.isSafeInteger(asset.size)||asset.size<=0||asset.size>limit(asset.name))throw Error('invalid asset size');}
   for(const asset of state.assets) await api.download(asset,join(directory,asset.name));
 }
-export async function createDraftCandidate(api:ReleaseAdapter,directory:string,notes:string,plan:string,input:UnsignedCandidate,templates?:InstallerTemplates) {
+export async function createDraftCandidate(api:ReleaseAdapter,directory:string,notes:string,plan:string,input:UnsignedCandidate,templates?:InstallerTemplates,readSkillSource?:ReadSource) {
   const candidate=validateUnsignedCandidate(input);
   if(candidate.repository!==api.repository) throw Error('candidate repository mismatch');
-  await validateUnsignedFiles(directory,notes,plan,candidate,templates);
+  await validateUnsignedFiles(directory,notes,plan,candidate,templates,readSkillSource);
   await fileDigest(join(directory,'tapid-release-v1.tsv.sig'),256*1024);
   const selected=await selectCandidate({...api,createTag:async()=>{throw Error('release tag is missing');}},candidate.tag,candidate.commit);
   if(selected.tag_object!==candidate.tag_object) throw Error('annotated tag object changed after approval');
@@ -215,7 +223,7 @@ export async function createDraftCandidate(api:ReleaseAdapter,directory:string,n
     if(!names.includes(asset.name) || seen.has(asset.name)) throw Error('unexpected existing release assets');seen.add(asset.name);numeric(asset.id);
     if(ids.has(asset.id)||!Number.isSafeInteger(asset.size)||asset.size<=0||asset.size>limit(asset.name))throw Error('invalid existing release asset');ids.add(asset.id);
   }
-  if(!state.draft && (state.immutable!==true || state.assets.length!==11)) throw Error('existing public release must be complete and immutable');
+  if(!state.draft && (state.immutable!==true || state.assets.length!==names.length)) throw Error('existing public release must be complete and immutable');
   const downloaded=await mkdtemp(join(tmpdir(),'tapid-draft-readback-'));
   try {
     // Check every existing asset before the first upload. Never overwrite bytes.
@@ -234,11 +242,11 @@ export async function createDraftCandidate(api:ReleaseAdapter,directory:string,n
       if(attempt===4)throw Error('draft assets read-back did not converge');
       await new Promise(resolve=>setTimeout(resolve,200*(attempt+1)));
     }
-    const signed=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,id,templates);
+    const signed=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,id,templates,readSkillSource);
     return {candidate:signed,candidate_sha256:candidateFingerprint(signed),draft:state.draft,release_id:id};
   }finally{await rm(downloaded,{recursive:true,force:true});}
 }
-export async function attestCandidate(api: ReleaseAdapter,directory: string,notes: string,plan: string,tag: string,commit: string,releaseId: number,templates?:InstallerTemplates): Promise<Candidate> {
+export async function attestCandidate(api: ReleaseAdapter,directory: string,notes: string,plan: string,tag: string,commit: string,releaseId: number,templates?:InstallerTemplates,readSkillSource?:ReadSource): Promise<Candidate> {
   numeric(releaseId);
   const selected=await selectCandidate({...api,createTag:async()=>{throw Error('release tag is missing');}},tag,commit);
   if(selected.release_id!==releaseId) throw Error('numeric release identity mismatch');
@@ -246,7 +254,7 @@ export async function attestCandidate(api: ReleaseAdapter,directory: string,note
   const body=await smallFile(notes);
   if(state.id!==releaseId || state.tag_name!==tag || state.name!==tag || state.prerelease || state.body!==body || typeof state.draft!=='boolean') throw Error('reviewed release identity or notes mismatch');
   const names=expectedAssets(tag);
-  if(JSON.stringify([...state.assets].map(a=>a.name).sort())!==JSON.stringify(names)) throw Error('expected exactly eleven release assets');
+  if(JSON.stringify([...state.assets].map(a=>a.name).sort())!==JSON.stringify(names)) throw Error('release asset inventory mismatch');
   const local=(await readdir(directory)).sort();
   if(JSON.stringify(local)!==JSON.stringify(names)) throw Error('unexpected files in candidate asset directory');
   const ids=new Set<number>();const assets: Candidate['assets']=[];
@@ -257,6 +265,7 @@ export async function attestCandidate(api: ReleaseAdapter,directory: string,note
     if(bytes.size!==asset.size) throw Error(`provider size mismatch: ${name}`);
     assets.push({id:asset.id,name,size:bytes.size,sha256:bytes.sha256});
   }
+  await verifyDocumentation(directory,tag,commit,readSkillSource);
   const base=`https://github.com/${api.repository}/releases/download/${tag}`;
   if(await smallFile(join(directory,'SHA256SUMS'))!==await checksumLines(directory,tag.slice(1))) throw Error('archive checksum mismatch');
   if(await smallFile(join(directory,'tapid-release-v1.tsv'))!==await releaseRecord(directory,tag.slice(1),base)) throw Error('release record mismatch');
@@ -269,7 +278,7 @@ export async function attestCandidate(api: ReleaseAdapter,directory: string,note
   const candidate: Candidate={schema:'tapid-release-candidate-v1',repository:api.repository,tag,commit,tag_object:selected.tag_object,release_id:releaseId,title:tag,notes_sha256:digest(body),plan_sha256:digest(await smallFile(plan)),assets};
   return validateCandidate(candidate);
 }
-export async function publishCandidate(api: ReleaseAdapter,input: Candidate,notes: string,plan: string,templates?:InstallerTemplates): Promise<{release_id:number;tag:string;published:boolean}> {
+export async function publishCandidate(api: ReleaseAdapter,input: Candidate,notes: string,plan: string,templates?:InstallerTemplates,readSkillSource?:ReadSource): Promise<{release_id:number;tag:string;published:boolean}> {
   const candidate=validateCandidate(input);
   if(candidate.repository!==api.repository) throw Error('candidate repository mismatch');
   const directory=await mkdtemp(join(tmpdir(),'tapid-promotion-'));
@@ -277,7 +286,7 @@ export async function publishCandidate(api: ReleaseAdapter,input: Candidate,note
     const state=await api.release(candidate.release_id);
     if(JSON.stringify(state.assets.map(a=>a.name).sort())!==JSON.stringify(expectedAssets(candidate.tag))) throw Error('release assets changed');
     for(const asset of candidate.assets) await api.download(asset,join(directory,asset.name));
-    const actual=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,candidate.release_id,templates);
+    const actual=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,candidate.release_id,templates,readSkillSource);
     if(candidateFingerprint(candidate)!==candidateFingerprint(actual)) throw Error('release candidate changed after approval');
     if(!state.draft) {
       if(state.immutable!==true) throw Error('published release must be immutable');
@@ -288,7 +297,7 @@ export async function publishCandidate(api: ReleaseAdapter,input: Candidate,note
     await api.promote(candidate.release_id,!latest || compare(candidate.tag.slice(1),latest.tag_name.slice(1))>=0);
     const publicState=await api.release(candidate.release_id);
     if(publicState.draft || publicState.immutable!==true) throw Error('publication read-back is not public and immutable');
-    const after=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,candidate.release_id,templates);
+    const after=await attestCandidate(api,directory,notes,plan,candidate.tag,candidate.commit,candidate.release_id,templates,readSkillSource);
     if(candidateFingerprint(candidate)!==candidateFingerprint(after)) throw Error('published candidate read-back changed');
     return {release_id:candidate.release_id,tag:candidate.tag,published:true};
   } finally {await rm(directory,{recursive:true,force:true});}

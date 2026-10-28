@@ -43,6 +43,16 @@
       "prerequisites": ["installed-tapid"],
       "assertions": [],
       "surfaces": []
+    },
+    {
+      "id": "skill-inspect",
+      "file": "docs/examples/skill-inspect.sh",
+      "platforms": ["linux", "darwin"],
+      "lanes": ["source"],
+      "network": false,
+      "prerequisites": ["installed-tapid", "explicit-manager-selection"],
+      "assertions": [],
+      "surfaces": ["agent-skill"]
     }
   ],
   "capabilities": [

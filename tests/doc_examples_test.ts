@@ -905,3 +905,14 @@ fixture("timeouts kill descendants before they can write later", async () =>
     assert.ok(!existsSync(marker), "descendant outlived the bounded process");
   }),
 );
+
+test('consumer skill read-only probes use the bounded literal vocabulary', unix, async () => {
+  const entry = inventory.examples.find(example => example.id === 'skill-inspect');
+  assert.deepEqual(entry.lanes, ['source']);
+  const report = await fixtureRun(read(join(root, entry.file)));
+  assert.equal(report.status, 'passed');
+  assert.deepEqual(report.commands.map(item => item.command), ['tapid --version', 'tapid --help']);
+  const unsupported = await fixtureRun('tapid --unknown\n');
+  assert.equal(unsupported.status, 'failed');
+  assert.equal(unsupported.failure_class, 'contract');
+});

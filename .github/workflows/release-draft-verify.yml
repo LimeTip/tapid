@@ -102,8 +102,14 @@ jobs:
             "tapid-$VERSION-x86_64-apple-darwin.tar.gz" \
             "tapid-$VERSION-x86_64-pc-windows-msvc.tar.gz" \
             "tapid-$VERSION-x86_64-unknown-linux-gnu.tar.gz" SHA256SUMS tapid-release-v1.tsv tapid-release-v1.tsv.sig install.sh install.ps1 | LC_ALL=C sort > "$expected_assets_file"
+          expected_count=11
+          if test "$(printf '%s\n' 0.0.13 "$VERSION" | sort -V | tail -1)" != 0.0.13; then
+            printf 'tapid-skill-%s.zip\n' "$VERSION" >> "$expected_assets_file"
+            LC_ALL=C sort -o "$expected_assets_file" "$expected_assets_file"
+            expected_count=12
+          fi
           jq -r '.assets[] | [.name, .id, .size] | @tsv' "$release_json" | LC_ALL=C sort -k1,1 > "$RUNNER_TEMP/assets.tsv"
-          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = 11 || { echo "expected exactly eleven draft assets" >&2; exit 1; }
+          test "$(wc -l < "$RUNNER_TEMP/assets.tsv" | tr -d ' ')" = "$expected_count" || { echo "expected exactly eleven draft assets for historical releases, twelve with the skill" >&2; exit 1; }
           cut -f1 "$RUNNER_TEMP/assets.tsv" | diff -u "$expected_assets_file" - || { echo "unexpected draft asset" >&2; exit 1; }
 
           mkdir -p "$RUNNER_TEMP/assets"
@@ -168,6 +174,9 @@ jobs:
           node --experimental-strip-types tools/release/bootstrap.ts "$generated" "$VERSION" "https://github.com/$REPOSITORY/releases/download/$RELEASE_TAG" "$COMMIT_SHA"
           cmp "$generated/install.sh" "$RUNNER_TEMP/assets/install.sh"
           cmp "$generated/install.ps1" "$RUNNER_TEMP/assets/install.ps1"
+      - name: Verify documentation bundle against exact tagged source
+        shell: bash
+        run: node --experimental-strip-types tools/release/skill.ts verify-release "$RUNNER_TEMP/assets" "$RELEASE_TAG" "$COMMIT_SHA"
       - name: Publish exact verified assets for platform jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
