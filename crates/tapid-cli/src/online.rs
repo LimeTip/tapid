@@ -168,6 +168,8 @@ struct FixturePackage {
     #[serde(default)]
     integrity: Option<String>,
     artifact: String,
+    #[serde(default, rename = "artifactUrl")]
+    artifact_url: Option<String>,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "optionalDependencies")]
@@ -186,6 +188,7 @@ struct Fixture {
 struct PackageRecord {
     // Legacy locked records retain exact targets but cannot establish edge kinds.
     complete_dependency_kinds: bool,
+    fixture_artifact_url: Option<String>,
     git_reference: Option<String>,
     copied_archive: Option<std::sync::Arc<Vec<u8>>>,
     dist_tags: BTreeSet<String>,
@@ -643,6 +646,7 @@ fn remote_records(
         .into_iter()
         .map(|a| PackageRecord {
             complete_dependency_kinds: true,
+            fixture_artifact_url: None,
             git_reference: None,
             copied_archive: None,
             dist_tags: a.dist_tags,

@@ -103,6 +103,7 @@ pub(super) fn resolve_package_graph(
                 (p.registry.clone(), p.name.clone(), p.version.clone()),
                 PackageRecord {
                     complete_dependency_kinds: true,
+                    fixture_artifact_url: p.artifact_url.clone(),
                     git_reference: p.git_ref.clone(),
                     copied_archive: None,
                     dist_tags: p.dist_tags.clone(),

@@ -1,0 +1,14 @@
+{
+  "packages": [
+    {
+      "registry": "https://registry.npmjs.org",
+      "name": "shared",
+      "version": "1.0.0",
+      "integrity": "sha512-1VZIyZ8eDGfBd4N9sV9y2SL1+5t2e4uYnfs8urctz+4ZJh/0C+yP+sBl75Za4xiNLaQE61btZhk5zltvlb2u+g==",
+      "artifactUrl": "https://registry.npmjs.org/shared-1.0.0.tgz",
+      "artifact": "base64:H4sIAAAAAAAAE+3PsQrCMBDG8T5K+eYSL7V0yOC7xBo1WtOQS0UofXfBgIMILkUd8lv+kBvu4nV31gez8qnixIMrFkZE1DbNo0T0WpL1c5bepWzrdVHS0oe8M3LUoaCv7PpDE5y+GCjwUQezQ4WrCWwHBwUpSBAqcBesjww1wTqOuu+h4IN1cV9uR9vHcpMq4i1inn/9pyzLsuyzO2s7J3EACAAA",
+      "dependencies": {},
+      "peerDependencies": {}
+    }
+  ]
+}

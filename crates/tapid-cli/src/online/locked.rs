@@ -299,6 +299,7 @@ pub(super) fn locked_records(
             );
             Ok(PackageRecord {
             complete_dependency_kinds: false,
+            fixture_artifact_url: None,
                 git_reference: None,
                 copied_archive: None,
         dist_tags: BTreeSet::new(),

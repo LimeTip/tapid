@@ -167,6 +167,52 @@ impl NativeSelection {
         &self.packages
     }
 
+    /// Record caller-verified source and lifecycle evidence without changing the
+    /// accepted graph or archive pin. Authentication remains the caller's duty.
+    /// Dependency bindings are taken from the complete typed selection, rather
+    /// than the caller's possibly profile-filtered lifecycle graph.
+    pub fn record_verified_sources(
+        &mut self,
+        packages: BTreeMap<String, LockedPackage>,
+    ) -> Result<(), LockfileError> {
+        let mut updated = self.clone();
+        for (key, mut package) in packages {
+            let Some(selected) = self.packages.get(&key) else {
+                return invalid("verified evidence references an unselected package");
+            };
+            let (url, integrity) = match &selected.source_evidence {
+                SourceEvidence::Pending {
+                    artifact_url,
+                    artifact_integrity,
+                } => (Some(artifact_url.as_str()), artifact_integrity.as_str()),
+                SourceEvidence::Verified { package } => {
+                    (package.artifact_url(), package.artifact_integrity())
+                }
+                SourceEvidence::Workspace { .. } => {
+                    return invalid("workspace evidence cannot become registry evidence");
+                }
+            };
+            if package.artifact_url() != url || package.artifact_integrity() != integrity {
+                return invalid("verified evidence changes the accepted archive pin");
+            }
+            // Lifecycle graphs contain only enabled edges and may include peer
+            // provider bindings. The complete typed selection owns dependency edges.
+            package.replace_dependency_bindings(
+                &selected
+                    .dependencies
+                    .iter()
+                    .map(|(name, edge)| (name.clone(), edge.target.clone()))
+                    .collect(),
+            )?;
+            updated.packages.get_mut(&key).unwrap().source_evidence = SourceEvidence::Verified {
+                package: Box::new(package),
+            };
+        }
+        updated.validate()?;
+        *self = updated;
+        Ok(())
+    }
+
     /// Match the complete manifest snapshot before using any source evidence.
     pub fn validate_replay(
         &self,

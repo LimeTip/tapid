@@ -296,6 +296,7 @@ pub(super) fn prepare_native_replay(
         };
         let record = PackageRecord {
             complete_dependency_kinds: true,
+            fixture_artifact_url: None,
             git_reference: None,
             copied_archive: None,
             dist_tags: BTreeSet::new(),
@@ -491,7 +492,11 @@ impl graph::ResolvedGraph {
                 key.clone(),
                 NativeSelectedPackage {
                     source_evidence: NativeSourceEvidence::Pending {
-                        artifact_url: record.artifact.clone(),
+                        artifact_url: record
+                            .fixture_artifact_url
+                            .as_ref()
+                            .unwrap_or(&record.artifact)
+                            .clone(),
                         artifact_integrity: record
                             .integrity
                             .as_ref()

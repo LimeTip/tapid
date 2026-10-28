@@ -197,6 +197,7 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
         .collect();
     Ok(PackageRecord {
         complete_dependency_kinds: true,
+        fixture_artifact_url: None,
         git_reference: None,
         registry: source,
         name: manifest.name().clone(),

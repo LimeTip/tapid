@@ -3251,3 +3251,260 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
         );
     }
 }
+
+#[test]
+fn fresh_native_profile_validates_retained_approvals_and_rolls_back_before_activation() {
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("../../tests/fixtures/native-profile-hook.json"),
+        )
+        .unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let mut metadata = registry.clone();
+    metadata["packages"][0]["artifactUrl"] = "https://registry.npmjs.org/shared-1.0.0.tgz".into();
+    project
+        .write("registry.json", metadata.to_string().as_bytes())
+        .unwrap();
+    let policy = native_approval_policy(&project, "shared").replace(INTEGRITY, integrity);
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    project
+        .write("node_modules/KEEP", b"previous generation")
+        .unwrap();
+    let store = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::production(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Online,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure.error.to_string().contains("script"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(!project.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"previous generation"
+    );
+}
+
+#[test]
+fn fresh_native_profile_records_sources_and_ignores_unselected_approvals_for_offline_replay() {
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    for record in metadata["packages"].as_array_mut().unwrap() {
+        record["artifactUrl"] = format!(
+            "https://registry.npmjs.org/{}-{}.tgz",
+            record["name"].as_str().unwrap(),
+            record["version"].as_str().unwrap()
+        )
+        .into();
+    }
+    project
+        .write("registry.json", metadata.to_string().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "tapid.lifecycle.toml",
+            native_approval_policy(&project, "unselected").as_bytes(),
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    let request = |mode, registry_fixture| InstallRequest {
+        profile: tapid_lockfile::InstallProfile::production(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts: false,
+    };
+    project
+        .write("node_modules/KEEP", b"previous generation")
+        .unwrap();
+    let failure = run(
+        request(InstallMode::Online, Some(fixture.as_path())),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Materialization);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(!project.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"previous generation"
+    );
+    let trees = store.join("trees");
+    assert!(!trees.exists() || fs::read_dir(trees).unwrap().next().is_none());
+    fs::remove_dir_all(project.path().join("node_modules")).unwrap();
+    let report = run(
+        request(InstallMode::Online, Some(fixture.as_path())),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 1);
+    let original = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    assert!(selection.packages().values().all(|p| matches!(
+        p.source_evidence,
+        tapid_lockfile::NativeSourceEvidence::Verified { .. }
+    )));
+    fs::remove_file(&fixture).unwrap();
+    let replay = run(request(InstallMode::CiOffline, None), |_| {}).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        original
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+}
+
+#[test]
+fn fresh_native_profile_builds_authenticated_output_and_replays_without_execution() {
+    use sha2::{Digest, Sha256};
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let bytes = include_bytes!("../../tests/fixtures/native-profile-build.json");
+    project.write("registry.json", bytes).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let script_digest = format!("sha256-{:x}", Sha256::digest(b"printf built > built.txt"));
+    // The shell is an explicitly pinned immutable tool, never user-home state.
+    #[cfg(unix)]
+    let shell = Path::new("/bin/sh");
+    #[cfg(windows)]
+    let shell = project.path().join("unused-shell");
+    #[cfg(windows)]
+    let shell = shell.as_path();
+    let tool_digest = fs::read(shell)
+        .map(|bytes| format!("sha256-{:x}", Sha256::digest(bytes)))
+        .unwrap_or_else(|_| format!("sha256-{}", "0".repeat(64)));
+    let policy = native_approval_policy(&project, "shared")
+        .replace(INTEGRITY, integrity)
+        .replacen(&format!("sha256-{}", "0".repeat(64)), &script_digest, 1)
+        .replace(&format!("sha256-{}", "0".repeat(64)), &tool_digest)
+        .replace(
+            &serde_json::to_string(&project.path().join("unused-sh")).unwrap(),
+            &serde_json::to_string(shell).unwrap(),
+        );
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let request = |mode, registry_fixture| InstallRequest {
+        profile: tapid_lockfile::InstallProfile::production(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts: false,
+    };
+    if cfg!(target_os = "linux") {
+        // An unmanaged prior layout forces activation to reject after approved
+        // outputs have been staged and published. Source and derived trees must
+        // roll back together with the newly written complete selection.
+        project
+            .write("node_modules/KEEP", b"previous generation")
+            .unwrap();
+        let failure = run(
+            request(InstallMode::Online, Some(fixture.as_path())),
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, ErrorKind::Materialization);
+        assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+        assert!(!project.path().join("tapid.lock").exists());
+        assert_eq!(
+            fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+            b"previous generation"
+        );
+        let trees = store.join("trees");
+        assert!(!trees.exists() || fs::read_dir(trees).unwrap().next().is_none());
+        fs::remove_dir_all(project.path().join("node_modules")).unwrap();
+    }
+    let result = run(
+        request(InstallMode::Online, Some(fixture.as_path())),
+        |_| {},
+    );
+    if !cfg!(target_os = "linux") {
+        let failure = result.unwrap_err();
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("toolchain identity currently requires Linux"),
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+        assert!(!project.path().join("tapid.lock").exists());
+        assert!(!project.path().join("node_modules").exists());
+        return;
+    }
+    let installed = result.unwrap();
+    assert_eq!(
+        installed.outcome.lifecycle.as_ref().unwrap().packages[0].hooks[0].disposition,
+        "executed"
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"built"
+    );
+    let original = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    let tapid_lockfile::NativeSourceEvidence::Verified { package } = &selection
+        .packages()
+        .values()
+        .next()
+        .unwrap()
+        .source_evidence
+    else {
+        panic!("source evidence missing")
+    };
+    assert_eq!(package.derived_hooks().len(), 1);
+    let output = &package.derived_hooks()[0];
+    Store::new(store.clone())
+        .verified_lifecycle_snapshot(
+            &output.key().parse().unwrap(),
+            &output.tree_digest().parse().unwrap(),
+            output.attestation(),
+        )
+        .unwrap();
+    fs::remove_file(&fixture).unwrap();
+    let replay = run(request(InstallMode::CiOffline, None), |_| {}).unwrap();
+    assert_eq!(
+        replay.outcome.lifecycle.as_ref().unwrap().packages[0].hooks[0].disposition,
+        "reused"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        original
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"built"
+    );
+}

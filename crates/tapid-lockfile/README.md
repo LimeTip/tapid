@@ -76,7 +76,11 @@ replace a derived tree with its source tree. Retained hooks use the existing exa
 approval, recipe and store-local attestation verifier before journaled activation;
 replay never executes a missing build. Authenticated replay requires the supported
 Linux toolchain identity. Workspace activation and selection mutation reject pending integration.
-Fresh profile preparation still rejects nonempty approval policies. This is not
+Fresh profile preparation uses the existing lifecycle store transaction for
+approved hooks and records verified source and derived-output evidence in the
+complete selection. Omitted-only approvals require no archives or tools; failed
+authorization, execution or activation retains project rollback. Hook execution
+requires the supported Linux toolchain and containment backend. This is not
 complete install-profile command support. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,
 records typed declaration and package edges, and retains exact peer providers.

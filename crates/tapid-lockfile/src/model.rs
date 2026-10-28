@@ -1403,6 +1403,17 @@ impl LockedPackage {
         self.artifact_url = Some(url.to_owned());
         Ok(())
     }
+    pub(crate) fn replace_dependency_bindings(
+        &mut self,
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<(), LockfileError> {
+        self.dependencies.clear();
+        self.dependency_aliases.clear();
+        for (name, target) in bindings {
+            self.add_alias_dependency(name, target)?;
+        }
+        Ok(())
+    }
     pub fn add_dependency(&mut self, name: &str, key: &str) -> Result<(), LockfileError> {
         let name = name.parse::<PackageName>().map_err(LockfileError::Domain)?;
         let parsed = key.parse::<LockfilePackageKey>()?;

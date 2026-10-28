@@ -72,12 +72,6 @@ pub(super) fn fresh(
     fixture: Option<&Path>,
     mut progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
-    if !policy.approvals().is_empty() {
-        return Err(OperationalError::new(
-            ErrorKind::InvalidRequest,
-            "native selection lifecycle output integration is required before approved hooks",
-        ));
-    }
     let config = crate::registry::RegistryConfig::load(project)
         .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
     let store = Store::new(match store_root {
@@ -116,14 +110,13 @@ fn activate(
     manifest_path: &Path,
     original_manifest: &[u8],
     original_lock: Option<&[u8]>,
-    prepared: online::PreparedNativeProfile,
+    mut prepared: online::PreparedNativeProfile,
     profile: tapid_lockfile::InstallProfile,
     policy: &tapid_runner::DependencyLifecyclePolicy,
     store: &Store,
     replayed: bool,
     mut progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
-    let selection = &prepared.selection;
     let digest = online::root_digest(project)?;
     let activation = session.lock.as_ref().expect("project lock acquired");
     session.journal = Some(
@@ -146,10 +139,9 @@ fn activate(
     let mut lock = prepared.lifecycle_sources(&digest, profile)?;
     let mut layout = prepared.layout(profile)?;
     let mut snapshots = Vec::new();
-    // Discovery and default-denied hook reporting use the established lifecycle
-    // path. Retained output claims must also pass its exact output-list check:
-    // removing an approval cannot silently activate the source tree instead.
-    // This invocation-local graph is never written to tapid.lock.
+    // Replay authenticates existing outputs without executing hooks; fresh
+    // preparation stages approved outputs in the source store transaction.
+    // This invocation-local graph never replaces the complete selection.
     super::super::dependency_scripts::apply(
         project,
         policy,
@@ -159,11 +151,34 @@ fn activate(
         &mut layout.input,
         &mut layout.trees,
         store,
-        None,
+        if replayed {
+            None
+        } else {
+            Some(&mut prepared.transaction)
+        },
         activation,
         &mut snapshots,
         &mut session.outcome,
     )?;
+    if !replayed {
+        let mut evidence = BTreeMap::new();
+        for (key, package) in lock.packages() {
+            let mut package = package.clone();
+            let url = match &prepared.selection.packages()[key].source_evidence {
+                tapid_lockfile::NativeSourceEvidence::Pending { artifact_url, .. } => artifact_url,
+                tapid_lockfile::NativeSourceEvidence::Verified { package } => package
+                    .artifact_url()
+                    .ok_or("native registry source has no artifact URL")?,
+                tapid_lockfile::NativeSourceEvidence::Workspace { .. } => {
+                    return Err("native lifecycle preparation requires registry sources".into());
+                }
+            };
+            package.set_artifact_url(url)?;
+            evidence.insert(key.clone(), package);
+        }
+        prepared.selection.record_verified_sources(evidence)?;
+    }
+    let selection = &prepared.selection;
     session.mutated = true;
     if !replayed {
         let lock_path = project.join("tapid.lock");

@@ -408,3 +408,81 @@ fn copied_selections_require_existing_verified_evidence() {
     let round_trip = NativeSelection::from_json(&selection.to_json().unwrap()).unwrap();
     assert_eq!(selection.to_json().unwrap(), round_trip.to_json().unwrap());
 }
+
+#[test]
+fn recording_verified_source_preserves_selection_and_rejects_changed_pins_atomically() {
+    let tool = key("tool");
+    let key = key("pkg");
+    let wire = json!({
+        "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+        "rootManifestDigest":format!("sha256-{}", "a".repeat(64)),
+        "workspaceManifestDigests":{},"declarations":[],
+        "packages":{
+            key.clone():package(json!({"tool":{"kind":"optional","target":tool}}),json!({})),
+            tool.clone():package(json!({}),json!({}))
+        }
+    });
+    let mut selection = NativeSelection::from_json(&wire.to_string()).unwrap();
+    let mut source = tapid_lockfile::LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "pkg",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    source
+        .set_artifact_url("https://registry.npmjs.org/changed.tgz")
+        .unwrap();
+    let before = selection.to_json().unwrap();
+    assert!(
+        selection
+            .record_verified_sources(std::collections::BTreeMap::from([(
+                key.clone(),
+                source.clone()
+            )]))
+            .is_err()
+    );
+    assert_eq!(selection.to_json().unwrap(), before);
+    source
+        .set_artifact_url("https://registry.npmjs.org/pkg.tgz")
+        .unwrap();
+    // The materialized lifecycle graph can lack optional bindings and contain
+    // provider bindings. Neither may overwrite the complete typed edge map.
+    source
+        .add_alias_dependency("extra-provider", &tool)
+        .unwrap();
+    assert!(
+        selection
+            .record_verified_sources(std::collections::BTreeMap::from([
+                (key.clone(), source.clone()),
+                (tool.clone(), source.clone()),
+            ]))
+            .is_err()
+    );
+    assert_eq!(selection.to_json().unwrap(), before);
+    selection
+        .record_verified_sources(std::collections::BTreeMap::from([(key.clone(), source)]))
+        .unwrap();
+    let after: Value = serde_json::from_str(&selection.to_json().unwrap()).unwrap();
+    assert_eq!(
+        after["packages"][&key]["sourceEvidence"]["state"],
+        "verified"
+    );
+    assert_eq!(after["declarations"], wire["declarations"]);
+    assert_eq!(after["packages"][&tool], wire["packages"][&tool]);
+    let tapid_lockfile::NativeSourceEvidence::Verified { package } =
+        &selection.packages()[&key].source_evidence
+    else {
+        panic!("verified source missing")
+    };
+    assert_eq!(
+        package.dependencies(),
+        &std::collections::BTreeMap::from([("tool".into(), tool)])
+    );
+    assert_eq!(
+        after["packages"][&key]["dependencies"],
+        wire["packages"][&key]["dependencies"]
+    );
+}
