@@ -72,8 +72,10 @@ Native preparation preserves retained derived-hook claims in its invocation-loca
 lifecycle graph without selecting their output trees or authenticating the claims.
 Retained derived outputs without matching approvals fail the existing lifecycle
 replay output-list check before activation; removing policy cannot silently
-replace a derived tree with its source tree. Approvals for retained package names
-(including stale pins), workspace activation and selection mutation reject pending integration.
+replace a derived tree with its source tree. Retained hooks use the existing exact
+approval, recipe and store-local attestation verifier before journaled activation;
+replay never executes a missing build. Authenticated replay requires the supported
+Linux toolchain identity. Workspace activation and selection mutation reject pending integration.
 Fresh profile preparation still rejects nonempty approval policies. This is not
 complete install-profile command support. Unlike `Lockfile`, it
 separates pending registry archive pins from verified source/derived evidence,

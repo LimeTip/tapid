@@ -102,6 +102,268 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
 }
 
 #[test]
+fn native_replay_checks_exact_retained_hook_approval_before_activation() {
+    let (project, fixture, original) = native_selection_fixture();
+    let registry = include_bytes!("../../tests/fixtures/native-profile-hook.json");
+    project.write("registry.json", registry).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(registry).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let mut selection: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let key = selection["packages"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    selection["packages"][&key]["sourceEvidence"]["artifactIntegrity"] = integrity.into();
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let store = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::default(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Ci,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    run(request(), |_| {}).unwrap();
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let installed = fs::read(project.path().join("node_modules/shared/package.json")).unwrap();
+    // The archive pin matches; the script pin deliberately does not. No tool or
+    // containment backend should be consulted before exact authorization fails.
+    let policy = native_approval_policy(&project, "shared").replace(INTEGRITY, integrity);
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure.error.to_string().contains("script"),
+        "{}",
+        failure.error
+    );
+    let report = failure.outcome.lifecycle.as_ref().unwrap();
+    assert_eq!(
+        report.packages[0].hooks[0].reason,
+        Some("approval_rejected")
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/package.json")).unwrap(),
+        installed
+    );
+    assert!(!project.path().join("unused-sh").exists());
+}
+
+#[test]
+fn native_replay_authenticates_retained_hook_outputs_or_rejects_unsupported_toolchains() {
+    use sha2::{Digest, Sha256};
+    let (project, fixture, original) = native_selection_fixture();
+    let registry = include_bytes!("../../tests/fixtures/native-profile-hook.json");
+    project.write("registry.json", registry).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(registry).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let key = wire["packages"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    wire["packages"][&key]["sourceEvidence"]["artifactIntegrity"] = integrity.into();
+    let original = wire.to_string();
+    project.write("tapid.lock", original.as_bytes()).unwrap();
+    let store_path = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::default(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store_path),
+        mode: InstallMode::CiOffline,
+        registry_fixture: None,
+        allow_unverified_registry_artifacts: false,
+    };
+    let store = Store::new(store_path.clone());
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    let prepared = online::prepare_native_locked(
+        &selection,
+        &store,
+        &crate::registry::RegistryConfig::default(),
+        Some(&fixture),
+        project.path(),
+        false,
+        tapid_lockfile::InstallProfile::default(),
+    )
+    .unwrap();
+    let mut evidence = prepared
+        .lifecycle_sources(
+            &online::root_digest(project.path()).unwrap(),
+            tapid_lockfile::InstallProfile::default(),
+        )
+        .unwrap();
+    prepared.transaction.publish().unwrap().commit().unwrap();
+    let mut source = evidence.packages()[&key].clone();
+    source
+        .set_artifact_url("https://registry.npmjs.org/shared-1.0.0.tgz")
+        .unwrap();
+    wire["packages"][&key]["sourceEvidence"] =
+        serde_json::to_value(tapid_lockfile::NativeSourceEvidence::Verified {
+            package: Box::new(source),
+        })
+        .unwrap();
+    let original = wire.to_string();
+    project.write("tapid.lock", original.as_bytes()).unwrap();
+    // Seed trusted store evidence through its authentication API. No dependency
+    // code executes: the source hook exits 97 if it is accidentally launched.
+    let tool = b"pinned replay-only tool";
+    project.write("unused-sh", tool).unwrap();
+    let script_digest = format!("sha256-{:x}", Sha256::digest(b"exit 97"));
+    let tool_digest = format!("sha256-{:x}", Sha256::digest(tool));
+    let policy_text = native_approval_policy(&project, "shared")
+        .replace(INTEGRITY, integrity)
+        .replacen(&format!("sha256-{}", "0".repeat(64)), &script_digest, 1)
+        .replace(&format!("sha256-{}", "0".repeat(64)), &tool_digest);
+    project
+        .write("tapid.lifecycle.toml", policy_text.as_bytes())
+        .unwrap();
+    let policy = tapid_runner::DependencyLifecyclePolicy::parse(policy_text.as_bytes()).unwrap();
+    let system = match tapid_runner::dependency_toolchain_identity() {
+        Ok(identity) => identity,
+        Err(cause) if cfg!(target_os = "linux") => {
+            panic!("Linux toolchain identity must be available: {cause}")
+        }
+        Err(_) => {
+            project.write("node_modules/KEEP", b"unchanged").unwrap();
+            let failure = run(request(), |_| {}).unwrap_err();
+            assert!(
+                failure
+                    .error
+                    .to_string()
+                    .contains("toolchain identity currently requires Linux"),
+                "{}",
+                failure.error
+            );
+            assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+            assert_eq!(
+                fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+                b"unchanged"
+            );
+            assert_eq!(
+                fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+                original
+            );
+            return;
+        }
+    };
+    let mut toolchain = Sha256::new();
+    toolchain.update(system.as_bytes());
+    for value in ["sh", policy.approvals()[0].tools()[0].path(), &tool_digest] {
+        toolchain.update((value.len() as u64).to_le_bytes());
+        toolchain.update(value.as_bytes());
+    }
+    let graph = serde_json::to_string(&(
+        evidence.source_graph().to_json().unwrap(),
+        BTreeMap::<String, Vec<tapid_lockfile::DerivedHookOutput>>::new(),
+        Vec::<tapid_lockfile::DerivedHookOutput>::new(),
+    ))
+    .unwrap();
+    let recipe = policy.derived_key(
+        policy.approvals().first().unwrap(),
+        &format!("sha256-{:x}", toolchain.finalize()),
+        &graph,
+    );
+    project
+        .write(
+            "output/package.json",
+            br#"{"name":"shared","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project
+        .write("output/built.txt", b"authenticated output")
+        .unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&project.path().join("output")).unwrap();
+    store
+        .activate_verified_tree(&digest.parse().unwrap(), &project.path().join("output"))
+        .unwrap();
+    let attestation = store
+        .attest_lifecycle_output(&recipe.parse().unwrap(), &digest.parse().unwrap())
+        .unwrap();
+    evidence
+        .set_derived_hooks(
+            &key,
+            vec![
+                tapid_lockfile::DerivedHookOutput::new("install", &recipe, &digest, &attestation)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+    let mut package = evidence.packages()[&key].clone();
+    package
+        .set_artifact_url("https://registry.npmjs.org/shared-1.0.0.tgz")
+        .unwrap();
+    wire["packages"][&key]["sourceEvidence"] =
+        serde_json::to_value(tapid_lockfile::NativeSourceEvidence::Verified {
+            package: Box::new(package),
+        })
+        .unwrap();
+    let accepted = wire.to_string();
+    project.write("tapid.lock", accepted.as_bytes()).unwrap();
+    let report = run(request(), |_| {}).unwrap();
+    let lifecycle = report.outcome.lifecycle.unwrap();
+    assert_eq!(lifecycle.reused, 1);
+    assert_eq!(lifecycle.executed, 0);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"authenticated output"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        accepted
+    );
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    // Reassigning the output to a forged tag must not activate source fallback.
+    wire["packages"][&key]["sourceEvidence"]["package"]["derivedHooks"][0]["attestation"] =
+        format!("hmac-sha256-{}", "0".repeat(64)).into();
+    let forged = wire.to_string();
+    project.write("tapid.lock", forged.as_bytes()).unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("missing or mismatched verified lifecycle output"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"authenticated output"
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        forged
+    );
+}
+
+#[test]
 fn native_replay_rejects_retained_outputs_without_approval_through_lifecycle_validation() {
     let (project, fixture, original) = native_selection_fixture();
     let store_path = project.path().join("store");
@@ -190,7 +452,7 @@ fn native_replay_rejects_retained_outputs_without_approval_through_lifecycle_val
 }
 
 #[test]
-fn native_replay_ignores_approvals_for_omitted_packages_but_rejects_retained_approvals() {
+fn native_replay_omitted_approval_needs_no_sources_but_restoration_does() {
     let (project, fixture, _) = native_selection_fixture();
     project
         .write(
@@ -228,13 +490,7 @@ fn native_replay_ignores_approvals_for_omitted_packages_but_rejects_retained_app
     assert_eq!(report.package_count, 0);
     let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
     let failure = run(request(tapid_lockfile::InstallProfile::default()), |_| {}).unwrap_err();
-    assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);
-    assert!(
-        failure
-            .error
-            .to_string()
-            .contains("lifecycle output integration")
-    );
+    assert_eq!(failure.error.kind, ErrorKind::InvalidData);
     assert_eq!(failure.outcome.state, ChangeState::Unchanged);
     assert_eq!(
         fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
