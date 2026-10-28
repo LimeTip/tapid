@@ -418,8 +418,12 @@ pub fn canonical_tree_digest_without_root_entry(root: &Path, entry: &str) -> io:
 fn hash_file_contents<R: Read>(reader: &mut R, length: u64, hasher: &mut Sha256) -> io::Result<()> {
     let mut remaining = length;
     let mut buffer = [0u8; 65_536];
+    #[cfg(test)]
+    let _buffer_observation = digest_observation::Buffer::new(buffer.len());
     while remaining != 0 {
         let chunk_size = remaining.min(65_536) as usize;
+        #[cfg(test)]
+        digest_observation::update(|stats| stats.max_request = stats.max_request.max(chunk_size));
         let count = reader.read(&mut buffer[..chunk_size])?;
         if count == 0 {
             return Err(io::Error::new(
@@ -429,14 +433,78 @@ fn hash_file_contents<R: Read>(reader: &mut R, length: u64, hasher: &mut Sha256)
         }
         hasher.update(&buffer[..count]);
         remaining -= count as u64;
+        #[cfg(test)]
+        digest_observation::update(|stats| stats.bytes += count as u64);
     }
+    #[cfg(test)]
+    digest_observation::update(|stats| stats.max_request = stats.max_request.max(1));
     if reader.read(&mut buffer[..1])? != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "tree file grew during hashing",
         ));
     }
+    #[cfg(test)]
+    digest_observation::update(|stats| stats.files += 1);
     Ok(())
+}
+
+// Test-only counters observe the production buffer lifetime and read operations.
+#[cfg(test)]
+mod digest_observation {
+    use std::cell::RefCell;
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct Stats {
+        pub files: usize,
+        pub bytes: u64,
+        pub max_request: usize,
+        pub live: usize,
+        pub peak: usize,
+    }
+    thread_local! {
+        static ACTIVE: RefCell<Option<Stats>> = const { RefCell::new(None) };
+    }
+    pub(super) fn update(f: impl FnOnce(&mut Stats)) {
+        ACTIVE.with(|slot| {
+            if let Some(stats) = slot.borrow_mut().as_mut() {
+                f(stats);
+            }
+        });
+    }
+    pub(super) struct Scope;
+    impl Scope {
+        pub fn new() -> Self {
+            ACTIVE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                assert!(slot.is_none(), "nested digest observation");
+                *slot = Some(Stats::default());
+            });
+            Self
+        }
+        pub fn stats(&self) -> Stats {
+            ACTIVE.with(|slot| slot.borrow().unwrap())
+        }
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    pub(super) struct Buffer(usize);
+    impl Buffer {
+        pub fn new(capacity: usize) -> Self {
+            update(|stats| {
+                stats.live += capacity;
+                stats.peak = stats.peak.max(stats.live);
+            });
+            Self(capacity)
+        }
+    }
+    impl Drop for Buffer {
+        fn drop(&mut self) {
+            update(|stats| stats.live -= self.0);
+        }
+    }
 }
 
 fn tree_digest(root: &Path, excluded: Option<&str>) -> io::Result<String> {
@@ -860,6 +928,225 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn set_test_mode(path: &Path, executable: bool) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+            )
+            .unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = (path, executable);
+    }
+
+    #[test]
+    fn canonical_tree_digest_preserves_mixed_tree_framing_and_creation_order() {
+        // Independent oracle: sorted (path, type, payload) records are
+        // (.tapid-executable-modes,3,"nested/tool\n"), (empty,0,""),
+        // (nested,1,""), (nested/plain,0,"abc"), (nested/tool,2,"run").
+        // Each record uses u64 BE path length, path, u8 type, u64 BE payload
+        // length, payload. Golden computed separately with Node crypto SHA-256.
+        for reverse in [false, true] {
+            let project = tapid_test_support::TempProject::new("mixed").unwrap();
+            let mut entries = [
+                ("empty", b"".as_slice()),
+                ("nested/plain", b"abc"),
+                ("nested/tool", b"run"),
+            ];
+            if reverse {
+                entries.reverse();
+            }
+            for (name, bytes) in entries {
+                let path = project.write(name, bytes).unwrap();
+                set_test_mode(&path, name == "nested/tool");
+            }
+            project
+                .write(EXECUTABLE_MANIFEST, b"nested/tool\n")
+                .unwrap();
+            assert_eq!(
+                canonical_tree_digest(project.path()).unwrap(),
+                "sha256-7245266f58bb5b6ca4bd53294be0d88537f457b6e3c6665b2a375f8e04e5e5d2"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_tree_digest_excludes_root_marker_and_binds_manifest() {
+        let project = tapid_test_support::TempProject::new("reserved").unwrap();
+        let path = project.write("plain", b"abc").unwrap();
+        set_test_mode(&path, false);
+        let original = canonical_tree_digest(project.path()).unwrap();
+        project.write(".tapid-tree", b"ignored").unwrap();
+        assert_eq!(original, canonical_tree_digest(project.path()).unwrap());
+        project.write(EXECUTABLE_MANIFEST, b"").unwrap();
+        let manifest = canonical_tree_digest(project.path()).unwrap();
+        assert_ne!(original, manifest);
+        fs::create_dir(project.path().join("nested")).unwrap();
+        let with_directory = canonical_tree_digest(project.path()).unwrap();
+        let nested_marker = project.write("nested/.tapid-tree", b"included").unwrap();
+        set_test_mode(&nested_marker, false);
+        assert_ne!(
+            with_directory,
+            canonical_tree_digest(project.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_tree_digest_rejects_invalid_manifest() {
+        let project = tapid_test_support::TempProject::new("manifest").unwrap();
+        for name in ["a", "b"] {
+            project.write(name, b"").unwrap();
+        }
+        for (contents, message) in [
+            ("a", "executable mode manifest is not newline terminated"),
+            ("a\na\n", "executable mode manifest is not canonical"),
+            ("b\na\n", "executable mode manifest is not canonical"),
+        ] {
+            project
+                .write(EXECUTABLE_MANIFEST, contents.as_bytes())
+                .unwrap();
+            let error = canonical_tree_digest(project.path()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(error.to_string(), message);
+        }
+        fs::remove_file(project.path().join(EXECUTABLE_MANIFEST)).unwrap();
+        fs::create_dir(project.path().join(EXECUTABLE_MANIFEST)).unwrap();
+        let error = canonical_tree_digest(project.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "executable mode manifest is not a regular file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_tree_digest_rejects_manifest_mode_mismatch() {
+        let project = tapid_test_support::TempProject::new("mismatch").unwrap();
+        let path = project.write("tool", b"run").unwrap();
+        for executable in [false, true] {
+            set_test_mode(&path, executable);
+            project
+                .write(
+                    EXECUTABLE_MANIFEST,
+                    if executable { b"" } else { b"tool\n" },
+                )
+                .unwrap();
+            let error = canonical_tree_digest(project.path()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(
+                error.to_string(),
+                "file executable mode differs from the canonical manifest"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_tree_digest_rejects_special_files() {
+        let project = tapid_test_support::TempProject::new("sock").unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(project.path().join("s")).unwrap();
+        let error = canonical_tree_digest(project.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "special file in extracted tree");
+    }
+
+    #[test]
+    fn digest_observation_counts_empty_and_nonempty_files() {
+        let scope = digest_observation::Scope::new();
+        for mut bytes in [b"".as_slice(), b"abc"] {
+            let length = bytes.len() as u64;
+            hash_file_contents(&mut bytes, length, &mut Sha256::new()).unwrap();
+        }
+        let stats = scope.stats();
+        assert_eq!(
+            (stats.files, stats.bytes, stats.live, stats.peak),
+            (2, 3, 0, 65_536)
+        );
+    }
+
+    #[test]
+    fn digest_observation_cleans_up_after_errors() {
+        struct Failure;
+        impl Read for Failure {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected"))
+            }
+        }
+        for length in [0, 1] {
+            let scope = digest_observation::Scope::new();
+            assert!(hash_file_contents(&mut Failure, length, &mut Sha256::new()).is_err());
+            assert_eq!(scope.stats().live, 0);
+            assert_eq!(scope.stats().files, 0);
+        }
+        for (mut bytes, length) in [(b"a".as_slice(), 2), (b"ab".as_slice(), 1)] {
+            let scope = digest_observation::Scope::new();
+            assert!(hash_file_contents(&mut bytes, length, &mut Sha256::new()).is_err());
+            assert_eq!(scope.stats().live, 0);
+            assert_eq!(scope.stats().files, 0);
+        }
+        assert_eq!(digest_observation::Scope::new().stats().bytes, 0);
+    }
+
+    #[test]
+    fn digest_observation_restores_scope_after_unwind() {
+        struct Panics;
+        impl Read for Panics {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("injected");
+            }
+        }
+        let scope = digest_observation::Scope::new();
+        assert!(
+            std::panic::catch_unwind(|| hash_file_contents(&mut Panics, 1, &mut Sha256::new()))
+                .is_err()
+        );
+        assert_eq!(scope.stats().live, 0);
+        assert!(std::panic::catch_unwind(digest_observation::Scope::new).is_err());
+        drop(scope);
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _scope = digest_observation::Scope::new();
+                panic!("scope unwind");
+            })
+            .is_err()
+        );
+        assert_eq!(digest_observation::Scope::new().stats().peak, 0);
+    }
+
+    #[test]
+    fn canonical_tree_digest_bounds_content_buffer_for_large_trees() {
+        use std::io::Write;
+        for bytes_per_file in [262_144usize, 4_194_304] {
+            let project = tapid_test_support::TempProject::new("buffer").unwrap();
+            {
+                let chunk = [b'x'; 8192];
+                for index in 0..32 {
+                    let path = project
+                        .write(format!("group{}/file{index}", index % 4), b"")
+                        .unwrap();
+                    set_test_mode(&path, false);
+                    let mut file = fs::File::create(path).unwrap();
+                    for _ in 0..bytes_per_file / chunk.len() {
+                        file.write_all(&chunk).unwrap();
+                    }
+                }
+            }
+            let scope = digest_observation::Scope::new();
+            canonical_tree_digest(project.path()).unwrap();
+            let stats = scope.stats();
+            assert_eq!(stats.files, 32);
+            assert_eq!(stats.bytes, (32 * bytes_per_file) as u64);
+            assert_eq!(stats.max_request, 65_536);
+            assert_eq!(stats.peak, 65_536);
+            assert_eq!(stats.live, 0);
+            println!("content-buffer observation: {stats:?}");
+        }
+    }
+
     /// Hidden GNU/PAX metadata must exhaust the same bound for tar and tar.gz,
     /// and failed validation cleans staging under normal filesystem conditions.
     #[test]
