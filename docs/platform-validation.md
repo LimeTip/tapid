@@ -351,8 +351,29 @@ activate the class, the server must report exactly one dispatch, and a fresh
 client must observe class unavailability after server exit. Native execution is
 pending. This is a prerequisite for a
 [LocalServer32 command](https://learn.microsoft.com/en-us/windows/win32/com/localserver32),
-not an SCM-launched control: the test still starts the server directly. Disposable
-registry registration, SCM supervision and paired LPAC attempts remain required.
+not an SCM-launched control: that test still starts the server directly.
+
+`scm_com_server_activates_and_removes_its_exact_registration` adds a separate
+host-positive SCM launch control. It opens the existing per-user CLSID parent,
+creates only a fresh GUID key and its `LocalServer32` child, and installs the
+existing Windows serializer's quoted Rust test-executable command. An attempted
+collision must fail without replacing the original command; subsequent host
+root and descendant activation must still reach the original server exactly
+twice. No direct server
+spawn occurs in this control. The server publishes readiness and its PID in the
+disposable directory. The parent retains a process handle, requests stop, waits
+at most five seconds for exit, and checks both the exit code and final dispatch
+count. Unwinding attempts termination through that held handle; the server's
+internal deadline also bounds attempts that fail before readiness. This is
+trusted-fixture supervision, not Job ownership or broker containment.
+
+Cleanup deletes only the exact two newly created registry keys, child first,
+checks their absence, and requires class unavailability from a fresh client.
+It neither creates nor deletes shared registry ancestors. A missing per-user
+CLSID parent or an execution context that ignores per-user COM registration
+fails the host-positive control rather than falling back to machine registration.
+Native Windows execution of this control remains pending. Paired LPAC SCM
+activation, complete broker authority closure and recipe identity remain required.
 
 The capability comparison's host-positive helper has a ten-second native process
 wait. Timeout terminates the helper and requires termination observation within

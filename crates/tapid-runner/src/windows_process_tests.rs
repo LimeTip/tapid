@@ -39,6 +39,125 @@ fn bounded_host_output(
 }
 
 #[test]
+fn scm_com_server_activates_and_removes_its_exact_registration() {
+    let project = tapid_test_support::TempProject::new("scm-com-server").unwrap();
+    let class = super::com_probe::unique_class();
+    let executable = std::env::current_exe().unwrap();
+    let program: Vec<_> = executable.as_os_str().encode_wide().collect();
+    let arguments = [
+        std::ffi::OsString::from("--tapid-test-com-server"),
+        std::ffi::OsString::from(&class),
+        project.path().as_os_str().to_owned(),
+    ];
+    let arguments: Vec<Vec<u16>> = arguments
+        .iter()
+        .map(|arg| arg.encode_wide().collect())
+        .collect();
+    let command =
+        super::super::super::serialize_windows_command_line_units(&program, &arguments, false)
+            .unwrap();
+    let command = String::from_utf16(&command[..command.len() - 1]).unwrap();
+    let mut registration = super::registry_probe::LocalServerRegistration::new(&class, &command);
+    // A collision must not replace the command or take ownership of its key.
+    assert!(
+        std::panic::catch_unwind(|| {
+            super::registry_probe::LocalServerRegistration::new(&class, "invalid-collision-command")
+        })
+        .is_err()
+    );
+    let mut client = std::process::Command::new(&executable);
+    client
+        .args([
+            "--exact",
+            &format!(
+                "{}::provider_helper",
+                module_path!().split_once("::").unwrap().1
+            ),
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "provider-host")
+        .env("TAPID_TEST_COM_DESCENDANT", "1")
+        .env("TAPID_TEST_COM_CLASS", &class);
+    // There is no direct server spawn: this request must cause SCM activation.
+    let activated = bounded_host_output(&mut client, 5_000).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let pid: u32 = loop {
+        if let Some(pid) = std::fs::read_to_string(project.path().join("ready"))
+            .ok()
+            // The newline is a completion marker: never interpret a partially
+            // written decimal PID as a different process to supervise.
+            .and_then(|text| text.strip_suffix('\n').and_then(|pid| pid.parse().ok()))
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "SCM server readiness was not published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    // The isolated trusted fixture publishes its PID in its private directory.
+    // Hold a process handle before requesting shutdown; never signal a PID later.
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+    struct ServerProcess(HANDLE);
+    impl Drop for ServerProcess {
+        fn drop(&mut self) {
+            unsafe {
+                if WaitForSingleObject(self.0, 0) == WAIT_TIMEOUT {
+                    TerminateProcess(self.0, 1);
+                    WaitForSingleObject(self.0, 5_000);
+                }
+                CloseHandle(self.0);
+            }
+        }
+    }
+    let server = ServerProcess(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+            0,
+            pid,
+        )
+    });
+    assert_ne!(server.0, 0, "open SCM fixture process");
+    assert!(
+        activated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&activated.stdout).contains("com:descendant:activated"));
+    assert!(String::from_utf8_lossy(&activated.stdout).contains("com:local-server:activated"));
+    assert!(project.path().join("ready").is_file());
+    project.write("stop", b"").unwrap();
+    assert_eq!(
+        unsafe { WaitForSingleObject(server.0, 5_000) },
+        WAIT_OBJECT_0,
+        "SCM fixture must exit after revocation"
+    );
+    let mut exit_code = 1;
+    assert_ne!(unsafe { GetExitCodeProcess(server.0, &mut exit_code) }, 0);
+    assert_eq!(exit_code, 0);
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("completed")).unwrap(),
+        "2"
+    );
+    registration.cleanup();
+    client
+        .env("TAPID_TEST_MARKER", "com-revoked")
+        .env_remove("TAPID_TEST_COM_DESCENDANT");
+    let revoked = bounded_host_output(&mut client, 5_000).unwrap();
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&revoked.stdout).contains("com:local-server:class-unavailable")
+    );
+}
+
+#[test]
 fn standalone_com_server_activates_and_revokes_its_supplied_class() {
     let project = tapid_test_support::TempProject::new("standalone-com-server").unwrap();
     let class = super::com_probe::unique_class();

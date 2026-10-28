@@ -49,6 +49,113 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
+// Per-user COM registration is deliberately separate from RegistryInput: its
+// default REG_SZ value is interpreted by SCM as an executable command.
+pub struct LocalServerRegistration {
+    parent: isize,
+    owned: Vec<String>,
+}
+impl LocalServerRegistration {
+    pub fn new(class: &str, command: &str) -> Self {
+        assert_eq!(class.len(), 32);
+        assert!(class.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!command.contains('\0'));
+        let class = format!(
+            "{{{}-{}-{}-{}-{}}}",
+            &class[..8],
+            &class[8..12],
+            &class[12..16],
+            &class[16..20],
+            &class[20..]
+        );
+        // Open the shared parent without creating it. This fixture must never
+        // leave newly created ancestor keys behind on a fresh user hive.
+        let mut parent = 0;
+        assert_eq!(
+            unsafe {
+                RegOpenKeyExW(
+                    -2147483647,
+                    wide("Software\\Classes\\CLSID").as_ptr(),
+                    0,
+                    0x2001f,
+                    &mut parent,
+                )
+            },
+            0
+        );
+        let root = class;
+        let mut registration = Self {
+            parent,
+            owned: Vec::new(),
+        };
+        for path in [root.clone(), format!("{root}\\LocalServer32")] {
+            let mut key = 0;
+            let mut disposition = 0;
+            let status = unsafe {
+                RegCreateKeyExW(
+                    registration.parent,
+                    wide(&path).as_ptr(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    3,
+                    std::ptr::null(),
+                    &mut key,
+                    &mut disposition,
+                )
+            };
+            assert_eq!(status, 0);
+            if disposition != 1 {
+                unsafe { RegCloseKey(key) };
+                panic!("never modify a preexisting COM registration");
+            }
+            registration.owned.push(path);
+            let status = if registration.owned.len() == 2 {
+                let command = wide(command);
+                unsafe {
+                    RegSetValueExW(
+                        key,
+                        std::ptr::null(),
+                        0,
+                        1,
+                        command.as_ptr().cast(),
+                        u32::try_from(command.len() * 2).unwrap(),
+                    )
+                }
+            } else {
+                0
+            };
+            unsafe { RegCloseKey(key) };
+            assert_eq!(status, 0);
+        }
+        registration
+    }
+    pub fn cleanup(&mut self) {
+        while let Some(path) = self.owned.last() {
+            assert_eq!(
+                unsafe { RegDeleteKeyW(self.parent, wide(path).as_ptr()) },
+                0
+            );
+            let mut key = 0;
+            let status = unsafe { RegOpenKeyExW(self.parent, wide(path).as_ptr(), 0, 1, &mut key) };
+            if status == 0 {
+                unsafe { RegCloseKey(key) };
+            }
+            assert_eq!(status, 2, "exact COM registration key must be absent");
+            self.owned.pop();
+        }
+    }
+}
+impl Drop for LocalServerRegistration {
+    fn drop(&mut self) {
+        for path in self.owned.iter().rev() {
+            // Never recursively delete or remove the shared CLSID parent.
+            unsafe { RegDeleteKeyW(self.parent, wide(path).as_ptr()) };
+        }
+        unsafe { RegCloseKey(self.parent) };
+    }
+}
+
 pub struct RegistryInput {
     pub path: String,
     active: bool,

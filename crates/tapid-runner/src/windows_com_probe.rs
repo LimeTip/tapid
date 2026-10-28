@@ -227,11 +227,14 @@ static STANDALONE_SERVER_INIT: extern "C" fn() = {
             let root = std::path::Path::new(&arguments[3]);
             // Parent owns this disposable directory. Create-new rejects stale
             // readiness evidence instead of silently overwriting it.
-            std::fs::OpenOptions::new()
+            use std::io::Write;
+            let mut ready = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(root.join("ready"))
                 .unwrap();
+            writeln!(ready, "{}", std::process::id()).unwrap();
+            drop(ready);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while !root.join("stop").exists() {
                 assert!(
@@ -241,6 +244,7 @@ static STANDALONE_SERVER_INIT: extern "C" fn() = {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             server.cleanup();
+            std::fs::write(root.join("completed"), server.creations().to_string()).unwrap();
             println!("com:standalone:creations={}", server.creations());
         });
         std::process::exit(if result.is_ok() { 0 } else { 1 });
