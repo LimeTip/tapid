@@ -495,3 +495,62 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Locked source cache preparation
+
+`cache fetch` uses operation `cache`, action `fetch`, and the version-1 envelope.
+Project changes remain `unchanged` with empty changed paths even when source
+publication succeeds. Selected `data.project_path` and `data.store_path` use
+lossless native-path encoding. `target` is the current OS/architecture/libc and
+`scope` is `complete_locked_graph`. `readiness` is `verified_sources_only`;
+`lifecycle_ready` is always false, meaning lifecycle readiness is not established.
+`sources_available` is true only after successful final guarded verification.
+
+`logical_instances` counts external lock entries, retaining peer, platform and
+source identity. `unique_trees` counts distinct required source digests when the
+ordinary graph is validated; it is null when unknown. Workspace members are
+local graph inputs. `available_at_completion` counts required trees verified at
+final inspection, or is null when that inspection was not completed.
+
+`counters` contains these measured, overlapping dimensions (do not sum them):
+
+| Field | Unit and meaning |
+| --- | --- |
+| `already_verified_trees` | Distinct required source trees verified during initial cache inspection |
+| `fetched_verified_trees` | Distinct retrieved sources verified during this invocation, even if staging/publication later fails |
+| `newly_published_trees` | Destinations introduced by this invocation and successfully committed, excluding competing publication |
+| `network_retrievals` | Completed source retrievals over the network, not HTTP request/redirect counts |
+| `fixture_reads`, `local_reads` | Completed fixture artifact retrievals and local archive retrievals, respectively; excludes preflight/recheck hashing |
+| `unavailable_instances` | Logical entries whose exact content could not be obtained |
+| `unsupported_instances` | Logical entries excluded by the explicit input-support contract |
+| `failed_instances` | Logical entries whose verification or security checks failed |
+| `unprocessed_instances` | Logical entries not yet inspected/prepared when processing stopped |
+
+Preflight failures can leave entries unprocessed without identifying a failing
+individual instance (for example a stale root manifest). Final availability is
+not inferred from these counters. `store_effects.newly_committed_trees` separately
+reports committed source destinations; it does not describe temporary staging.
+
+`entries` emits at most 100 logical entries with sanitized, bounded `package`,
+`tree_digest`, and `state`. States are `already_verified`, `fetched_verified`,
+`unavailable`, `unsupported`, `failed`, or `unprocessed`; the first two describe
+observed work, not a promise of later availability. `entries_total`,
+`entries_emitted`, and `entries_omitted` make sampling explicit. Text truncation
+uses the envelope's existing `truncated_fields` pointers.
+
+Exit 0 requires all supported sources to verify at completion. Other operational
+outcomes exit 1 and retain completed counters. Unsupported imports, receipts,
+pins and targets use `CACHE_FETCH_IMPORTED_LOCK_UNSUPPORTED`,
+`CACHE_FETCH_MISSING_RECEIPT`, `CACHE_FETCH_MISSING_PIN`, and
+`CACHE_FETCH_TARGET_UNSUPPORTED`. Existing typed codes distinguish missing or
+invalid/stale locks, registry identity/configuration and credential failures,
+integrity/archive rejection, unavailable content, changed inputs and pending
+recovery. Errors have `phase: operation`. Store contention uses `STORE_BUSY` and
+`retry: after_contention` when the underlying operation reports contention;
+ordinary publication retains its existing wait-for-readers behavior. Parse
+errors retain exit 2. Human output uses the same report and counters.
+
+This supplies the completed-work foundation shared with frozen hydration for
+issue #268, not its full install-reporting scope. Fetch does not prepare hooks,
+authenticated outputs or keys, and cannot establish cold-CI lifecycle, runtime
+or toolchain readiness. It never writes a lock, including imported receipts.

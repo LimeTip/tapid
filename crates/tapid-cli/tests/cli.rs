@@ -9,6 +9,8 @@ use std::{
 };
 use tapid_lockfile::Lockfile;
 
+#[path = "cli_cases/cache_fetch.rs"]
+mod cache_fetch_tests;
 #[path = "cli_cases/cache.rs"]
 mod cache_tests;
 #[path = "cli_cases/ci.rs"]

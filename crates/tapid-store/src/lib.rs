@@ -1069,6 +1069,8 @@ impl StoreTransaction {
                 }
                 return Err(error);
             }
+            #[cfg(test)]
+            tests::publication_checkpoint(published.len());
         }
         let sync_result = if trees_dir.exists() {
             sync_directory(&trees_dir).and_then(|()| {
@@ -1141,6 +1143,11 @@ impl Drop for StorePublication {
 }
 
 impl StorePublication {
+    /// Destinations introduced by this publication, excluding competing publishers.
+    /// Count these as durable effects only after `commit` succeeds.
+    pub fn newly_published_trees(&self) -> usize {
+        self.published.len()
+    }
     /// Creates a digest-verified replay snapshot while this publication holds
     /// the exclusive store lock, without trying to acquire a second lock.
     /// The snapshot remains independent if the publication rolls back.

@@ -51,12 +51,48 @@ tapid tool list [--tools-dir <PATH>]
 tapid tool update <PACKAGE> [--tools-dir <PATH>]
 tapid tool remove <PACKAGE> [--tools-dir <PATH>]
 tapid cache info [--store-dir <PATH>]
+tapid cache fetch [--project-dir <PATH>] [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | --result-file <PATH>] [-- <ARGS>...]
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+`tapid cache fetch` prepares verified source trees from an existing ordinary
+`tapid.lock`, without installing. It validates current declarations, workspace
+membership, registry identities, target contexts and exact artifact evidence,
+including for warm entries. It prepares the complete external graph recorded by
+the lock on the current target, using existing routing and exact-origin
+credentials. Copied file archives and immutable HTTPS Git pins retain their
+existing verification contracts; Git references are never refreshed. Workspace
+members remain local inputs. There is no foreign-target or workspace-subset mode.
+
+Fetch never resolves versions, changes declarations or lock bytes (including
+receipt-only writes), creates an activation lock, runs hooks, recovers project
+transactions, or changes installed layouts. Pending project recovery blocks it.
+Imported schema-8 locks, including imports with receipts, and missing tree
+receipts or exact pins are unsupported. Existing frozen installation can
+establish imported receipts, but also activates an installation.
+
+For source-only packages, run `tapid cache fetch --store-dir <PATH>`, retain that
+store, then `tapid install --offline --frozen --store-dir <PATH>`. Fetch success
+establishes source availability at completion, not lifecycle readiness. It does
+not prepare authenticated lifecycle outputs or their authentication key. Cold CI
+must separately retain the required outputs, key, approvals, policy, compatible
+runtime and toolchain prerequisites. Fetch does not require lifecycle-policy
+parsing or discover executable hook plans.
+
+Inputs are rechecked before publication and completion; this detects observed
+changes without excluding arbitrary concurrent editors. Store publication uses
+existing locking and verification. Retrieval failures discard newly staged
+trees. Process interruption can leave independently verified published trees or
+private staging; standalone publication is not an all-or-nothing graph crash
+transaction. Retry reuses verified content. Final verification holds a store
+read guard, but later explicit eviction can invalidate preparation. Human and
+version-1 JSON reports distinguish completed retrieval and verification from
+newly committed publication, unavailable or unsupported instances and untouched
+work. They never infer downloads from lock size.
 
 `tapid manifest validate` rejects symlinks and other non-regular files before
 parsing. Root scripts perform the same check before loading run policy or

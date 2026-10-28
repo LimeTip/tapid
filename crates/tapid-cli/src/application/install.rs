@@ -918,6 +918,7 @@ fn perform_install(
             &registry_config,
             registry_fixture,
             &project_dir,
+            &mut online::PreparationObservations::default(),
         )?
     {
         session.mutated = true;
