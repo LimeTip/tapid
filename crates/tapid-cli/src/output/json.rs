@@ -330,6 +330,39 @@ pub(crate) fn completed(outcome: &OperationOutcome, operation: &str, data: Value
     emit(result, 0)
 }
 
+pub(crate) fn selection(
+    report: &crate::application::selection::SelectionReport,
+    operation: &str,
+) -> ExitCode {
+    let mut result = envelope(operation, "success", Some(&report.outcome));
+    let mut data = json!({
+        "mode": "lockfile_only", "packages": report.package_count,
+        "pending_receipts": report.pending_receipts, "imported": report.imported,
+        "metadata_lookups": report.metadata_lookups,
+        "copied_source_preparations": report.copied_source_preparations,
+        "registry_artifact_requests": 0, "store_writes": 0,
+        "hooks_executed": 0, "installed_layout_changed": false,
+        "candidate_exclusions": report.candidate_exclusions,
+    });
+    let mut truncated = result["truncated_fields"]
+        .as_array()
+        .expect("truncation list")
+        .iter()
+        .map(|v| v.as_str().expect("pointer").to_owned())
+        .collect::<Vec<_>>();
+    diagnostic::exclusion_truncation(
+        &report.candidate_exclusions,
+        "/data/candidate_exclusions",
+        &mut truncated,
+    );
+    status_text(&mut data, "/data", &mut truncated);
+    truncated.sort_unstable();
+    truncated.dedup();
+    result["truncated_fields"] = json!(truncated);
+    result["data"] = data;
+    emit(result, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -391,19 +391,16 @@ fn perform_install(
         online::validate_manifest_roots(&project_dir, &candidate)?;
     }
     let lock_path = project_dir.join("tapid.lock");
-    // Preserve preflight rejection without activating anything. Pending recovery
-    // must run first because its snapshot may replace the current lock format.
-    if !crate::filesystem::lifecycle_journal::has_pending(&project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::Recovery, error))?
-        && lock_path.is_file()
-    {
-        let bytes = fs::read(&lock_path)
-            .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
-        parse_install_lock(&bytes, &lock_path, ci, offline, overrides)?;
-    }
+    preflight_replay_lock(&project_dir, ci, offline, overrides)?;
     #[cfg(test)]
     outcome_tests::checkpoint("before_acquire", &project_dir, "")?;
-    session.lock = Some(ActivationLock::acquire(&project_dir)?);
+    session.lock = Some(if ci || offline {
+        ActivationLock::acquire_checked(&project_dir, || {
+            preflight_replay_lock(&project_dir, ci, offline, overrides)
+        })?
+    } else {
+        ActivationLock::acquire(&project_dir)?
+    });
     let activation_lock = session.lock.as_ref().expect("project lock acquired");
     if activation_lock.recovered {
         session
@@ -1002,6 +999,48 @@ fn perform_install(
 pub(super) enum InstallLock {
     Native(Lockfile),
     Imported(tapid_lockfile::ImportedNpmLockfile),
+}
+
+fn preflight_replay_lock(
+    project: &Path,
+    ci: bool,
+    offline: bool,
+    overrides: super::dependency_scripts::ExecutionOverrides,
+) -> Result<(), OperationalError> {
+    let path = project.join("tapid.lock");
+    let pending = crate::filesystem::lifecycle_journal::has_pending(project)
+        .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
+    if pending {
+        if ci || offline {
+            let recovered = crate::filesystem::lifecycle_journal::lock_after_recovery(project)
+                .map_err(|e| OperationalError::new(ErrorKind::Recovery, e))?;
+            let bytes = match recovered {
+                Some(bytes) => Some(bytes),
+                None if path.is_file() => Some(
+                    fs::read(&path)
+                        .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?,
+                ),
+                None => None,
+            };
+            // Only receipt completeness is checked before recovery. Request/format
+            // restrictions still apply to the recovered lock under normal replay,
+            // preserving legacy native/imported recovery and its outcome evidence.
+            if let Some(bytes) = bytes
+                && let InstallLock::Native(lock) =
+                    parse_install_lock(&bytes, &path, false, false, Default::default())?
+                && lock.has_pending_receipts()
+            {
+                lock.validate_replay(lock.root_manifest_digest())?;
+            }
+        }
+        return Ok(());
+    }
+    if path.is_file() {
+        let bytes =
+            fs::read(&path).map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+        parse_install_lock(&bytes, &path, ci, offline, overrides)?;
+    }
+    Ok(())
 }
 
 pub(super) fn parse_install_lock(

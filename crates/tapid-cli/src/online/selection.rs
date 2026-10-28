@@ -191,18 +191,17 @@ impl graph::ResolvedGraph {
     }
 }
 
-// Commands remain gated on imported-lock handling and shared result integration.
-#[allow(dead_code)]
 pub(crate) struct SelectionCandidate {
     pub lock: Lockfile,
     pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,
+    pub copied_source_preparations: usize,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
+    pub warnings: Vec<crate::application::outcome::Warning>,
 }
 
 impl graph::ResolvedGraph {
     /// Consumes the selected graph without fetching artifacts or preparing a store.
-    #[allow(dead_code)]
     pub(super) fn into_selection(
         self,
         root_digest: &str,
@@ -277,6 +276,12 @@ impl graph::ResolvedGraph {
         }
         lock.validate_selection(root_digest)?;
         Ok(SelectionCandidate {
+            warnings: Vec::new(),
+            copied_source_preparations: self
+                .records
+                .values()
+                .filter(|r| r.copied_archive.is_some())
+                .count(),
             lock,
             updated_manifest: self.updated_manifest,
             metadata_lookups: self.metadata_lookups,

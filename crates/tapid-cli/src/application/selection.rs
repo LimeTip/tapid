@@ -5,9 +5,162 @@ use super::{
 };
 use std::{fs, path::Path};
 
+#[derive(Debug)]
+pub(crate) struct SelectionReport {
+    pub outcome: super::outcome::OperationOutcome,
+    pub package_count: usize,
+    pub pending_receipts: usize,
+    pub metadata_lookups: usize,
+    pub copied_source_preparations: usize,
+    pub imported: bool,
+    pub candidate_exclusions: super::outcome::CandidateExclusions,
+}
+
+/// Settle metadata decisions before reading declarations for a new edit plan.
+/// Discovery locates the coordinator; selection is repeated after its recovery.
+pub(crate) fn resolve_workspace(
+    project: &Path,
+    selector: Option<&str>,
+) -> Result<super::lifecycle::WorkspaceSelection, OperationalError> {
+    let workspace = tapid_manifest::Workspace::discover_typed(project)?;
+    let root = workspace
+        .root_path()
+        .parent()
+        .ok_or_else(|| OperationalError::new(ErrorKind::Project, "workspace root has no parent"))?;
+    drop(crate::filesystem::activation::ActivationLock::acquire_metadata(root)?);
+    super::lifecycle::resolve_workspace(project, selector)
+}
+
+/// Persist selections using the same edit plans as installation, without entering activation.
+pub(crate) fn run(
+    project: &Path,
+    target: &Path,
+    before: &tapid_manifest::PackageManifest,
+    after: &tapid_manifest::PackageManifest,
+    fixture: Option<&Path>,
+    update: Option<super::lifecycle::UpdateRequest<'_>>,
+) -> Result<SelectionReport, super::outcome::OperationFailure> {
+    use super::outcome::{ChangeState, OperationFailure, OperationOutcome};
+    let project = fs::canonicalize(project).map_err(|e| {
+        OperationFailure::unchanged(
+            project,
+            OperationalError::from_source(ErrorKind::Project, e),
+        )
+    })?;
+    let target = if target.is_absolute() {
+        target.to_owned()
+    } else {
+        project.join(target)
+    };
+    let result = (|| {
+        drop(crate::filesystem::activation::ActivationLock::acquire_metadata(&project)?);
+        let inputs = Inputs::capture(&project, &target)?;
+        if inputs.manifest(&target) != before {
+            return Err(OperationalError::new(
+                ErrorKind::ProjectChanged,
+                "package.json changed while preparing dependency selections",
+            ));
+        }
+        Ok(inputs)
+    })();
+    let inputs = result.map_err(|e| OperationFailure::unchanged(&project, e))?;
+    let paths = [target.clone(), project.join("tapid.lock")];
+    let snapshot = |path: &std::path::PathBuf| {
+        crate::filesystem::read::read_bounded_file(path, 32 * 1024 * 1024).ok()
+    };
+    let previous = paths.iter().map(snapshot).collect::<Vec<_>>();
+    let mut outcome = OperationOutcome::unchanged(&project);
+    let result = (|| {
+        let imported = inputs
+            .lock
+            .as_deref()
+            .map(|bytes| {
+                super::install::parse_install_lock(
+                    bytes,
+                    &project.join("tapid.lock"),
+                    false,
+                    false,
+                    Default::default(),
+                )
+            })
+            .transpose()?;
+        if before == after
+            && update.is_none()
+            && matches!(imported, Some(super::install::InstallLock::Imported(_)))
+        {
+            let lock = preserve_imported(&project)?;
+            let graph = lock
+                .graph()
+                .map_err(|e| OperationalError::from_source(ErrorKind::Lockfile, e))?;
+            return Ok(SelectionReport {
+                outcome: OperationOutcome::unchanged(&project),
+                package_count: graph.packages.len(),
+                pending_receipts: graph
+                    .packages
+                    .keys()
+                    .filter(|path| lock.verified_tree(path).is_none())
+                    .count(),
+                metadata_lookups: 0,
+                copied_source_preparations: 0,
+                imported: true,
+                candidate_exclusions: Default::default(),
+            });
+        }
+        let candidate = persist_edit(&project, &target, before, after, fixture, update)?;
+        let mut selected_outcome = OperationOutcome::unchanged(&project);
+        selected_outcome.warnings = candidate.warnings;
+        Ok(SelectionReport {
+            outcome: selected_outcome,
+            package_count: candidate.lock.packages().len(),
+            pending_receipts: candidate
+                .lock
+                .packages()
+                .values()
+                .filter(|p| p.source_tree_receipt().is_none())
+                .count(),
+            metadata_lookups: candidate.metadata_lookups,
+            copied_source_preparations: candidate.copied_source_preparations,
+            imported: false,
+            candidate_exclusions: candidate.candidate_exclusions,
+        })
+    })();
+    // Only publication/recovery errors may have changed our outputs. A stale input
+    // belongs to the concurrent writer and must not be reported as our own edit.
+    if result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(|e: &OperationalError| e.kind == ErrorKind::Recovery)
+    {
+        for (path, bytes) in paths.iter().zip(previous) {
+            if snapshot(path) != bytes {
+                outcome.changed_files.push(path.clone());
+            }
+        }
+        if !outcome.changed_files.is_empty() {
+            outcome.state = ChangeState::Committed;
+        }
+    }
+    match result {
+        Ok(mut report) => {
+            outcome.warnings.append(&mut report.outcome.warnings);
+            report.outcome = outcome;
+            Ok(report)
+        }
+        Err(error) => {
+            if error.kind == ErrorKind::Recovery
+                && crate::filesystem::lifecycle_journal::has_pending(&project).unwrap_or(true)
+            {
+                outcome.state = ChangeState::RecoveryRequired;
+            }
+            Err(OperationFailure::with_recovery_paths(
+                error, outcome, None, paths,
+            ))
+        }
+    }
+}
+
 /// Preserve imported placement and receipts without hydration or native conversion.
 /// Explicit dependency edits use native resolution instead of this path.
-#[allow(dead_code)]
 pub(super) fn preserve_imported(
     project: &Path,
 ) -> Result<tapid_lockfile::ImportedNpmLockfile, OperationalError> {
@@ -42,7 +195,7 @@ pub(super) fn preserve_imported(
     Ok(lock)
 }
 
-// Command integration remains gated on imported-lock handling and shared outcomes.
+// Convenience entrypoint for unchanged native manifests in application tests.
 #[allow(dead_code)]
 pub(super) fn persist_native(
     project: &Path,
@@ -58,7 +211,6 @@ pub(super) fn persist_native(
     persist_edit(&project, &target, &manifest, &manifest, fixture, None)
 }
 
-#[allow(dead_code)]
 pub(super) fn persist_edit(
     project: &Path,
     target: &Path,
@@ -123,7 +275,7 @@ pub(super) fn persist_edit(
         target: &target,
         ..request
     });
-    let candidate = crate::online::prepare_selection(
+    let mut candidate = crate::online::prepare_selection(
         &project,
         &manifest,
         workspace,
@@ -134,6 +286,10 @@ pub(super) fn persist_edit(
         inputs.root_digest(),
         update,
     )?;
+    if let (Some(request), Some(previous)) = (update, previous.as_ref()) {
+        candidate.warnings =
+            super::lifecycle::update_change_warnings(&project, request, previous, &candidate.lock)?;
+    }
     let saved = candidate.updated_manifest.as_ref().unwrap_or(after);
     inputs.publish_selection(
         &candidate.lock,

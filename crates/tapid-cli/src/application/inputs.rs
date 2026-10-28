@@ -226,7 +226,6 @@ impl Inputs {
     }
     /// Capture accepted file declarations before source preparation. Rechecking
     /// uses the same containment rules as preparation, including every ancestor.
-    #[allow(dead_code)] // The command writer remains gated on complete command/result integration.
     pub fn capture_copied_files(
         &mut self,
         manifest: &PackageManifest,
@@ -259,7 +258,6 @@ impl Inputs {
     /// Publish an already validated selection, without resolving or entering
     /// store/layout recovery. Proposed manifest bytes remain separate from the
     /// captured original bytes used by the stale-input check and journal.
-    #[allow(dead_code)] // Kept unreachable from commands until result integration is complete.
     pub fn publish_selection(
         &self,
         lock: &Lockfile,
@@ -310,10 +308,12 @@ impl Inputs {
             outputs,
         )
         .map_err(recovery)?;
+        crate::filesystem::activation::test_crash_at("metadata_prepared");
         // The journal now belongs to this operation; check source evidence
         // without interpreting our own prepared record as a stale transaction.
         let result = self.recheck_sources().and_then(|()| {
             journal.mark_committed().map_err(recovery)?;
+            crate::filesystem::activation::test_crash_at("metadata_committed");
             journal.finish().map_err(recovery)
         });
         if let Err(error) = result {

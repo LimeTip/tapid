@@ -319,20 +319,29 @@ enum RecoveryMode {
 
 impl ActivationLock {
     pub(crate) fn acquire(project: &Path) -> Result<Self, OperationalError> {
-        Self::acquire_mode(project, RecoveryMode::Activation)
+        Self::acquire_checked(project, || Ok(()))
+    }
+
+    pub(crate) fn acquire_checked(
+        project: &Path,
+        preflight: impl FnOnce() -> Result<(), OperationalError>,
+    ) -> Result<Self, OperationalError> {
+        Self::acquire_mode(project, RecoveryMode::Activation, preflight)
     }
 
     pub(crate) fn acquire_without_recovery(project: &Path) -> Result<Self, OperationalError> {
-        Self::acquire_mode(project, RecoveryMode::None)
+        Self::acquire_mode(project, RecoveryMode::None, || Ok(()))
     }
 
-    // Kept unreachable from commands until pending native hydration is safe.
-    #[allow(dead_code)]
     pub(crate) fn acquire_metadata(project: &Path) -> Result<Self, OperationalError> {
-        Self::acquire_mode(project, RecoveryMode::Metadata)
+        Self::acquire_mode(project, RecoveryMode::Metadata, || Ok(()))
     }
 
-    fn acquire_mode(project: &Path, mode: RecoveryMode) -> Result<Self, OperationalError> {
+    fn acquire_mode(
+        project: &Path,
+        mode: RecoveryMode,
+        preflight: impl FnOnce() -> Result<(), OperationalError>,
+    ) -> Result<Self, OperationalError> {
         let path = project.join(".tapid-activation.lock");
         let mut file =
             open_lock_file(&path).map_err(|e| OperationalError::new(ErrorKind::Transaction, e))?;
@@ -349,6 +358,7 @@ impl ActivationLock {
                     .context("cannot acquire node_modules activation lock")
             }
         })?;
+        preflight()?;
         let previous_owner = read_bounded_owner(&mut file).map_err(|error| {
             if error.kind() == io::ErrorKind::InvalidData {
                 OperationalError::new(

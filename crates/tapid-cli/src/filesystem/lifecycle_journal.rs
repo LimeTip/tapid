@@ -45,6 +45,71 @@ struct MetadataOutput {
     after: String,
 }
 
+impl Record {
+    fn validate_owner(&self, stale_owner: Option<&str>) -> Result<(), String> {
+        let supported_kind = match self.version {
+            1..=3 => self.kind.is_none(),
+            4 => self.kind.is_some(),
+            _ => false,
+        };
+        if !supported_kind
+            || (self.version == 1 && self.manifest_path != "package.json")
+            || !valid_owner(&self.owner)
+            || stale_owner.is_some_and(|owner| self.owner != owner)
+        {
+            return Err("refusing to recover a lifecycle journal with invalid ownership".into());
+        }
+        Ok(())
+    }
+}
+
+fn decode_snapshot(value: &str) -> Result<Vec<u8>, String> {
+    if value.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES {
+        return Err("oversized metadata output".into());
+    }
+    let bytes = STANDARD.decode(value).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err("oversized metadata output".into());
+    }
+    Ok(bytes)
+}
+
+/// Read the lock bytes recovery would publish, without restoring a journal backup
+/// or changing project/store state. Replay preflight must classify these too.
+pub(crate) fn lock_after_recovery(project: &Path) -> Result<Option<Vec<u8>>, String> {
+    let (path, pending) = inspect_pending(project);
+    if !pending? {
+        return Ok(None);
+    }
+    let bytes = crate::filesystem::read::read_bounded_file(&path, MAX_JOURNAL_BYTES as usize)
+        .map_err(|e| format!("cannot inspect lifecycle journal: {e:?}"))?;
+    let record: Record = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("cannot inspect lifecycle journal: {e}"))?;
+    record.validate_owner(None)?;
+    if record.kind == Some(TransactionKind::Metadata) {
+        let mut locks = record
+            .metadata_outputs
+            .iter()
+            .filter(|o| o.path == "tapid.lock");
+        let output = locks.next();
+        if locks.next().is_some() {
+            return Err("duplicate metadata lock output".into());
+        }
+        let value = output.and_then(|o| {
+            if record.state == State::Committed {
+                Some(o.after.as_str())
+            } else {
+                o.before.as_deref()
+            }
+        });
+        value.map(decode_snapshot).transpose()
+    } else if record.state == State::Prepared && record.lock_existed {
+        decode_snapshot(&record.lock).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MemberActivation {
@@ -146,8 +211,6 @@ fn relative_manifest_path(project: &Path, manifest_path: &Path) -> Result<String
 }
 
 impl LifecycleJournal {
-    // The command writer remains gated on native pending-receipt hydration.
-    #[allow(dead_code)]
     pub(crate) fn prepare_metadata(
         project: &Path,
         owner: &str,
@@ -476,18 +539,7 @@ fn recover_mode(
         fs::read(&path).map_err(|error| format!("cannot read lifecycle journal: {error}"))?;
     let record: Record = serde_json::from_slice(&bytes)
         .map_err(|error| format!("refusing to recover a malformed lifecycle journal: {error}"))?;
-    let supported_kind = match record.version {
-        1..=3 => record.kind.is_none(),
-        4 => record.kind.is_some(),
-        _ => false,
-    };
-    if !supported_kind
-        || (record.version == 1 && record.manifest_path != "package.json")
-        || !valid_owner(&record.owner)
-        || stale_owner.is_some_and(|owner| record.owner != owner)
-    {
-        return Err("refusing to recover a lifecycle journal with invalid ownership".into());
-    }
+    record.validate_owner(stale_owner)?;
     if metadata_only && record.kind != Some(TransactionKind::Metadata) {
         return Err(
             "selection-only execution refuses activation recovery; run tapid install first".into(),
@@ -609,18 +661,8 @@ fn recover_metadata(project: &Path, record: &Record) -> Result<(), String> {
         if path.parent().and_then(|p| p.canonicalize().ok()).as_deref() != path.parent() {
             return Err("metadata output parent is redirected".into());
         }
-        let decode = |value: &str| -> Result<Vec<u8>, String> {
-            if value.len() as u64 > MAX_ENCODED_SNAPSHOT_BYTES {
-                return Err("oversized metadata output".into());
-            }
-            let bytes = STANDARD.decode(value).map_err(|e| e.to_string())?;
-            if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
-                return Err("oversized metadata output".into());
-            }
-            Ok(bytes)
-        };
-        let before = output.before.as_deref().map(decode).transpose()?;
-        let after = decode(&output.after)?;
+        let before = output.before.as_deref().map(decode_snapshot).transpose()?;
+        let after = decode_snapshot(&output.after)?;
         total += before.as_ref().map_or(0, |b| b.len() as u64) + after.len() as u64;
         if total > MAX_SNAPSHOT_BYTES {
             return Err("metadata output set exceeds size limit".into());
@@ -647,6 +689,7 @@ fn recover_metadata(project: &Path, record: &Record) -> Result<(), String> {
     if record.state == State::Committed {
         for (path, bytes) in outputs {
             atomic_replace(&path, &bytes)?;
+            crate::filesystem::activation::test_crash_at("metadata_output_published");
         }
     }
     Ok(())

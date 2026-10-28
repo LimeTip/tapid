@@ -2,6 +2,36 @@ pub(crate) mod install;
 pub(crate) mod json;
 pub(crate) mod preview;
 
+pub(crate) fn selection(
+    report: &crate::application::selection::SelectionReport,
+    operation: &str,
+    json: bool,
+) -> std::process::ExitCode {
+    if json {
+        return self::json::selection(report, operation);
+    }
+    report_warnings(&report.outcome.warnings);
+    println!(
+        "Persisted dependency selections ({} package(s), {} pending verification receipt(s))",
+        report.package_count, report.pending_receipts
+    );
+    println!(
+        "Metadata lookups: {}; copied-source preparations: {}",
+        report.metadata_lookups, report.copied_source_preparations
+    );
+    if report.outcome.changed_files.is_empty() {
+        println!("Project metadata unchanged.");
+    } else {
+        for path in &report.outcome.changed_files {
+            println!("Wrote {}", self::json::text(path.display()).0);
+        }
+    }
+    println!(
+        "Registry artifact requests: 0; store writes: 0; hooks executed: 0; installed layout unchanged."
+    );
+    std::process::ExitCode::SUCCESS
+}
+
 use std::process::ExitCode;
 
 /// Convert a child status to the process status used by the CLI.

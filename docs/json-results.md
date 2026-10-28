@@ -495,3 +495,25 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Lockfile-only selection results
+
+`install`, `add`, `remove`, and `update` with `--lockfile-only` reuse the schema-v1
+success/failure envelope. The additive command-specific data has `mode:
+"lockfile_only"`, `packages`, `pending_receipts`, `imported`, `metadata_lookups`,
+`copied_source_preparations`, and bounded `candidate_exclusions`. Package counts
+exclude local workspace packages. Copied-source preparations count validated copied
+archive records, not Git HTTP requests. Registry metadata lookups use the existing
+resolver counter. Matching imported preservation reports zero lookups/preparations.
+
+`registry_artifact_requests`, `store_writes`, and `hooks_executed` are zero;
+`installed_layout_changed` is false. `lifecycle` remains null because selection
+does not inspect or verify hook execution. `changes.files` and native `changes.paths`
+report only metadata outputs whose bytes changed. A byte-identical result is
+`unchanged`; publication is `committed`. Interrupted publication uses the existing
+recovery states and retry advice, scoped to manifest/lock outputs, with no fabricated
+installed-layout effect. Failures before publication remain unchanged, including
+stale inputs belonging to another writer. `--dry-run --lockfile-only` retains the
+existing preview data and its read-only effects instead of this persistence data.
+Consumers must branch on `data.mode` before interpreting these as install results;
+this additive data shape retains schema version 1.

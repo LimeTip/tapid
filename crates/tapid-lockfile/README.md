@@ -79,10 +79,10 @@ checks before attachment. Pending receipts cannot carry lifecycle output records
 
 `validate_selection` checks manifest binding and replay provenance independently
 of receipt completeness. `validate_replay` additionally requires complete receipts.
-The CLI does not yet expose `--lockfile-only`. Matching ordinary and frozen installs
+The CLI exposes `--lockfile-only` on install/add/remove/update. Matching ordinary and frozen installs
 hydrate pending native receipts from exact pinned artifacts, verifying archive
 integrity, safety and identity before publishing receipts and activating in the
-existing project transaction. Hydration retains schema 11. When no earlier transaction needs recovery, ci/offline
-preflight rejects them before project exclusion or mutation; existing recovery
-still precedes classification of the restored lock. Complete native locks retain their serialization and replay
+existing project transaction. Hydration retains schema 11. ci/offline preflight
+rejects pending receipts before project/store mutation, including lock snapshots
+that interrupted recovery would publish. Complete native locks retain their serialization and replay
 contract. Imported schema 8 remains a separate placement and hydration contract.
