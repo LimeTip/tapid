@@ -66,13 +66,12 @@ impl GraphSnapshot {
 pub(crate) fn resolve(
     project: &Path,
     manifest: &PackageManifest,
-    target: &Path,
-    updated: &PackageManifest,
     fixture: Option<&Path>,
     allow_missing_integrity: bool,
     config: &crate::registry::RegistryConfig,
     previous: Option<&Lockfile>,
     update: Option<UpdateRequest<'_>>,
+    workspace: WorkspaceMaterialization,
 ) -> Result<
     (
         GraphSnapshot,
@@ -82,8 +81,6 @@ pub(crate) fn resolve(
     ),
     OperationalError,
 > {
-    let workspace =
-        workspace_materialization_with_manifest(project, config, Some((target, updated)))?;
     let resolved = graph::resolve_package_graph(
         project,
         manifest,

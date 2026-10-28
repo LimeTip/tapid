@@ -23,7 +23,7 @@ curl -fsSL https://tapid.dev/install.sh | bash
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-The next-release installers, expected for 0.0.11, select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The new public routes and installer copies require the coordinated release cutover; this source README does not establish their deployed state. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
+The generated release installers select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The 0.0.11 rollout introduced these routes; this source README does not establish their current deployed state. See the [administrator lifecycle contract](../../docs/release-distribution.md#administrator-lifecycle-contract) for explicit-path detection and unattended limitations. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
@@ -201,7 +201,7 @@ Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable r
 
 When the installed executable matches the verified release bytes, the command reports that Tapid is already up to date and leaves the executable unchanged. It still downloads and verifies the release before comparing. If network discovery fails and the command uses its recovery cache, it reports that the latest release could not be checked. Cached recovery is reported as a restore or an unchanged executable.
 
-The next-release command, expected for 0.0.11, reads the same `tapid.dev` release record as the installers and verifies its `.sig` TrustEnvelope sidecar against the embedded production keyring before selecting an artifact. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. An explicit injected keyring is reserved for controlled test seams; explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`.
+The upgrade command reads the same `tapid.dev` release record as the installers and verifies its `.sig` TrustEnvelope sidecar against the embedded production keyring before selecting an artifact. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. An explicit injected keyring is reserved for controlled test seams; explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`.
 
 ## Install packages
 
@@ -239,6 +239,29 @@ Lockfile impact describes selecting the shown direct version. An unchanged direc
 A dry run never writes project files, creates an activation lock, recovers transactions, reads or writes the package store, downloads package artifacts, or runs lifecycle scripts. Pending recovery stops the preview. Live resolution may request registry metadata; `--registry-fixture` resolves entirely from local fixture metadata. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without checking whether its artifacts are cached. Output states the network permission, package metadata lookup count, and cache/artifact effects explicitly. A resolved graph does not attest artifact availability, archive validity, generated lifecycle outputs, or the success of a later install. Copied file/Git sources and imported npm locks currently require an ordinary install rather than a resolved preview.
 
 `tapid --json add PACKAGE --dry-run` uses the version 1 command envelope with unchanged project state. `data.preview_kind` is `resolved_graph`; `data.declarations` lists section/name/before/after edits, `data.packages` lists package changes and reasons, `data.root_changes` lists root binding changes, and `data.effects` describes this preview's effects. This is an inspection result, not a saved executable plan. A later command reads current inputs and may resolve different metadata.
+
+Each preview includes `data.starting_state` (receipt `schema_version: 1`), also
+shown in human output. `root_manifest` and `selected_manifest` retain both roles
+and report project-relative paths with SHA-256 identities of the original source
+bytes, including whitespace. `workspace` lists sorted discovered member paths
+and source identities, including unselected members. `lock` explicitly reports
+absence or the exact-byte identity of the native lock parsed for inspection.
+`registry` describes effective routing as semantic configuration, including
+credential environment names but excluding their values. Online metadata access
+may read those credentials. `operation` records mode, update selection/save policy
+and integrity compatibility; `target` records OS, architecture and libc.
+`lifecycle_policy` distinguishes absent/default-deny from a present policy's
+exact-source identity; approvals, environment values and raw policy are not emitted.
+
+Covered inputs and workspace membership are rechecked before success; observable
+changes fail with `PROJECT_CHANGED`. This is a non-atomic observation without an
+activation lock: rechecks cannot detect every edit-and-revert race. Credential
+values, mutable registry contents, artifact availability/bytes, installed/store
+state, hook outputs and runtime assurance are excluded. Fixture results describe
+fixture evidence, not live registry evidence. Network permission is separate from
+observed metadata lookup counts. Equal identities or an unchanged graph establish
+neither verification nor approval, and later resolution may differ. Saved/applyable
+plans remain deferred until a concrete review workflow demonstrates their value.
 
 Lifecycle edits validate the manifest they were planned against after acquiring the project lock. An intervening semantic manifest edit fails with `PROJECT_CHANGED` before writing the override. This protects the planning-to-lock interval for cooperating commands; it does not protect against an uncooperative writer changing files during the transaction.
 
