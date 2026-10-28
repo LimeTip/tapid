@@ -82,7 +82,7 @@ test('current versions succeed with an already-published client absent from the 
   } finally { await f.cleanup(); }
 });
 
-for (const exhausted of [false, true]) test(`registry propagation ${exhausted ? 'exhausts six attempts' : 'retries successfully'} and retains diagnostics`, async () => {
+for (const wrapped of [false, true]) for (const exhausted of [false, true]) test(`${wrapped ? 'wrapped ' : ''}registry propagation ${exhausted ? 'exhausts six attempts' : 'retries successfully'} and retains diagnostics`, async () => {
   const f = await fixture();
   let failures = 0;
   const delays: number[] = [];
@@ -90,7 +90,7 @@ for (const exhausted of [false, true]) test(`registry propagation ${exhausted ? 
     const operation = verifyRegistry({ ...f.options, sleep: async ms => { delays.push(ms); }, run: async (cmd, args, options) => {
       if (args[0] === 'package' && (exhausted || failures === 0)) {
         failures++;
-        throw Object.assign(Error('Cargo registry acquisition failed'), { stderr: 'error: failed to download from https://static.crates.io/crates/tapid-resolver' });
+        throw Object.assign(Error('Cargo registry acquisition failed'), { stderr: wrapped ? 'error: failed to verify package tarball\nCaused by:\n  no matching package named `tapid-registry-client` found' : 'error: failed to download from https://static.crates.io/crates/tapid-resolver' });
       }
       return f.run(cmd, args, options);
     } });
@@ -98,7 +98,11 @@ for (const exhausted of [false, true]) test(`registry propagation ${exhausted ? 
     assert.deepEqual(delays, exhausted ? [10000, 20000, 30000, 40000, 50000] : [10000]);
     const evidence = JSON.parse(await readFile(join(f.options.evidenceDir, 'verification.json'), 'utf8'));
     assert.equal(evidence.commands.filter((c: { status: string }) => c.status === 'failed').length, exhausted ? 6 : 1);
-    assert.match(evidence.commands.find((c: { status: string }) => c.status === 'failed').stderr, /static.crates.io/);
+    assert.match(evidence.commands.find((c: { status: string }) => c.status === 'failed').stderr, wrapped ? /no matching package named/ : /static.crates.io/);
+    assert.equal(evidence.status, exhausted ? 'failed' : 'success');
+    const isolated = f.calls.find(c => c.command === 'cargo');
+    assert(isolated);
+    await assert.rejects(access(isolated.env.CARGO_HOME!));
   } finally { await f.cleanup(); }
 });
 
@@ -174,7 +178,7 @@ test('retains consumer lockfile when a resolved registry identity is rejected', 
   } finally { await f.cleanup(); }
 });
 
-for (const diagnostic of ['error: failed to verify package tarball: no matching package named x found', 'error: an unclassified Cargo failure']) test(`does not retry ${diagnostic}`, async () => {
+for (const diagnostic of ['error: failed to verify package tarball', 'error: an unclassified Cargo failure', 'error: could not compile x\nno matching package named x found', 'error[E0425]: cannot find value\nfailed to download from registry']) test(`does not retry ${diagnostic}`, async () => {
   const f = await fixture();
   try {
     await assert.rejects(verifyRegistry({ ...f.options, sleep: async () => assert.fail('must not retry'), run: async (cmd, args, options) => {

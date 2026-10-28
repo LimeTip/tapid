@@ -126,10 +126,10 @@ export async function verifyRegistry(options: {
         evidence.resolved = { resolver: resolvedResolver.version, registryClient: resolvedClient.version, resolverSource: resolvedResolver.source, registryClientSource: resolvedClient.source, dependencyEdge: `${resolvedResolver.id} -> ${resolvedClient.id}` };
       } catch (error) {
         const last = evidence.commands.at(-1)!;
-        // Only explicit Cargo registry acquisition diagnostics qualify. Package
-        // verification/compilation failures and unclassified errors fail closed.
+        // Explicit acquisition diagnostics qualify even inside Cargo’s package
+        // verification wrapper. Compilation and unclassified failures fail closed.
         const diagnostic = last.stderr;
-        const acquisition = last.status === 'failed' && /(?:failed to download from|failed to get successful HTTP response from|no matching package named|failed to select a version for the requirement)/.test(diagnostic) && !/(?:failed to verify package|could not compile|error\[E\d+\])/.test(diagnostic);
+        const acquisition = last.status === 'failed' && /(?:failed to download from|failed to get successful HTTP response from|no matching package named|failed to select a version for the requirement)/.test(diagnostic) && !/(?:could not compile|error\[E\d+\])/.test(diagnostic);
         if (!acquisition || attempt === 6) throw error;
         await sleep(attempt * 10000);
         continue;
