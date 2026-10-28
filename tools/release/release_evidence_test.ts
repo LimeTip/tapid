@@ -110,7 +110,7 @@ function validateWorkedRecord(record: string): void {
 }
 
 function validateTemplate(template: string): void {
-  for (const field of [...requiredEvidence, ...currentFields, "Generated publication matrix:", matrixColumns]) {
+  for (const field of [...requiredEvidence, ...currentFields, "Generated publication matrix:", matrixColumns, recoveryColumns]) {
     assert(template.includes(field), `missing required release evidence field: ${field}`);
   }
   assert(
@@ -188,6 +188,8 @@ const currentFields = [
   "Approved candidate identity:", "Recovery approvals:",
 ];
 
+const recoveryColumns = "| Recovery run URL/ID/attempt | Workflow implementation commit | Immutable source | Candidate identity | Renewed stable-release approval | Independent reviewer | Timestamp | Approval read-back |";
+
 function validateCurrentRecord(record: string): void {
   for (const field of currentFields) {
     assert(record.split("\n").some((line) => line.startsWith(field) && line.slice(field.length).trim()), `missing ${field}`);
@@ -200,11 +202,17 @@ function validateCurrentRecord(record: string): void {
   const identity = record.match(/^Candidate identity: (.+)$/m)?.[1];
   assert(record.includes(`Approved candidate identity: ${identity}\n`), "approval must bind candidate identity");
   if (!record.includes("Recovery approvals: not applicable")) {
-    const rows = record.split("\n").filter((line) => line.startsWith("Recovery run:"));
+    assert(record.includes(recoveryColumns), "missing recovery table columns");
+    const table = record.slice(record.indexOf(recoveryColumns)).split("\n");
+    const rows = table.slice(2).filter((line) => line.startsWith("|"));
     assert(rows.length > 0, "missing recovery run");
     for (const row of rows) {
-      assertMatch(row, /\| stable-release approved \| reviewer: \S+ \| timestamp: \S+ \| read-back: \S+/);
-      assert(row.endsWith(`| candidate: ${identity}`), "recovery must approve same candidate");
+      const cells = row.split("|").slice(1, -1).map((cell) => cell.trim());
+      assert(cells.length === 8 && cells.every((cell) => cell && !cell.includes("<!--")), "incomplete recovery row");
+      assertMatch(cells[1], /^[0-9a-f]{40}$/);
+      assertMatch(cells[2], /^[0-9a-f]{40}$/);
+      assert(cells[3] === identity, "recovery must approve same candidate");
+      assert(cells[4] === "stable-release approved", "missing renewed approval");
     }
   }
 }
@@ -223,7 +231,9 @@ Approval timestamp: 2026-10-20T12:00:00Z
 Approval result/read-back: stable-release approved at https://example.invalid/approval
 Approved candidate identity: synthetic-candidate-sha256
 Recovery approvals: required for each new run
-Recovery run: https://example.invalid/runs/43 / 43 / 1 | stable-release approved | reviewer: synthetic-reviewer | timestamp: 2026-10-20T13:00:00Z | read-back: https://example.invalid/approval-43 | candidate: synthetic-candidate-sha256
+${recoveryColumns}
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| https://example.invalid/runs/43 / 43 / 1 | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb | synthetic-candidate-sha256 | stable-release approved | synthetic-reviewer | 2026-10-20T13:00:00Z | https://example.invalid/approval-43 |
 `;
 
 test("current lane records coordinator-bound approval and renewed recovery approval", async () => {
@@ -243,6 +253,27 @@ test("current lane records coordinator-bound approval and renewed recovery appro
   }
   assert(template.includes("does not authorize changing protection settings"));
   assert(!template.includes("GitHub publication and crates.io publication were approved independently."));
+});
+
+test("recovery approvals use the template table and reject incomplete rows", async () => {
+  const template = await readFile(templatePath, "utf8");
+  const table = template.slice(template.indexOf("| Recovery run URL/ID/attempt |"), template.indexOf("## GitHub source")).trim();
+  const values = ["https://example.invalid/runs/43 / 43 / 1", "a".repeat(40), "b".repeat(40), "synthetic-candidate-sha256", "stable-release approved", "synthetic-reviewer", "2026-10-20T13:00:00Z", "https://example.invalid/approval-43"];
+  const filled = table.replace(/<!--[^>]*-->/g, () => values.shift()!);
+  const record = currentRecord.slice(0, currentRecord.indexOf(recoveryColumns)) + filled + "\n";
+  validateCurrentRecord(record);
+  const row = filled.split("\n")[2];
+  validateCurrentRecord(record + row.replace("runs/43 / 43", "runs/44 / 44") + "\n");
+  for (let index = 1; index <= 8; index++) {
+    const cells = row.split("|");
+    cells[index] = " ";
+    assertThrows(() => validateCurrentRecord(record.replace(row, cells.join("|"))), /incomplete recovery/);
+  }
+  assertThrows(() => validateCurrentRecord(record.replace(row, "")), /missing recovery run/);
+  assertThrows(() => validateCurrentRecord(record + row.replace("synthetic-candidate-sha256", "other") + "\n"), /same candidate/);
+  for (const column of recoveryColumns.split("|").slice(1, -1)) {
+    assertThrows(() => validateTemplate(template.replace(recoveryColumns, recoveryColumns.replace(column.trim(), "omitted"))), /missing required/);
+  }
 });
 
 const matrixColumns = "| Dependency order | Package | Exact version | Publication status | Final registry read-back |";
