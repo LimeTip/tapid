@@ -179,6 +179,81 @@ impl ProjectEvidence {
         Ok(())
     }
 
+    /// Select against the same root/member composition used by imported replay.
+    /// Manifest declarations restrict eligibility even when npm hoisted another
+    /// member's dependencies into the root installation.
+    pub(super) fn select_imported_command(
+        &self,
+        member: Option<&str>,
+        package: Option<&str>,
+        command: &str,
+    ) -> Result<super::live::LiveCommand, super::selection::SelectionError> {
+        use super::selection::SelectionError;
+        let manifest = self
+            .workspace
+            .select(member)
+            .map_err(SelectionError::InvalidProjectSelection)?;
+        let (root_input, workspace_plan) = self
+            .verify_imported_layout()
+            .map_err(SelectionError::ProjectEvidence)?;
+        let project = self
+            .workspace
+            .select_path(member)
+            .map_err(SelectionError::InvalidProjectSelection)?
+            .parent()
+            .ok_or_else(|| {
+                SelectionError::InconsistentInstallation(
+                    "selected manifest has no directory".into(),
+                )
+            })?;
+        let (project, input, links) = if let Some(layout) = workspace_plan.members.get(project) {
+            (project, &layout.input, &layout.links)
+        } else {
+            // Imported replay omits member layouts when all of the member's
+            // bindings resolve at the root. Do not create one during selection.
+            (self.root.as_path(), &root_input, &workspace_plan.links)
+        };
+        // A member may use a workspace link installed at the root. Preserve the
+        // exact link identity and bind it against its actual containing layout.
+        let mut eligible_links = links.clone();
+        for link in &workspace_plan.links.links {
+            if !eligible_links
+                .links
+                .iter()
+                .any(|local| local.name == link.name)
+            {
+                eligible_links.links.push(link.clone());
+            }
+        }
+        let selection = super::selection::select_manifest_command(
+            input,
+            &eligible_links,
+            manifest,
+            package,
+            command,
+            crate::application::replay::current_platform(),
+        )?;
+        let (project, input, links) = if matches!(&selection.owner,
+            super::selection::CommandOwner::Workspace(link)
+                if !links.links.contains(link))
+        {
+            (self.root.as_path(), &root_input, &workspace_plan.links)
+        } else {
+            (project, input, links)
+        };
+        let plan = tapid_linker::plan_workspace_layout(
+            tapid_linker::ManagedRoot::new(project).map_err(SelectionError::InvalidMapping)?,
+            input.clone(),
+            links,
+            crate::application::replay::current_platform(),
+        )
+        .map_err(SelectionError::InvalidMapping)?;
+        let selected =
+            super::live::bind_live_command(project, &self.root, input, &plan, links, selection)?;
+        self.revalidate().map_err(SelectionError::ProjectEvidence)?;
+        Ok(selected)
+    }
+
     /// Compose exact root/member selection with complete native-layout evidence.
     /// Retaining `self` coordinates observations; this still grants no launch
     /// authority and does not establish lifecycle approval or runtime identity.

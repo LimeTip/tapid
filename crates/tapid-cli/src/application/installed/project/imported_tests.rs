@@ -8,17 +8,35 @@ fn imported_alias_and_member_layouts_reject_relocation_and_changed_receipts() {
     let home = TempHome::new("exec-imported-members-home").unwrap();
     let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"alias":"npm:actual@1.0.0","member":"^1"}}).to_string();
     let member =
-        serde_json::json!({"name":"member","version":"1.0.0","dependencies":{"other":"2.0.0"}})
+        serde_json::json!({"name":"member","version":"1.0.0","dependencies":{"other":"2.0.0"},"bin":{"workspace-tool":"local.js"}})
             .to_string();
+    let consumer = serde_json::json!({"name":"consumer","version":"1.0.0","dependencies":{"member":"^1","alias":"npm:actual@1.0.0"}}).to_string();
     project.write("package.json", root.as_bytes()).unwrap();
     project
         .write("packages/member/package.json", member.as_bytes())
         .unwrap();
+    project
+        .write("packages/consumer/package.json", consumer.as_bytes())
+        .unwrap();
+    project
+        .write("packages/member/local.js", b"console.log(1);\n")
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            project.path().join("packages/member/local.js"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
     let integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
     let npm = serde_json::json!({"lockfileVersion":3,"packages":{
         "":serde_json::from_str::<serde_json::Value>(&root).unwrap(),
         "packages/member":serde_json::from_str::<serde_json::Value>(&member).unwrap(),
+        "packages/consumer":serde_json::from_str::<serde_json::Value>(&consumer).unwrap(),
         "node_modules/member":{"resolved":"packages/member","link":true},
+        "node_modules/consumer":{"resolved":"packages/consumer","link":true},
         "node_modules/alias":{"name":"actual","version":"1.0.0","resolved":"https://registry.npmjs.org/actual/-/actual-1.0.0.tgz","integrity":integrity},
         "packages/member/node_modules/other":{"version":"2.0.0","resolved":"https://registry.npmjs.org/other/-/other-2.0.0.tgz","integrity":integrity}
     }});
@@ -74,13 +92,22 @@ fn imported_alias_and_member_layouts_reject_relocation_and_changed_receipts() {
         )
         .unwrap();
     imported
-        .bind_workspace_manifests(&BTreeMap::from([(
-            "packages/member".into(),
+        .bind_workspace_manifests(&BTreeMap::from([
             (
-                member.clone(),
-                crate::filesystem::atomic::digest_bytes(member.as_bytes()),
+                "packages/member".into(),
+                (
+                    member.clone(),
+                    crate::filesystem::atomic::digest_bytes(member.as_bytes()),
+                ),
             ),
-        )]))
+            (
+                "packages/consumer".into(),
+                (
+                    consumer.clone(),
+                    crate::filesystem::atomic::digest_bytes(consumer.as_bytes()),
+                ),
+            ),
+        ]))
         .unwrap();
     let bytes = imported.to_json().unwrap();
     project.write("tapid.lock", bytes.as_bytes()).unwrap();
@@ -145,6 +172,84 @@ fn imported_alias_and_member_layouts_reject_relocation_and_changed_receipts() {
         std::fs::write(root.join(".tapid-managed"), b"tapid-managed-v1\n").unwrap();
     }
     evidence.verify_imported_layout().unwrap();
+    let selected = evidence
+        .select_imported_command(None, Some("alias"), "tool")
+        .unwrap();
+    assert_eq!(
+        selected.entry,
+        evidence.root.join("node_modules/alias/cli.js")
+    );
+    let selected = evidence
+        .select_imported_command(Some("member"), Some("other"), "tool")
+        .unwrap();
+    assert_eq!(
+        selected.entry,
+        evidence
+            .root
+            .join("packages/member/node_modules/other/cli.js")
+    );
+    assert!(
+        evidence
+            .select_imported_command(Some("member"), Some("alias"), "tool")
+            .is_err()
+    );
+    assert!(
+        evidence
+            .select_imported_command(None, Some("other"), "tool")
+            .is_err()
+    );
+    let selected = evidence
+        .select_imported_command(None, Some("member"), "workspace-tool")
+        .unwrap();
+    assert_eq!(
+        selected.entry,
+        evidence.root.join("packages/member/local.js")
+    );
+    assert!(matches!(
+        selected.selection.owner,
+        super::super::selection::CommandOwner::Workspace(_)
+    ));
+    let selected = evidence
+        .select_imported_command(Some("consumer"), Some("member"), "workspace-tool")
+        .unwrap();
+    assert_eq!(
+        selected.entry,
+        evidence.root.join("packages/member/local.js")
+    );
+    let selected = evidence
+        .select_imported_command(Some("consumer"), Some("alias"), "tool")
+        .unwrap();
+    assert_eq!(
+        selected.entry,
+        evidence.root.join("node_modules/alias/cli.js")
+    );
+    assert!(
+        !evidence
+            .root
+            .join("packages/consumer/node_modules")
+            .exists()
+    );
+    assert!(
+        !evidence
+            .root
+            .join("packages/consumer/.tapid-activation.lock")
+            .exists()
+    );
+    assert!(
+        evidence
+            .select_imported_command(Some("member"), Some("member"), "workspace-tool")
+            .is_err()
+    );
+    assert!(
+        evidence
+            .select_imported_command(Some("unknown"), None, "tool")
+            .is_err()
+    );
+    assert!(matches!(
+        evidence.select_imported_command(None, None, "missing"),
+        Err(super::super::selection::SelectionError::MissingCommand)
+    ));
+
     assert!(
         !evidence
             .root
@@ -157,6 +262,11 @@ fn imported_alias_and_member_layouts_reject_relocation_and_changed_receipts() {
     )
     .unwrap();
     assert!(evidence.verify_imported_layout().is_err());
+    assert!(
+        evidence
+            .select_imported_command(Some("member"), Some("other"), "tool")
+            .is_err()
+    );
     std::fs::rename(
         evidence.root.join("node_modules/other"),
         evidence.root.join("packages/member/node_modules/other"),
@@ -167,6 +277,11 @@ fn imported_alias_and_member_layouts_reject_relocation_and_changed_receipts() {
         .write("packages/member/node_modules/other/cli.js", b"modified")
         .unwrap();
     assert!(evidence.verify_imported_layout().is_err());
+    assert!(
+        evidence
+            .select_imported_command(Some("member"), Some("other"), "tool")
+            .is_err()
+    );
     assert_eq!(
         std::fs::read(evidence.root.join("tapid.lock")).unwrap(),
         bytes.as_bytes()
