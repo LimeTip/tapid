@@ -6,6 +6,8 @@ This bounded model does not implement nested/ancestor peer lookup, multiple plac
 
 # Compatibility matrix
 
+See the [CLI workflow scope ledger](cli-workflow-scope.md) for planned workflow owners, deferred product decisions and pending acceptance evidence.
+
 This matrix distinguishes current implemented behavior from accepted target contracts that are explicitly marked pending. Supported means covered by relevant local contract or runtime tests; an ADR or configured CI job alone is not support evidence. It does not mean full npm compatibility or production readiness.
 
 | Contract | Current behavior | Stable limitation |

@@ -27,6 +27,8 @@ The generated release installers select archives through `https://tapid.dev/rele
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
+The [CLI workflow scope ledger](../../docs/cli-workflow-scope.md) separates current foundations, planned workflows, deferred capabilities and pending support evidence.
+
 ## Commands
 
 ```text
