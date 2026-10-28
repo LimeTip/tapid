@@ -755,3 +755,7 @@ mod authority_tests;
 #[cfg(test)]
 #[path = "windows_registry_probe.rs"]
 mod registry_probe;
+
+#[cfg(test)]
+#[path = "windows_com_probe.rs"]
+mod com_probe;

@@ -142,6 +142,7 @@ fn provider_helper() {
     super::provider_probe::probe(&std::env::var("TAPID_TEST_MARKER").unwrap_or_default());
     if let Ok(marker) = std::env::var("TAPID_TEST_MARKER") {
         probe_com_activation(&marker);
+        super::com_probe::probe(&marker);
     }
 }
 
@@ -159,12 +160,14 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     let mut registry =
         super::registry_probe::RegistryInput::new(root.file_name().unwrap().to_str().unwrap());
     let system_root = std::env::var_os("SystemRoot").unwrap();
+    let mut server = super::com_probe::LocalServer::new();
     let mut host_command = std::process::Command::new(&program);
     host_command
         .args(arguments)
         .env_clear()
         .env("SystemRoot", &system_root)
         .env("TAPID_TEST_REGISTRY", &registry.path)
+        .env("TAPID_TEST_COM_CLASS", &server.class)
         .env("TAPID_TEST_MARKER", "provider-host");
     let host = bounded_host_output(&mut host_command, 10_000).unwrap();
     assert!(
@@ -175,6 +178,12 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     assert!(String::from_utf8_lossy(&host.stdout).contains("provider:host:socket-created"));
     assert!(String::from_utf8_lossy(&host.stdout).contains("registry:host-input:readable"));
     assert!(String::from_utf8_lossy(&host.stdout).contains("com:shell-link:activated"));
+    assert!(String::from_utf8_lossy(&host.stdout).contains("com:local-server:activated"));
+    assert_eq!(
+        server.creations(),
+        1,
+        "host request must reach the Rust server"
+    );
     let program_units: Vec<_> = program.as_os_str().encode_wide().collect();
     let argument_units: Vec<Vec<u16>> = arguments
         .iter()
@@ -189,9 +198,14 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
     let application: Vec<_> = program_units.into_iter().chain(Some(0)).collect();
     let cwd: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
     for registry_read in [true, false] {
+        let creations_before = server.creations();
         let environment = super::super::super::windows_environment_block_units(
             &std::collections::BTreeMap::from([
                 (std::ffi::OsString::from("SystemRoot"), system_root.clone()),
+                (
+                    std::ffi::OsString::from("TAPID_TEST_COM_CLASS"),
+                    std::ffi::OsString::from(&server.class),
+                ),
                 (
                     std::ffi::OsString::from("TAPID_TEST_REGISTRY"),
                     std::ffi::OsString::from(&registry.path),
@@ -273,6 +287,12 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         assert!(stdout.contains("provider:contained:socket-"), "{stdout}");
         assert!(stdout.contains("registry:host-input:"), "{stdout}");
         assert!(stdout.contains("com:shell-link:"), "{stdout}");
+        assert!(stdout.contains("com:local-server:"), "{stdout}");
+        assert_eq!(
+            server.creations() - creations_before,
+            u32::from(stdout.contains("com:local-server:activated")),
+            "activation observation must match server-side dispatch"
+        );
         println!("registryRead={registry_read}: {stdout}");
         drop(child);
         job.wait_until_empty(5_000).unwrap();
@@ -280,6 +300,21 @@ fn lpac_provider_initialization_compares_registry_read_and_capability_free_token
         container.cleanup().unwrap();
     }
     registry.cleanup();
+    server.cleanup();
+    let creations_before = server.creations();
+    host_command
+        .env_remove("TAPID_TEST_REGISTRY")
+        .env("TAPID_TEST_MARKER", "com-revoked");
+    let revoked = bounded_host_output(&mut host_command, 10_000).unwrap();
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&revoked.stdout).contains("com:local-server:class-unavailable")
+    );
+    assert_eq!(server.creations(), creations_before);
 }
 
 // Runs only in the disposable helper, after the existing provider probes. No shell

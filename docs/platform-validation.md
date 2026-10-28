@@ -171,7 +171,7 @@ runtime identity or prepared execution authority exists yet.
 | All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
 | Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | The native cross-run control derives each profile folder from the actual child token, writes and rereads a private sentinel, requires its removal after completion, and checks that a second execution gets a different folder and cannot read the previous sentinel. Native execution is pending. Full initial contents and deletion-failure controls remain unresolved. Unique names alone do not identify initial profile bytes or registry state. |
 | Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
-| COM / brokers | Paired host/LPAC in-process ShellLink activation probe; no complete activation or response inventory | Native observations are pending. This samples one in-process class, not local-server/broker access. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
+| COM / brokers | Paired host/LPAC in-process ShellLink and disposable running Rust local-server activation probes; no complete activation or response inventory | Native observations are pending. The local-server control checks dispatch counts and exact registration revocation, but does not cover SCM launch or arbitrary brokers. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
 | Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
 | KnownDLLs / API sets | Windows loader mappings and system runtime are available to the process | Bind mappings, accessible runtime bytes, architecture and OS/backend identity. OS version alone is insufficient. |
 | Side-by-side resolution | Loader may consult manifests and assembly configuration | Bind selected assemblies, manifests, candidates, absence states and precedence; reject unsupported mutable sources. No complete inventory is implemented. |
@@ -289,9 +289,24 @@ and [CoCreateInstance contract](https://learn.microsoft.com/en-us/windows/win32/
 Activation success identifies an additional loader/configuration channel to
 deny or bind; it does not demonstrate that later object methods succeed.
 In-process activation cannot establish local-server or broker closure. An
-isolated Rust local-server fixture with host-positive activation, native paired
-observations, and response/input binding remains required before identity work
-can claim closure. No native results for this additional probe exist yet.
+isolated Rust local-server fixture now extends the same capability comparison.
+The test process registers a fresh GUID with `CoRegisterClassObject`, local-server
+context only and `REGCLS_MULTI_SEPARATE`. Separate helper processes request
+`IID_IUnknown`; host activation must succeed and increment the Rust factory's
+server-side creation count. Each LPAC variant records activation, access denial,
+or class unavailability, and its observation must match the creation-count delta.
+This samples cross-process COM dispatch under the host's default COM security;
+no custom security descriptor, elevation, shell action, or persistent registry
+entry is installed. The inert factory uses atomic reference accounting and exposes
+no host operations. Helpers retain the existing bounded waits/output supervision.
+After both helpers and Jobs exit, normal cleanup checks revocation of the exact
+registration cookie; drop attempts revocation on assertion failure and balances
+COM initialization on the registering thread. A fresh bounded host helper must
+then observe class unavailability with no further server creation. This uses Microsoft's
+[running EXE server contract](https://learn.microsoft.com/en-us/windows/win32/com/registering-a-running-exe-server).
+It does not test SCM launch from registry registration, arbitrary brokers, or
+response/input binding. Native paired observations and authority closure remain
+required before identity work can claim closure. No native results exist yet.
 
 The capability comparison's host-positive helper has a ten-second native process
 wait. Timeout terminates the helper and requires termination observation within
