@@ -45,6 +45,15 @@ fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionErro
     super::super::execute_with_backend(request, &PlatformBackend)
 }
 
+fn project_workload(project: &tapid_test_support::TempProject) -> PathBuf {
+    // Self-executing probes need the same explicit read authority as any target.
+    // Keep the executable outside writable subtrees without granting Cargo's
+    // artifact directory (or the sibling outside-secret fixture).
+    let target = project.path().join("workload");
+    fs::copy(std::env::current_exe().unwrap(), &target).unwrap();
+    fs::canonicalize(target).unwrap()
+}
+
 fn root() -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "tapid-linux-restricted-{}-{}",
@@ -702,6 +711,7 @@ fn managed_tree_propagates_authority_to_detached_reparented_targets() {
         return;
     }
     let project = tapid_test_support::TempProject::new("managed-authority").unwrap();
+    let workload = project_workload(&project);
     let outside = tapid_test_support::TempProject::new("managed-authority-outside").unwrap();
     let secret = outside
         .write("secret", b"synthetic outside secret")
@@ -718,7 +728,7 @@ fn managed_tree_propagates_authority_to_detached_reparented_targets() {
             "managed-authority",
         ])
         .arg(&secret)
-        .arg(std::env::current_exe().unwrap())
+        .arg(workload)
         .arg(TEST)
         .env(ROLE, "driver")
         .env(PROJECT, project.path())
@@ -817,6 +827,7 @@ fn managed_tree_bounds_forwarded_combined_output_and_cleans_writers() {
 fn managed_tree_enforces_memory_limit_with_rust_workload() {
     const WORKLOAD: &str = "TAPID_MANAGED_MEMORY_WORKLOAD";
     if std::env::var_os(WORKLOAD).is_some() {
+        fs::write("started", b"memory workload started").unwrap();
         // Commit pages rather than only reserving virtual address space. Keep
         // every allocation live until the cgroup's memory controller intervenes.
         let mut chunks = Vec::new();
@@ -834,16 +845,18 @@ fn managed_tree_enforces_memory_limit_with_rust_workload() {
         return;
     }
     let project = tapid_test_support::TempProject::new("managed-memory-limit").unwrap();
+    let workload = project_workload(&project);
+    project.write("started", b"").unwrap();
     let policy = SandboxPolicy::new(
         SandboxMode::Required,
-        FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+        FilesystemPolicy::new(vec![".".into()], vec!["started".into()]).unwrap(),
         false,
         vec![WORKLOAD.into()],
         true,
         ExecutionLimits::new(Some(10), Some(4096), Some(32), Some(64 * 1024 * 1024)).unwrap(),
     )
     .unwrap();
-    let req = ExecutionRequest::builder(std::env::current_exe().unwrap())
+    let req = ExecutionRequest::builder(workload)
         .args([
             "--exact",
             "execution::platform_backend::tests::managed_tree_enforces_memory_limit_with_rust_workload",
@@ -857,6 +870,11 @@ fn managed_tree_enforces_memory_limit_with_rust_workload() {
         .unwrap();
     let result = execute(&req).unwrap();
     assert_eq!(result.termination(), &Termination::MemoryLimitExceeded);
+    assert_eq!(
+        fs::read(project.path().join("started")).unwrap(),
+        b"memory workload started",
+        "memory target must reach its workload before controller termination"
+    );
     assert_eq!(
         result.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
@@ -1502,10 +1520,19 @@ fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
             .build()
             .unwrap();
         let error = execute(&req).expect_err("unread output must not silently succeed");
+        eprintln!(
+            "unread-output execution: category={:?}, completion={:?}, error={error}",
+            error.category(),
+            error.completion()
+        );
         assert_eq!(
             error.category(),
             ExecutionErrorCategory::Internal,
             "{error}"
+        );
+        assert!(
+            error.to_string().contains("remained backpressured"),
+            "driver must reach bounded output forwarding: {error}"
         );
         assert_eq!(
             error
@@ -1521,11 +1548,13 @@ fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
         return;
     }
     let project = tapid_test_support::TempProject::new("managed-unread-output").unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let workload = project_workload(&project);
+    let diagnostics = project.path().join("driver-stderr");
+    let mut child = Command::new(workload)
         .args(["--exact", TEST, "--nocapture"])
         .env(DRIVER, project.path())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(fs::File::create(&diagnostics).unwrap())
         .spawn()
         .unwrap();
     // Deliberately retain the unread caller pipe through completion. No reader
@@ -1533,13 +1562,20 @@ fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success(), "unread-output driver failed: {status}");
+            assert!(
+                status.success(),
+                "unread-output driver failed: {status}\n{}",
+                fs::read_to_string(&diagnostics).unwrap()
+            );
             break;
         }
         if std::time::Instant::now() >= deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("ManagedTree completion blocked on the unread caller stdout");
+            panic!(
+                "ManagedTree completion blocked on the unread caller stdout\n{}",
+                fs::read_to_string(&diagnostics).unwrap()
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
