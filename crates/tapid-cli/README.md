@@ -33,6 +33,7 @@ Automation clients can use the compact [agent guide v1](../../docs/agent-guide.m
 tapid init [PATH]
 tapid license
 tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
+tapid audit [--project-dir <PATH>] [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
@@ -446,6 +447,16 @@ Existing npm projects can use `tapid import-package-lock <path>` to preserve sup
 Windows contained runs with network access disabled require one administrator setup: `tapid sandbox install`. Later runs remain unattended as a standard user. Use `tapid sandbox status` to inspect the guard, or `tapid sandbox uninstall` from an administrator terminal when no executions or retained denial filters remain. The LocalSystem service is a persistent, exact-AppContainer-SID deny boundary; explicit network grants retain the existing standard-user broker. See [Windows execution scope](../../docs/windows-tapid-run-scope.md) for native acceptance status and limitations.
 
 ## Inspect a project before operating
+
+`tapid audit [--project-dir PATH] [--json]` currently validates the persisted
+native or imported lock graph, reports recorded subject counts, and returns
+**not checked / provider unavailable (exit 3)**. It cannot yet retrieve reports
+or establish a clean audit, including for empty graphs. It makes zero live
+requests, does not load Cloud credentials, and does not recover pending project
+transactions or touch installed/store content. Invalid or manifest-mismatched
+locks produce typed errors without repair. Exact reachable-occurrence selection,
+provider orchestration, findings output and result-file delivery are pending;
+recorded subject counts are not a completed coverage assessment.
 
 `tapid status [--project-dir PATH] [--workspace NAME] [--json]` inspects local
 project metadata offline. The project directory is the explicit workspace root,

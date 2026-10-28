@@ -1650,6 +1650,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tapid-security-provider"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "tapid-attestations",
+ "tapid-protocol",
+ "tapid-signatures",
+]
+
+[[package]]
 name = "tapid-signatures"
 version = "0.0.4"
 dependencies = [

@@ -31,6 +31,7 @@ crates/
 ├── tapid-protocol
 ├── tapid-signatures
 ├── tapid-attestations
+├── tapid-security-provider
 ├── tapid-transparency
 └── tapid-test-support
 ```
@@ -92,6 +93,9 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-publish`: package packing, publication preparation, staging, and promotion workflows.
 - `tapid-signatures`: signing and signature verification primitives.
 - `tapid-attestations`: artifact-bound provenance, audit claims and authenticated package-security evidence verification.
+- `tapid-security-provider`: explicitly authorized raw-stream retrieval through
+  the shared v2 verifier. No production transport, credential or durable cache
+  lifecycle is enabled yet; this foundation does not establish complete audit coverage.
 - `tapid-transparency`: append-only transparency records and verification foundations.
 - `tapid-test-support`: fixtures, fake registries, adversarial inputs, and shared test utilities. Production crates must not depend on it.
 

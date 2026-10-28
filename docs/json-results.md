@@ -15,6 +15,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `outdated` | Sorted direct dependency entries, with partial metadata outcomes |
 | `explain` | Exact package evidence under `data`; registry metadata or a local snapshot, with optional artifact byte verification |
 | `status` | Read-only local project preflight; blockers and pending recovery retain `data` and exit 1 |
+| `audit` | Read-only persisted graph validation; provider unavailable and exit 3, never a clean assessment |
 | `why` | Dependency explanation paths under `data.paths`; a confirmed empty match returns `data.not_found: true` and exit 1, while a bounded empty search is partial and exits 0 |
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `init` | Creates `package.json` with committed change state; handled failures return a typed error |

@@ -1,0 +1,19 @@
+[package]
+name = "tapid-security-provider"
+version = "0.0.1"
+description = "Authorized retrieval of verified Tapid security evidence"
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+tapid-attestations = { version = "0.0.5", path = "../tapid-attestations" }
+tapid-protocol = { version = "0.0.6", path = "../tapid-protocol" }
+
+[dev-dependencies]
+serde_json = "1"
+tapid-signatures = { version = "0.0.4", path = "../tapid-signatures" }
