@@ -325,3 +325,33 @@ for (const [field, value, result] of [
       assert.equal(report[result].length, 1);
       assert.equal(report[result][0].name, "app");
     }));
+
+test("equal-version instances with overlapping provenance cannot certify parity", async () =>
+  matchingGraphs((npm, tapid) => {
+    const path = join(tapid, "tapid.lock");
+    const lock = json(path);
+    lock.packages["other-app"] = {
+      ...lock.packages.app,
+      registry: "https://other.example",
+      peerContext: "peer@3.0.0",
+    };
+    writeJson(path, lock);
+    const { report, code } = compare(npm, tapid);
+    assert.equal(code, 2);
+    assert.equal(report.qualification.status, "inconclusive");
+    assert.ok(report.qualification.reasons.some(reason => reason.includes("app@1.0.0")));
+  }));
+
+test("workspace links and imported placement records remain explicitly unqualified", async () =>
+  matchingGraphs((npm, tapid) => {
+    const npmLock = json(join(npm, "package-lock.json"));
+    npmLock.packages["node_modules/workspace"] = { link: true, resolved: "packages/workspace" };
+    writeJson(join(npm, "package-lock.json"), npmLock);
+    const tapidLock = json(join(tapid, "tapid.lock"));
+    tapidLock.lockfileVersion = 8;
+    writeJson(join(tapid, "tapid.lock"), tapidLock);
+    const { report, code } = compare(npm, tapid);
+    assert.equal(code, 2);
+    assert.ok(report.qualification.reasons.some(reason => reason.includes("workspace")));
+    assert.ok(report.qualification.reasons.some(reason => reason.includes("schema 8")));
+  }));

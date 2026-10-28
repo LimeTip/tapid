@@ -9,6 +9,7 @@ type Phase = {
   env: Record<string, string>; timeoutMs: number; outputLimit: number;
   prerequisites?: string[]; contains?: string[]; inputs?: string[]; outputs?: string[];
   manualSteps?: string[]; unsupported?: string;
+  readiness?: { url: string; status: number; bodyIncludes: string };
 };
 type Specification = {
   version: 1; id: string; project: string; destination: string;
@@ -21,12 +22,20 @@ type Receipt = {
   output: string; truncated: boolean; assertions: boolean[];
   inputs: Record<string, string>; outputs: Record<string, string>;
   manualSteps: string[];
+  readiness?: Phase['readiness'];
 };
 
 export async function evaluate(spec: Specification) {
   if (spec.version !== 1) throw new Error('Unsupported specification version');
   const seen = new Set<string>();
   for (const p of spec.phases) {
+    if (p.readiness) {
+      const url = new URL(p.readiness.url);
+      if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(url.hostname) ||
+          url.username || url.password || !Number.isInteger(p.readiness.status) ||
+          typeof p.readiness.bodyIncludes !== 'string' || !p.readiness.bodyIncludes)
+        throw new Error('Readiness requires literal HTTP loopback, status and nonempty content assertion');
+    }
     if (!p.env || typeof p.env !== "object" || Array.isArray(p.env) ||
         Object.values(p.env).some(value => typeof value !== "string"))
       throw new Error("An explicit environment of string values is required");
@@ -67,7 +76,7 @@ export async function evaluate(spec: Specification) {
     const start = Date.now();
     const r: Receipt = { id: p.id, outcome: 'failed', command: [p.executable, ...p.args], cwd: p.cwd,
       started: new Date(start).toISOString(), elapsedMs: 0, exit: null, signal: null,
-      reason: null, output: '', truncated: false, assertions: [], inputs: {}, outputs: {}, manualSteps: p.manualSteps ?? [] };
+      reason: null, output: '', truncated: false, assertions: [], inputs: {}, outputs: {}, manualSteps: p.manualSteps ?? [], readiness: p.readiness };
     const blocked = p.prerequisites?.filter(id => report.phases.find(r => r.id === id)?.outcome !== 'passed');
     if (blocked?.length) { r.outcome = 'not-reached'; r.reason = `Prerequisites: ${blocked.join(', ')}`; }
     else if (p.unsupported) { r.outcome = 'unsupported'; r.reason = p.unsupported; }
@@ -80,6 +89,9 @@ export async function evaluate(spec: Specification) {
             detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
           let size = 0;
           const chunks: Buffer[] = [];
+          let closed = false;
+          const probeAbort = new AbortController();
+          let retry: ReturnType<typeof setTimeout> | undefined;
           const kill = () => {
             try { if (child.pid) {
               if (process.platform === 'win32') child.kill('SIGKILL');
@@ -88,6 +100,35 @@ export async function evaluate(spec: Specification) {
             child.stdout.destroy(); child.stderr.destroy();
           };
           const timer = setTimeout(() => { r.reason ??= 'timeout'; kill(); }, p.timeoutMs);
+          const probe = async () => {
+            if (!p.readiness || closed || r.reason) return;
+            try {
+              const response = await fetch(p.readiness.url, {
+                signal: probeAbort.signal, redirect: 'manual',
+              });
+              // Read a bounded response rather than buffering an untrusted HTTP body.
+              let body = '';
+              let bytes = 0;
+              const reader = response.body?.getReader();
+              const decoder = new TextDecoder();
+              if (reader) try {
+                while (true) {
+                  const part = await reader.read();
+                  if (part.done) break;
+                  bytes += part.value.length;
+                  if (bytes > p.outputLimit) break;
+                  body += decoder.decode(part.value, { stream: true });
+                }
+                body += decoder.decode();
+              } finally { await reader.cancel(); }
+              if (!closed && !r.reason && bytes <= p.outputLimit &&
+                  response.status === p.readiness.status && body.includes(p.readiness.bodyIncludes)) {
+                r.reason = 'readiness-satisfied'; kill(); return;
+              }
+            } catch { /* A service may not yet be listening; the phase deadline is authoritative. */ }
+            if (!closed && !r.reason) retry = setTimeout(probe, 100);
+          };
+          if (p.readiness) void probe();
           const collect = (chunk: Buffer) => {
             chunks.push(chunk.subarray(0, Math.max(0, p.outputLimit-size)));
             size += chunk.length;
@@ -96,10 +137,12 @@ export async function evaluate(spec: Specification) {
           child.stdout.on('data', collect); child.stderr.on('data', collect);
           child.once('error', e => { r.reason = `launch: ${e.message}`; });
           child.once('close', (code, signal) => {
+            closed = true; probeAbort.abort(); clearTimeout(retry);
             clearTimeout(timer); kill(); r.exit = code; r.signal = signal;
             // Hide any sensitive suffix cut by the raw byte limit before public export.
             let output = Buffer.concat(chunks).toString('utf8');
             r.assertions = (p.contains ?? []).map(text => output.includes(text));
+            if (p.readiness) r.assertions.push(r.reason === 'readiness-satisfied');
             if (r.truncated) for (const secret of spec.secrets ?? []) {
               for (let n = secret.length - 1; n > 0; n--) if (output.endsWith(secret.slice(0,n))) {
                 output = output.slice(0,-n) + '[REDACTED]'; break;
@@ -109,7 +152,7 @@ export async function evaluate(spec: Specification) {
           });
         });
         for (const path of p.outputs ?? []) r.outputs[path] = digest(path);
-        if (!r.reason && r.exit === 0 && r.assertions.every(Boolean)) r.outcome = 'passed';
+        if (((!r.reason && r.exit === 0) || r.reason === 'readiness-satisfied') && r.assertions.every(Boolean)) r.outcome = 'passed';
         else r.reason ??= r.exit !== 0 ? 'nonzero-exit' : 'assertion';
       } catch (e) { r.reason = String(e); }
     }

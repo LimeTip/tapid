@@ -88,3 +88,62 @@ test('rejects omitted environments before a command can inherit credentials', as
     } as any]}), /explicit environment/);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
+
+test('bounded loopback readiness checks HTTP content and stops the service', async () => {
+  const { createServer } = await import('node:net');
+  const reservation = createServer();
+  await new Promise<void>((resolve, reject) => {
+    reservation.once('error', reject);
+    reservation.listen(0, '127.0.0.1', resolve);
+  });
+  const port = (reservation.address() as import('node:net').AddressInfo).port;
+  await new Promise<void>(resolve => reservation.close(() => resolve()));
+  const dir = mkdtempSync(join(tmpdir(), 'adoption-'));
+  try {
+    const result = await evaluate({version:1,id:'readiness',project:'synthetic',destination:dir,phases:[{
+      id:'start',executable:process.execPath,
+      args:['-e',`require('node:http').createServer((req,res)=>res.end('ready application')).listen(${port},'127.0.0.1')`],
+      cwd:dir,env:{},timeoutMs:3000,outputLimit:1024,
+      readiness:{url:`http://127.0.0.1:${port}/`,status:200,bodyIncludes:'ready application'},
+    }]});
+    assert.equal(result.phases[0].outcome,'passed');
+    assert.equal(result.phases[0].reason,'readiness-satisfied');
+    assert.deepEqual(result.phases[0].assertions,[true]);
+    await assert.rejects(fetch(`http://127.0.0.1:${port}/`));
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('readiness failure stays failed and non-loopback probes reject before launch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'adoption-'));
+  const phase = {id:'start',executable:process.execPath,args:['-e','process.exit(0)'],cwd:dir,env:{},timeoutMs:1000,outputLimit:1024,
+    readiness:{url:'http://127.0.0.1:1/',status:200,bodyIncludes:'ready'}};
+  try {
+    const result = await evaluate({version:1,id:'missing',project:'synthetic',destination:dir,phases:[phase]});
+    assert.equal(result.phases[0].outcome,'failed');
+    assert.deepEqual(result.phases[0].assertions,[false]);
+    await assert.rejects(evaluate({version:1,id:'external',project:'synthetic',destination:dir,phases:[{
+      ...phase,readiness:{...phase.readiness,url:'http://example.com/'},
+    }]}), /literal HTTP loopback/);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+test('pilot command specification rejects changed inputs before invoking npm or application code', { skip: process.platform === 'win32' }, async () => {
+  const { uptimeKumaRun } = await import('../scripts/evaluate-uptime-kuma.ts');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'adoption-pilot-'));
+  const source = join(dir, 'source');
+  mkdirSync(source);
+  writeFileSync(join(source, 'package.json'), '{}');
+  try {
+    const spec = uptimeKumaRun({ source, root:join(dir,'run'), node:process.execPath,
+      npmCli:join(dir,'never-run-npm.js'), tapid:process.execPath,
+      tapidRevision:'a'.repeat(40), env:{} });
+    const result = await evaluate(spec);
+    assert.equal(result.launches,1);
+    assert.equal(result.phases[0].outcome,'failed');
+    assert.match(result.phases[0].output,/Pinned input mismatch/);
+    assert.ok(result.phases.slice(1).every(p=>p.outcome==='not-reached'));
+    assert.ok(result.phases.some(p=>p.id==='add-restore'));
+    assert.ok(result.phases.some(p=>p.id==='update-rollback-start'));
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
