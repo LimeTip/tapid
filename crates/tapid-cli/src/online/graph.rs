@@ -308,10 +308,16 @@ pub(super) fn resolve_package_graph(
         }
     }
     resolving.set(true);
-    let (resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
+    let policy = tapid_resolver::OverridePolicy::new_for_registry(
+        resolution::compile_override_rules(manifest)?,
+        NPM.parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+    )
+    .map_err(OperationalError::from)?;
+    let (resolution, records, candidate_exclusions) = resolution::resolve_with_policy(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
-        &overrides,
+        &policy,
         &mut fetch_records,
         &preferred,
         seed,

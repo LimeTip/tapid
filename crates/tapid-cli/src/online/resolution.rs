@@ -196,78 +196,25 @@ type ResolvedRecords = (
 thread_local! {
     pub(super) static RESOLVER_METADATA_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static RESOLVER_METADATA_VERSION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(super) static RESOLVER_METADATA_PARENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn insert_records<F>(
+fn insert_records(
     records: &mut BTreeMap<PackageRecordKey, PackageRecord>,
     normalized: &mut NormalizedRecords,
     metadata: &mut Vec<RegistryMetadata>,
-    overrides: &BTreeMap<PackageName, Requirement>,
     packages: Vec<PackageRecord>,
-    registry_for_dependency: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
-{
+) -> Result<(), String> {
     let mut inserted_keys = BTreeSet::new();
-    let mut inserted_names = BTreeMap::<String, BTreeSet<PackageName>>::new();
     for package in packages {
-        let registry = package.registry.to_string();
         let key = (
-            registry.clone(),
+            package.registry.to_string(),
             package.name.to_string(),
             package.version.to_string(),
         );
-        inserted_names
-            .entry(registry)
-            .or_default()
-            .insert(package.name.clone());
         normalized.insert(key.clone(), normalize_record(&package));
         records.insert(key.clone(), package);
         inserted_keys.insert(key);
     }
-
-    let mut candidates = BTreeMap::<(String, String), Vec<&PackageRecordKey>>::new();
-    for key in records.keys() {
-        candidates
-            .entry((key.0.clone(), key.1.clone()))
-            .or_default()
-            .push(key);
-    }
-    // Admission uses the effective range, but metadata retains the declaration.
-    // Nested policy stays disabled until admission can use incoming bindings.
-    let optional_requirement =
-        |registry: &PackageSource, name: &PackageName, original: &Requirement| {
-            if registry.as_str() == NPM
-                && let Some(replacement) = overrides.get(name)
-            {
-                return overridden_requirement(name, &original.raw, replacement)
-                    .parse::<Requirement>()
-                    .map_err(|error| error.to_string());
-            }
-            Ok(original.clone())
-        };
-    let candidate_matches = |registry: &PackageSource,
-                             name: &PackageName,
-                             requirement: &Requirement| {
-        candidates
-            .get(&(registry.to_string(), name.to_string()))
-            .into_iter()
-            .flatten()
-            .any(|key| {
-                normalized
-                    .get(*key)
-                    .and_then(|record| record.as_ref().ok())
-                    .is_some()
-                    && records.get(*key).is_some_and(|candidate| {
-                        current_platform_matches(&candidate.platform)
-                            && requirement
-                                .matches_tagged_version(&candidate.version, &candidate.dist_tags)
-                    })
-            })
-    };
-
     let mut additions = BTreeMap::<PackageSource, Vec<PackageVersionMetadata>>::new();
     for key in &inserted_keys {
         let Some(record) = normalized.get(key).and_then(|record| record.as_ref().ok()) else {
@@ -276,26 +223,11 @@ where
         #[cfg(test)]
         RESOLVER_METADATA_VERSION_VISITS.set(RESOLVER_METADATA_VERSION_VISITS.get() + 1);
         let package = records.get(key).expect("record inserted before metadata");
-        let mut package_metadata = record.metadata.clone();
-        for (name, requirement) in &record.optional_dependencies {
-            let actual_name = requirement.package_name(name);
-            let target_registry = registry_for_dependency(&package.registry, actual_name)?;
-            if candidate_matches(
-                &target_registry,
-                actual_name,
-                &optional_requirement(&package.registry, name, requirement)?,
-            ) {
-                package_metadata
-                    .dependencies
-                    .insert(name.clone(), requirement.clone());
-            }
-        }
         additions
             .entry(package.registry.clone())
             .or_default()
-            .push(package_metadata);
+            .push(record.metadata.clone());
     }
-
     for (registry, additions) in additions {
         let registry_index =
             if let Some(index) = metadata.iter().position(|entry| entry.registry == registry) {
@@ -324,41 +256,6 @@ where
             RegistryMetadata::normalize(registry, combined).map_err(|error| error.to_string())?;
     }
 
-    for registry_metadata in metadata {
-        let parent_registry = registry_metadata.registry.clone();
-        for parent in &mut registry_metadata.packages {
-            #[cfg(test)]
-            RESOLVER_METADATA_PARENT_VISITS.set(RESOLVER_METADATA_PARENT_VISITS.get() + 1);
-            let parent_key = (
-                parent_registry.to_string(),
-                parent.name.to_string(),
-                parent.version.to_string(),
-            );
-            let Some(parent_record) = normalized
-                .get(&parent_key)
-                .and_then(|record| record.as_ref().ok())
-            else {
-                continue;
-            };
-            for (name, requirement) in &parent_record.optional_dependencies {
-                let actual_name = requirement.package_name(name);
-                let target_registry = registry_for_dependency(&parent_registry, actual_name)?;
-                if inserted_names
-                    .get(&target_registry.to_string())
-                    .is_some_and(|names| names.contains(actual_name))
-                    && candidate_matches(
-                        &target_registry,
-                        actual_name,
-                        &optional_requirement(&parent_registry, name, requirement)?,
-                    )
-                {
-                    parent
-                        .dependencies
-                        .insert(name.clone(), requirement.clone());
-                }
-            }
-        }
-    }
     Ok(())
 }
 
@@ -548,14 +445,15 @@ pub(super) fn preserve_pinned_record(
     preserved
 }
 
+#[cfg(test)]
 pub(super) fn resolve_with_preferences<R, F>(
     roots: &[Dependency],
-    mut registry_for_dependency: R,
+    registry_for_dependency: R,
     overrides: &BTreeMap<PackageName, Requirement>,
-    mut fetch: F,
+    fetch: F,
     preferred: &tapid_resolver::ResolutionPreferences,
     seed: Vec<PackageRecord>,
-    mut progress: impl FnMut(usize),
+    progress: impl FnMut(usize),
 ) -> Result<ResolvedRecords, OperationalError>
 where
     R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
@@ -575,6 +473,30 @@ where
             .map_err(|error: tapid_core::DomainError| error.to_string())?,
     )
     .map_err(OperationalError::from)?;
+    resolve_with_policy(
+        roots,
+        registry_for_dependency,
+        &policy,
+        fetch,
+        preferred,
+        seed,
+        progress,
+    )
+}
+
+pub(super) fn resolve_with_policy<R, F>(
+    roots: &[Dependency],
+    mut registry_for_dependency: R,
+    policy: &tapid_resolver::OverridePolicy,
+    mut fetch: F,
+    preferred: &tapid_resolver::ResolutionPreferences,
+    seed: Vec<PackageRecord>,
+    mut progress: impl FnMut(usize),
+) -> Result<ResolvedRecords, OperationalError>
+where
+    R: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+    F: FnMut(&PackageSource, &PackageName) -> Result<Vec<PackageRecord>, OperationalError>,
+{
     let mut roots = roots.to_vec();
     let mut fetched = BTreeSet::<(String, String)>::new();
     let mut records = BTreeMap::<PackageRecordKey, PackageRecord>::new();
@@ -613,26 +535,38 @@ where
                 .collect()
         })
     };
-    insert_records(
-        &mut records,
-        &mut normalized,
-        &mut metadata,
-        overrides,
-        seed,
-        &mut registry_for_dependency,
-    )?;
+    insert_records(&mut records, &mut normalized, &mut metadata, seed)?;
 
     loop {
         #[cfg(test)]
         RESOLVER_METADATA_BUILD_COUNT.set(RESOLVER_METADATA_BUILD_COUNT.get() + 1);
 
-        match tapid_resolver::resolve_graph_with_policy(
+        let optional = normalized
+            .iter()
+            .filter_map(|(key, record)| {
+                let record = record.as_ref().ok()?;
+                if record.optional_dependencies.is_empty() {
+                    return None;
+                }
+                let package = records.get(key).expect("normalized package record");
+                Some((
+                    tapid_core::PackageInstanceId::from_source(
+                        package.registry.clone(),
+                        package.name.clone(),
+                        package.version.clone(),
+                    ),
+                    record.optional_dependencies.clone(),
+                ))
+            })
+            .collect();
+        match tapid_resolver::resolve_graph_with_optional_policy(
             &roots,
             &metadata,
             ResolutionOptions::default(),
             |parent, dependency| registry_for_dependency(parent, dependency),
             &preferred,
-            &policy,
+            policy,
+            &optional,
         ) {
             Ok(resolution) => {
                 let mut optional_frontier = BTreeSet::<(PackageSource, PackageName)>::new();
@@ -670,9 +604,7 @@ where
                             &mut records,
                             &mut normalized,
                             &mut metadata,
-                            overrides,
                             fetch(&registry, &name)?,
-                            &mut registry_for_dependency,
                         )?;
                     }
                     continue;
@@ -704,9 +636,7 @@ where
                         &mut records,
                         &mut normalized,
                         &mut metadata,
-                        overrides,
                         fetch(&registry, &name)?,
-                        &mut registry_for_dependency,
                     )?;
                 }
             }
@@ -741,9 +671,7 @@ where
                     &mut records,
                     &mut normalized,
                     &mut metadata,
-                    overrides,
                     fetch(&registry, &name)?,
-                    &mut registry_for_dependency,
                 )?;
             }
             Err(error @ ResolveError::PeerDependency { .. }) => {
@@ -770,9 +698,7 @@ where
                             &mut records,
                             &mut normalized,
                             &mut metadata,
-                            overrides,
                             fetch(&provider.registry, actual_name)?,
-                            &mut registry_for_dependency,
                         )?;
                         continue;
                     }
@@ -806,9 +732,7 @@ where
                         &mut records,
                         &mut normalized,
                         &mut metadata,
-                        overrides,
                         fetch(&registry, &name)?,
-                        &mut registry_for_dependency,
                     )?;
                 } else {
                     let removed = preferred.versions.remove(&(
@@ -882,17 +806,9 @@ where
 pub(crate) fn manifest_overrides(
     manifest: &PackageManifest,
 ) -> Result<BTreeMap<PackageName, Requirement>, String> {
-    // Until optional admission is binding-aware, do not activate targeted rules.
-    for (name, declaration) in manifest.overrides() {
-        if matches!(declaration, tapid_manifest::OverrideDeclaration::Nested(_)) {
-            return Err(format!(
-                "unsupported nested override selector '{name}': targeted resolution is not supported"
-            ));
-        }
-    }
     let rules = compile_override_rules(manifest)?;
     let mut overrides = BTreeMap::new();
-    for rule in &rules {
+    for rule in rules.iter().filter(|rule| rule.parent.is_none()) {
         match overrides.insert(rule.dependency.clone(), rule.replacement.clone()) {
             Some(previous) if previous != rule.replacement => {
                 return Err(format!(

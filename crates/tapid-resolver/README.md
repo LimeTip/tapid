@@ -49,7 +49,15 @@ unchanged. Existing resolution entry points use an empty policy.
 `OverridePolicy::new_for_registry` restricts matches to parents from one exact
 registry origin. The CLI uses this boundary while migrating its existing flat
 npm overrides to edge selection. Raw metadata retains original requirements;
-optional admission checks effective flat ranges before adding eligible edges.
+optional admission uses effective ranges inside the existing traversal.
+
+`resolve_graph_with_optional_policy` additionally accepts normalized optional
+requirements keyed by exact parent identity. Optional names supersede regular
+declarations of the same name. After routing the original actual target and
+applying policy for the incoming binding, the resolver admits an optional edge
+only when supplied eligible metadata contains a matching candidate. Callers own
+platform filtering and incremental metadata fetching; absence is not a mandatory
+edge failure. Optional declarations share the retained-input budget.
 
 The existing traversal registers every reachable exact-package/local-binding
 context, including bindings discovered after expansion. Equivalent outgoing maps
@@ -58,5 +66,5 @@ when candidates would select the same child version. Contexts are deduplicated
 for cycles. Context visits and edge/rule work are bounded at 1,000,000; retained
 policy text and context evidence share the 64 MiB input budget. Successful
 results retain matched rule identifiers and original/effective requirements.
-This resolver interface does not activate nested declarations in the CLI;
-manifest compilation and consumer migration remain separate integration work.
+The CLI compiles active root declarations into this same policy for native
+installation, previews and dependency edits.

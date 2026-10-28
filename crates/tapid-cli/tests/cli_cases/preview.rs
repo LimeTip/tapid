@@ -987,3 +987,241 @@ fn dependency_dry_run_matches_real_operations_on_equivalent_projects() {
         }
     }
 }
+
+#[test]
+fn targeted_override_preview_changes_only_the_matching_parent_without_writes() {
+    let scenario = CliFixture::new("targeted-override-preview");
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"other":"1"},"overrides":{"selected@^1":{"local":"2"}}}"#;
+    scenario.project.write("package.json", manifest).unwrap();
+    let integrity = format!("sha512-{}", STANDARD.encode([1; 64]));
+    let fixture = serde_json::json!({"packages":[
+        {"registry":"https://registry.npmjs.org","name":"parent","version":"1.0.0","integrity":integrity,"artifact":"never-download","dependencies":{"local":"npm:actual@1"}},
+        {"registry":"https://registry.npmjs.org","name":"other","version":"1.0.0","integrity":integrity,"artifact":"never-download","dependencies":{"local":"npm:actual@1"}},
+        {"registry":"https://registry.npmjs.org","name":"actual","version":"1.0.0","integrity":integrity,"artifact":"never-download"},
+        {"registry":"https://registry.npmjs.org","name":"actual","version":"2.0.0","integrity":integrity,"artifact":"never-download"}
+    ]});
+    scenario
+        .project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    let output = scenario
+        .command(&[
+            "--json",
+            "add",
+            "selected@npm:parent@1",
+            "--dry-run",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            "store",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let packages = value["data"]["packages"].as_array().unwrap();
+    let actual = packages
+        .iter()
+        .filter(|package| package["name"] == "actual")
+        .collect::<Vec<_>>();
+    assert_eq!(actual.len(), 2, "{value}");
+    assert!(
+        actual.iter().any(|package| package["version"] == "1.0.0"),
+        "{value}"
+    );
+    assert!(
+        actual.iter().any(|package| package["version"] == "2.0.0"),
+        "{value}"
+    );
+    assert_eq!(
+        fs::read(scenario.project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    for path in [
+        "tapid.lock",
+        "node_modules",
+        "store",
+        ".tapid-activation.lock",
+    ] {
+        assert!(!scenario.project.path().join(path).exists(), "{path}");
+    }
+}
+
+#[test]
+fn targeted_override_install_and_frozen_workspace_replay_keep_alias_identity() {
+    let scenario = CliFixture::new("targeted-workspace-replay");
+    scenario.project.write("package.json", br#"{"name":"app","version":"1.0.0","private":true,"workspaces":["packages/*"],"overrides":{"selected@^1":{"h3-v2":"2.0.0"}}}"#).unwrap();
+    scenario.project.write("packages/member/package.json", br#"{"name":"member","version":"1.0.0","dependencies":{"selected":"npm:alias-parent@1"},"overrides":{"h3-v2":"9"}}"#).unwrap();
+    scenario
+        .project
+        .write(
+            "registry.json",
+            include_bytes!("../fixtures/npm-aliases.json"),
+        )
+        .unwrap();
+    let store = scenario.project.path().join("store");
+    let store = store.to_str().unwrap();
+    let output = scenario
+        .command(&[
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock_bytes = fs::read(scenario.project.path().join("tapid.lock")).unwrap();
+    let lock: serde_json::Value = serde_json::from_slice(&lock_bytes).unwrap();
+    let packages = lock["packages"].as_object().unwrap();
+    let parent = packages
+        .values()
+        .find(|package| package["name"] == "alias-parent")
+        .unwrap();
+    assert!(
+        parent["dependencies"]["h3-v2"]
+            .as_str()
+            .unwrap()
+            .contains("h3@2.0.0"),
+        "{lock}"
+    );
+    assert!(
+        !packages
+            .values()
+            .any(|package| package["name"] == "h3" && package["version"] == "2.0.1-rc.20")
+    );
+    for flag in ["--frozen", "--offline"] {
+        let replay = scenario
+            .command(&["install", flag, "--store-dir", store])
+            .output()
+            .unwrap();
+        assert!(
+            replay.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        assert_eq!(
+            fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+    }
+    scenario
+        .project
+        .write("packages/member/node_modules/KEEP", b"prior member layout")
+        .unwrap();
+    let mut changed: serde_json::Value =
+        serde_json::from_slice(&fs::read(scenario.project.path().join("package.json")).unwrap())
+            .unwrap();
+    changed["overrides"]["selected@^1"]["h3-v2"] = serde_json::json!("1.0.0");
+    let changed = serde_json::to_vec(&changed).unwrap();
+    scenario.project.write("package.json", &changed).unwrap();
+    for flag in ["--frozen", "--offline"] {
+        let stale = scenario
+            .command(&["install", flag, "--store-dir", store])
+            .output()
+            .unwrap();
+        assert!(!stale.status.success(), "{flag}: stale override must fail");
+        assert_eq!(
+            fs::read(scenario.project.path().join("package.json")).unwrap(),
+            changed
+        );
+        assert_eq!(
+            fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+            lock_bytes
+        );
+        assert_eq!(
+            fs::read(
+                scenario
+                    .project
+                    .path()
+                    .join("packages/member/node_modules/KEEP")
+            )
+            .unwrap(),
+            b"prior member layout"
+        );
+    }
+}
+
+#[test]
+fn targeted_override_failed_edits_restore_manifest_lock_and_installed_layout() {
+    for topology in [false, true] {
+        let scenario = CliFixture::new("targeted-edit-rollback");
+        let overrides = if topology {
+            serde_json::json!({"selected":{"h3-v2":"2.0.0"}})
+        } else {
+            serde_json::json!({"selected@^1":{"h3-v2":"2.0.0"},"selected@>=1":{"h3-v2":"1.0.0"}})
+        };
+        let manifest =
+            serde_json::json!({"name":"app","version":"1.0.0","overrides":overrides}).to_string();
+        scenario
+            .project
+            .write("package.json", manifest.as_bytes())
+            .unwrap();
+        scenario
+            .project
+            .write(
+                "registry.json",
+                include_bytes!("../fixtures/npm-aliases.json"),
+            )
+            .unwrap();
+        let store = scenario.project.path().join("store");
+        let store = store.to_str().unwrap();
+        let install = scenario
+            .command(&[
+                "install",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            install.status.success(),
+            "{}",
+            String::from_utf8_lossy(&install.stderr)
+        );
+        let lock = fs::read(scenario.project.path().join("tapid.lock")).unwrap();
+        scenario
+            .project
+            .write("node_modules/KEEP", b"prior installed layout")
+            .unwrap();
+        let mut args = vec!["add", "selected@npm:alias-parent@1"];
+        if topology {
+            args.push("other@npm:alias-parent@1");
+        }
+        args.extend(["--registry-fixture", "registry.json", "--store-dir", store]);
+        let result = scenario.command(&args).output().unwrap();
+        assert!(!result.status.success());
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            error.contains(if topology {
+                "OverrideTopology"
+            } else {
+                "OverrideConflict"
+            }),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(scenario.project.path().join("package.json")).unwrap(),
+            manifest.as_bytes()
+        );
+        assert_eq!(
+            fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+            lock
+        );
+        assert_eq!(
+            fs::read(scenario.project.path().join("node_modules/KEEP")).unwrap(),
+            b"prior installed layout"
+        );
+    }
+}

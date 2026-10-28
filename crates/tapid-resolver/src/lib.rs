@@ -711,9 +711,36 @@ pub fn resolve_graph_with_policy<F>(
     ds: &[Dependency],
     metadata: &[RegistryMetadata],
     options: ResolutionOptions,
+    registry_for_dependency: F,
+    preferred: &ResolutionPreferences,
+    policy: &OverridePolicy,
+) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+{
+    resolve_graph_with_optional_policy(
+        ds,
+        metadata,
+        options,
+        registry_for_dependency,
+        preferred,
+        policy,
+        &BTreeMap::new(),
+    )
+}
+
+/// Resolve optional registry edges using the effective range for each incoming binding.
+/// Callers supply only normalized, platform-eligible metadata. Unavailable optional
+/// candidates are omitted; original alias identities still determine routing.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_graph_with_optional_policy<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
     mut registry_for_dependency: F,
     preferred: &ResolutionPreferences,
     policy: &OverridePolicy,
+    optional: &BTreeMap<RegistryPackageId, BTreeMap<PackageName, Requirement>>,
 ) -> Result<Resolution, ResolveError>
 where
     F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
@@ -736,6 +763,19 @@ where
     bytes = bytes.saturating_add(policy.bytes);
     if bytes > 64 * 1024 * 1024 {
         return Err(ResolveError::MetadataLimitExceeded);
+    }
+    let mut optional_edges = 0usize;
+    for (parent, edges) in optional {
+        optional_edges = optional_edges.saturating_add(edges.len());
+        bytes = bytes.saturating_add(parent.to_string().len());
+        for (name, requirement) in edges {
+            bytes = bytes
+                .saturating_add(name.as_str().len())
+                .saturating_add(requirement.retained_bytes());
+        }
+        if optional_edges > 1_000_000 || bytes > 64 * 1024 * 1024 {
+            return Err(ResolveError::MetadataLimitExceeded);
+        }
     }
     if ds.len() > 100_000 {
         return Err(ResolveError::MetadataLimitExceeded);
@@ -848,7 +888,18 @@ where
             .dependencies;
         let mut package_dependencies = BTreeMap::new();
         let mut dependency_registries = BTreeMap::new();
-        for (dependency, original) in original_dependencies {
+        let optional_dependencies = optional.get(&parent);
+        for (dependency, original) in original_dependencies
+            .iter()
+            .filter(|(name, _)| {
+                optional_dependencies.is_none_or(|edges| !edges.contains_key(*name))
+            })
+            .chain(
+                optional_dependencies
+                    .into_iter()
+                    .flat_map(|edges| edges.iter()),
+            )
+        {
             policy_work = policy_work.saturating_add(1);
             if policy_work > 1_000_000 {
                 return Err(ResolveError::MetadataLimitExceeded);
@@ -874,6 +925,17 @@ where
             } else {
                 (original.clone(), Vec::new())
             };
+            if optional_dependencies.is_some_and(|edges| edges.contains_key(dependency))
+                && !candidate_index
+                    .get(&(registry.clone(), original.package_name(dependency).clone()))
+                    .into_iter()
+                    .flatten()
+                    .any(|candidate| {
+                        effective.matches_tagged_version(&candidate.version, &candidate.dist_tags)
+                    })
+            {
+                continue;
+            }
             dependency_registries.insert(dependency.clone(), registry);
             if !rules.is_empty() {
                 override_matches.push(OverrideMatch {

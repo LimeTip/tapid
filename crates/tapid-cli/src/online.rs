@@ -19,9 +19,8 @@ mod resolution;
 mod update;
 #[cfg(test)]
 use resolution::{
-    RESOLVER_METADATA_BUILD_COUNT, RESOLVER_METADATA_PARENT_VISITS,
-    RESOLVER_METADATA_VERSION_VISITS, metadata_progress_checkpoint, normalize_record,
-    parse_registry_requirement, resolve_with_fetch, resolve_with_fetch_routed,
+    RESOLVER_METADATA_BUILD_COUNT, RESOLVER_METADATA_VERSION_VISITS, metadata_progress_checkpoint,
+    normalize_record, parse_registry_requirement, resolve_with_fetch, resolve_with_fetch_routed,
     resolve_with_overrides,
 };
 pub(crate) use resolution::{manifest_overrides, manifest_roots};

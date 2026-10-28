@@ -463,16 +463,14 @@ fn artifact_progress_is_emitted_at_bounded_completion_checkpoints() {
 }
 
 #[test]
-fn manifest_overrides_rejects_nested_rules_until_contextual_resolution_is_available() {
+fn manifest_roots_accept_targeted_rules_without_replacing_the_parent() {
     let manifest = PackageManifest::parse(
-        r#"{"name":"root","version":"1.0.0","overrides":{"parent":{"child":"2"}}}"#,
-    )
-    .unwrap();
-    let error = manifest_overrides(&manifest).unwrap_err();
-    assert!(
-        error.contains("unsupported nested override selector 'parent'"),
-        "{error}"
-    );
+        r#"{"name":"root","version":"1.0.0","dependencies":{"parent":"1"},"overrides":{"parent@^1":{"child":"2"}}}"#,
+    ).unwrap();
+    assert!(manifest_overrides(&manifest).unwrap().is_empty());
+    let roots = manifest_roots(&manifest).unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].requirement.raw, "1");
 }
 
 #[test]
@@ -622,7 +620,7 @@ fn deep_required_frontier_normalizes_each_version_once() {
 
 #[test]
 fn one_packument_updates_parent_metadata_once_per_version() {
-    RESOLVER_METADATA_PARENT_VISITS.set(0);
+    RESOLVER_METADATA_VERSION_VISITS.set(0);
     let registry: PackageSource = NPM.parse().unwrap();
     let root = Dependency::new(registry, "large".parse().unwrap(), "*".parse().unwrap());
     let version_count = 256;
@@ -636,11 +634,7 @@ fn one_packument_updates_parent_metadata_once_per_version() {
     .unwrap();
 
     assert_eq!(resolution.selected[0].version.to_string(), "1.0.255");
-    assert!(
-        RESOLVER_METADATA_PARENT_VISITS.get() <= version_count * 2,
-        "one packument caused {} parent metadata visits",
-        RESOLVER_METADATA_PARENT_VISITS.get()
-    );
+    assert_eq!(RESOLVER_METADATA_VERSION_VISITS.get(), version_count);
 }
 
 #[test]
@@ -1714,6 +1708,74 @@ fn flat_override_optional_admission_uses_effective_range_without_rewriting_metad
             assert_eq!(result.dependencies[0].child.version.to_string(), "2.0.0");
             assert_eq!(result.override_matches[0].original.raw, "npm:actual@1");
             assert_eq!(result.override_matches[0].effective.raw, "npm:actual@2");
+        }
+        assert_eq!(
+            records[&(NPM.into(), "parent".into(), "1.0.0".into())].optional_dependencies["local"],
+            "npm:actual@1"
+        );
+    }
+}
+
+#[test]
+fn nested_optional_alias_uses_binding_effective_range_during_incremental_resolution() {
+    for candidate_state in [0, 1, 2] {
+        let available = candidate_state == 1;
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","overrides":{"selected@1":{"local":"2"}}}"#,
+        )
+        .unwrap();
+        let policy = tapid_resolver::OverridePolicy::new_for_registry(
+            resolution::compile_override_rules(&manifest).unwrap(),
+            NPM.parse().unwrap(),
+        )
+        .unwrap();
+        let roots = [Dependency::new(
+            NPM.parse().unwrap(),
+            "selected".parse().unwrap(),
+            "npm:parent@1".parse().unwrap(),
+        )];
+        let mut requests = Vec::new();
+        let (result, records, _) = resolution::resolve_with_policy(
+            &roots,
+            |parent, _| Ok(parent.clone()),
+            &policy,
+            |_, name| {
+                requests.push(name.to_string());
+                match name.as_str() {
+                    "parent" => {
+                        let mut parent = named_record("parent", "1.0.0", &[]);
+                        parent
+                            .optional_dependencies
+                            .insert("local".into(), "npm:actual@1".into());
+                        Ok(vec![parent])
+                    }
+                    "actual" => {
+                        let mut candidates = vec![named_record("actual", "1.0.0", &[])];
+                        if candidate_state != 0 {
+                            let mut replacement = named_record("actual", "2.0.0", &[]);
+                            if candidate_state == 2 {
+                                replacement.platform.os = vec!["unsupported-test-os".into()];
+                            }
+                            candidates.push(replacement);
+                        }
+                        Ok(candidates)
+                    }
+                    _ => panic!("unexpected request {name}"),
+                }
+            },
+            &tapid_resolver::ResolutionPreferences::default(),
+            Vec::new(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(requests, ["parent", "actual"]);
+        assert_eq!(result.dependencies.len(), usize::from(available));
+        if available {
+            let edge = &result.dependencies[0];
+            assert_eq!(edge.dependency.as_str(), "local");
+            assert_eq!(edge.child.name.as_str(), "actual");
+            assert_eq!(edge.child.version.to_string(), "2.0.0");
+            assert_eq!(result.override_matches[0].binding.as_str(), "selected");
         }
         assert_eq!(
             records[&(NPM.into(), "parent".into(), "1.0.0".into())].optional_dependencies["local"],

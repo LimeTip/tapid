@@ -18,7 +18,7 @@ The crate validates required `name` and `version`, optional `private`, `descript
 manifests. Dependency edits preserve these declarations. Parsing rejects duplicate
 keys throughout the override subtree and duplicate top-level `overrides` fields.
 Preservation does not activate policy: the CLI separately validates active root
-overrides and currently rejects nested rules.
+overrides and the bounded one-parent nested subset.
 
 `ManifestError::diagnostic` accepts the same input and returns the failed field,
 map key, expected constraint, and observed JSON type. It does not copy arbitrary

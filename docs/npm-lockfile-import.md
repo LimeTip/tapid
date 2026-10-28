@@ -62,3 +62,9 @@ Import failures leave root and member manifests, the previous lock, store, and a
 After an install, restore the saved lock and matching manifest, then replay their verified trees, or restore the saved npm project and run `npm ci`. Keep the npm lock backup until you have checked your application with its chosen runtime and tools.
 
 Imported locks use Tapid schema 8, separately from ordinary schema 7 verified-tree locks. Schema 8 retains the npm selections and stores tree verification receipts by package placement, bound to each receipt's tarball URL and integrity value. Older Tapid clients reject this schema. Receipts can change on the first frozen install; selected versions, sources, integrity values, and constraints do not. See [ADR 0008](adr/0008-offline-npm-lock-import.md) and the [npm lockfile format](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/).
+
+Root override declarations, including bounded parent selectors, are freshness
+inputs rather than new instructions during imported replay. Changing them makes
+the recorded graph stale. A deliberate native dependency mutation applies the
+current policy under the existing conversion contract; frozen replay does not
+re-resolve overrides. See the [override contract](compatibility.md).
