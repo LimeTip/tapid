@@ -468,6 +468,8 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
             "load-library",
             "search-library",
             "resolved-load-library",
+            "altered-search-library",
+            "restricted-search-library",
         ] {
             let denied = format!("{trustee}:{mode}:{operation}:denied");
             let allowed = format!("{trustee}:{mode}:{operation}:allowed");
@@ -529,28 +531,48 @@ fn windows_ambient_read_probe_helper() {
             println!("{trustee}:{mode}:execute:denied");
         }
     }
-    load_authority_probe_library(&fs::canonicalize("approved.dll").unwrap(), false)
-        .expect("approved dynamic DLL must load");
+    load_authority_probe_library(
+        &fs::canonicalize("approved.dll").unwrap(),
+        ProbeLoader::Direct,
+    )
+    .expect("approved dynamic DLL must load");
     load_searched_authority_probe_library(&fs::canonicalize("approved.dll").unwrap())
         .expect("approved searched DLL must load");
-    load_authority_probe_library(&fs::canonicalize("approved.dll").unwrap(), true)
-        .expect("approved DLL must load through dynamically resolved loader");
+    load_authority_probe_library(
+        &fs::canonicalize("approved.dll").unwrap(),
+        ProbeLoader::Resolved,
+    )
+    .expect("approved DLL must load through dynamically resolved loader");
+    for (_, flags) in EXTENDED_LOADERS {
+        load_authority_probe_library(
+            &fs::canonicalize("approved.dll").unwrap(),
+            ProbeLoader::Extended(flags),
+        )
+        .expect("approved extended DLL load");
+    }
     let outside_library = fs::read_to_string("outside-library.txt").unwrap();
     let outside_library = std::path::Path::new(&outside_library);
     for (operation, result) in [
         (
             "load-library",
-            load_authority_probe_library(outside_library, false),
+            load_authority_probe_library(outside_library, ProbeLoader::Direct),
         ),
         (
             "resolved-load-library",
-            load_authority_probe_library(outside_library, true),
+            load_authority_probe_library(outside_library, ProbeLoader::Resolved),
         ),
         (
             "search-library",
             load_searched_authority_probe_library(outside_library),
         ),
-    ] {
+    ]
+    .into_iter()
+    .chain(EXTENDED_LOADERS.map(|(operation, flags)| {
+        (
+            operation,
+            load_authority_probe_library(outside_library, ProbeLoader::Extended(flags)),
+        )
+    })) {
         match result {
             Ok(()) => {
                 assert_ne!(trustee, "AAP", "undeclared AAP DLL must be denied");
@@ -599,47 +621,70 @@ fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Res
     if unsafe { SetDllDirectoryW(directory.as_ptr()) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let result =
-        load_authority_probe_library(std::path::Path::new(path.file_name().unwrap()), false);
+    let result = load_authority_probe_library(
+        std::path::Path::new(path.file_name().unwrap()),
+        ProbeLoader::Direct,
+    );
     // SAFETY: null restores the default search path before returning the observation.
     assert_ne!(unsafe { SetDllDirectoryW(std::ptr::null()) }, 0);
     result
 }
 
+#[derive(Clone, Copy)]
+enum ProbeLoader {
+    Direct,
+    Resolved,
+    Extended(u32),
+}
+
+// Executable-image loads only: never use LOAD_LIBRARY_AS_DATAFILE or
+// DONT_RESOLVE_DLL_REFERENCES, which would bypass normal loader initialization.
+const EXTENDED_LOADERS: [(&str, u32); 2] = [
+    ("altered-search-library", 0x8), // LOAD_WITH_ALTERED_SEARCH_PATH
+    ("restricted-search-library", 0x100 | 0x800), // DLL_LOAD_DIR | SYSTEM32
+];
+
 fn load_authority_probe_library(
     path: &std::path::Path,
-    resolve_loader: bool,
+    loader: ProbeLoader,
 ) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn LoadLibraryW(path: *const u16) -> isize;
+        fn LoadLibraryExW(path: *const u16, file: isize, flags: u32) -> isize;
         fn GetModuleHandleW(name: *const u16) -> isize;
         fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
         fn FreeLibrary(module: isize) -> i32;
     }
     let path: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let loader: unsafe extern "system" fn(*const u16) -> isize = if resolve_loader {
-        let kernel: Vec<_> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
-        // SAFETY: kernel32 is already loaded; this borrows its handle without
-        // acquiring a reference, so it must not be passed to FreeLibrary.
-        let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
-        assert_ne!(kernel, 0, "loaded kernel32 module");
-        // SAFETY: the borrowed module remains loaded throughout this helper.
-        let address = unsafe { GetProcAddress(kernel, c"LoadLibraryW".as_ptr().cast()) };
-        assert!(!address.is_null(), "resolve native LoadLibraryW export");
-        // SAFETY: the named Windows export has this exact system ABI/signature.
-        unsafe {
-            std::mem::transmute::<
-                *const std::ffi::c_void,
-                unsafe extern "system" fn(*const u16) -> isize,
-            >(address)
-        }
-    } else {
-        LoadLibraryW
-    };
+    let direct_loader: unsafe extern "system" fn(*const u16) -> isize =
+        if matches!(loader, ProbeLoader::Resolved) {
+            let kernel: Vec<_> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
+            // SAFETY: kernel32 is already loaded; this borrows its handle without
+            // acquiring a reference, so it must not be passed to FreeLibrary.
+            let kernel = unsafe { GetModuleHandleW(kernel.as_ptr()) };
+            assert_ne!(kernel, 0, "loaded kernel32 module");
+            // SAFETY: the borrowed module remains loaded throughout this helper.
+            let address = unsafe { GetProcAddress(kernel, c"LoadLibraryW".as_ptr().cast()) };
+            assert!(!address.is_null(), "resolve native LoadLibraryW export");
+            // SAFETY: the named Windows export has this exact system ABI/signature.
+            unsafe {
+                std::mem::transmute::<
+                    *const std::ffi::c_void,
+                    unsafe extern "system" fn(*const u16) -> isize,
+                >(address)
+            }
+        } else {
+            LoadLibraryW
+        };
     // SAFETY: both loaders accept the owned NUL-terminated fixture path.
-    let module = unsafe { loader(path.as_ptr()) };
+    let module = unsafe {
+        match loader {
+            ProbeLoader::Extended(flags) => LoadLibraryExW(path.as_ptr(), 0, flags),
+            _ => direct_loader(path.as_ptr()),
+        }
+    };
     if module == 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -657,11 +702,16 @@ fn windows_ambient_execution_target_helper() {
     if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-target") {
         if let Some(library) = std::env::var_os("TAPID_TEST_LIBRARY") {
             let library = PathBuf::from(library);
-            load_authority_probe_library(&library, false).expect("valid host DLL control");
-            load_authority_probe_library(&library, true)
+            load_authority_probe_library(&library, ProbeLoader::Direct)
+                .expect("valid host DLL control");
+            load_authority_probe_library(&library, ProbeLoader::Resolved)
                 .expect("valid host dynamically resolved DLL control");
             load_searched_authority_probe_library(&library)
                 .expect("valid host searched DLL control");
+            for (_, flags) in EXTENDED_LOADERS {
+                load_authority_probe_library(&library, ProbeLoader::Extended(flags))
+                    .expect("valid host extended DLL load");
+            }
             println!("host-dynamic-library-valid");
         }
         println!("undeclared-target-executed");

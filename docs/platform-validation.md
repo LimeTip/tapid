@@ -205,6 +205,14 @@ The fixture borrows the kernel module handle, following the
 [GetModuleHandleW ownership contract](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlew),
 and releases only successfully loaded fixture modules. This exercises dynamically resolved loader calls without
 relying on compatibility interception; native Windows execution is still pending.
+The same host, approved, root and descendant controls also call `LoadLibraryExW`
+with `LOAD_WITH_ALTERED_SEARCH_PATH`, and separately with
+`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`, using absolute
+fixture paths. Both modes perform executable-image loads and validate the fixture
+export before releasing the module. They retain strict AAP denial assertions and
+ARAP characterization, with separate `altered-search-library` and
+`restricted-search-library` observations. Native execution remains pending; these
+flags do not establish closure of secondary dependencies or loader search order.
 These sampled controls do not cover secondary DLL dependencies, precedence
 mutations, manual mapping, side-by-side assemblies or arbitrary broker inputs.
 
