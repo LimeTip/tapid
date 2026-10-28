@@ -476,6 +476,80 @@ mod tests {
     }
 
     #[test]
+    fn native_profile_workspace_rejection_precedes_artifact_access_and_store_mutation() {
+        let project = tapid_test_support::TempProject::new("profile-workspace-preflight").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","workspaces":["packages/*"],"dependencies":{"runtime":"1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        project
+            .write(
+                "packages/member/package.json",
+                br#"{"name":"member","version":"1.0.0","dependencies":{"runtime":"1"}}"#,
+            )
+            .unwrap();
+        let fixture = project
+            .write(
+                "registry.json",
+                serde_json::json!({"packages":[{
+                    "registry":NPM,"name":"runtime","version":"1.0.0",
+                    "integrity":integrity(b"unavailable").to_string(),
+                    "artifact":"https://registry.npmjs.org/runtime.tgz"
+                }]})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let resolved = resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        let store = Store::new(project.path().join("store"));
+        let error = resolved
+            .prepare_native_profile(
+                project.path(),
+                &manifest,
+                &config,
+                &store,
+                tapid_lockfile::InstallProfile::production(),
+            )
+            .err()
+            .expect("workspace activation must be supported before preparation");
+        assert!(
+            error.to_string().contains("workspace layout integration"),
+            "{error}"
+        );
+        assert!(!store.root().exists());
+        let selection = resolved
+            .native_selection(project.path(), &manifest, &config)
+            .unwrap();
+        let error = super::super::selection::prepare_native_replay(
+            &selection,
+            &config,
+            &store,
+            tapid_lockfile::InstallProfile::production(),
+            |_, _| panic!("unsupported workspace replay must not access archives"),
+        )
+        .err()
+        .expect("unsupported workspace replay must fail preflight");
+        assert!(
+            error.to_string().contains("workspace layout integration"),
+            "{error}"
+        );
+        assert!(!store.root().exists());
+        assert!(!project.path().join("node_modules").exists());
+        assert!(!project.path().join("tapid.lock").exists());
+    }
+
+    #[test]
     fn native_selection_rejects_legacy_seeded_dependency_kinds() {
         let project = tapid_test_support::TempProject::new("graph-profile-legacy-kinds").unwrap();
         let text = r#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1"}}"#;

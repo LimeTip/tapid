@@ -5,6 +5,27 @@ use tapid_lockfile::{
     NativeSelectedPackage, NativeSelection, NativeSourceEvidence,
 };
 
+// Keep unsupported activation contracts ahead of archive access and store
+// recovery, not only ahead of linker planning. Complete selection production
+// remains available independently of materialization.
+fn validate_native_profile_layout(selection: &NativeSelection) -> Result<(), OperationalError> {
+    if selection.packages().values().any(|package| {
+        matches!(
+            package.source_evidence,
+            NativeSourceEvidence::Workspace { .. }
+        )
+    }) || selection
+        .materialized_declarations(tapid_lockfile::InstallProfile::default())
+        .any(|edge| edge.workspace.is_some())
+    {
+        return Err(OperationalError::new(
+            ErrorKind::Materialization,
+            "native profile workspace layout integration is required",
+        ));
+    }
+    Ok(())
+}
+
 /// Complete selection and separately verified materialized sources. This is not a
 /// legacy lock and cannot be activated without layout/lifecycle preparation.
 #[allow(dead_code)]
@@ -32,21 +53,7 @@ impl PreparedNativeProfile {
         }
         // Workspace paths must be planned with member generations and local links;
         // never pass them through the registry-only source layout.
-        if self.selection.packages().values().any(|package| {
-            matches!(
-                package.source_evidence,
-                NativeSourceEvidence::Workspace { .. }
-            )
-        }) || self
-            .selection
-            .materialized_declarations(profile)
-            .any(|edge| edge.workspace.is_some())
-        {
-            return Err(OperationalError::new(
-                ErrorKind::Materialization,
-                "native profile workspace layout integration is required",
-            ));
-        }
+        validate_native_profile_layout(&self.selection)?;
         if self.sources.keys().cloned().collect::<BTreeSet<_>>() != retained {
             return Err(OperationalError::new(
                 ErrorKind::Materialization,
@@ -134,6 +141,7 @@ pub(super) fn prepare_native_replay(
     profile: tapid_lockfile::InstallProfile,
     mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
 ) -> Result<PreparedNativeProfile, OperationalError> {
+    validate_native_profile_layout(selection)?;
     let materialized_keys = selection.materialized_keys(profile)?;
     // Check all identities before archive access or store mutation, even omitted ones.
     for key in selection.packages().keys() {
@@ -262,6 +270,7 @@ impl graph::ResolvedGraph {
         profile: tapid_lockfile::InstallProfile,
     ) -> Result<PreparedNativeProfile, OperationalError> {
         let selection = self.native_selection(project, manifest, config)?;
+        validate_native_profile_layout(&selection)?;
         let materialized_keys = selection.materialized_keys(profile)?;
         store.recover_transactions()?;
         fs::create_dir_all(store.root())
