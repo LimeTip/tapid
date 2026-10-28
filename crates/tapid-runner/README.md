@@ -57,6 +57,14 @@ Private Windows dependency writes now have a separate experimental path describe
 
 ## Dependency lifecycle execution
 
+Trusted Node execution requests bind the primary executable's SHA-256 and native
+file identity, with a 512 MiB streaming verification bound. Windows retains a
+read-only handle denying write/delete sharing across request clones. This does
+not identify libraries, loader configuration or other accessible inputs, and
+does not enable authenticated Windows dependency builds. See the [authority
+closure checkpoint](../../docs/platform-validation.md#windows-dependency-authority-closure-checkpoint-273)
+for limitations and native validation requirements.
+
 `DependencyLifecyclePolicy` validates exact checked-in approvals and derives keys bound to source, policy, script, toolchain, and graph. `dependency_toolchain_identity` fingerprints the Linux backend runtime and Tapid executable. Windows owner-only lifecycle keys and low-integrity private write copies have native component acceptance, but default contained Windows dependency builds remain gated on toolchain identity and integrated CLI acceptance. ManagedTree requires all four ceilings and initialized private-launcher dispatch. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md) and [ADR 0008](../../docs/adr/0008-dependency-lifecycle-derived-trees.md) for authority, delegation, accounting, cleanup, and replay limitations.
 
 Windows project Read grants include native image loading within the explicitly declared target, using the same read/execute ACL mechanism as backend runtime files. This lets standard Node load native addons without granting writes. ReadData and ReadMetadata remain narrower grants; neither implies image execution. Subprocess permission remains a separate process-creation boundary.

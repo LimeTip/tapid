@@ -1,14 +1,24 @@
 //! Validated execution requests, runtime identity, and platform argument/environment limits.
 
 use super::*;
+use sha2::{Digest, Sha256};
+use std::io::Read;
 
 #[cfg(windows)]
-fn windows_file_identity(path: &Path) -> Result<(u32, u64), ExecutionError> {
-    use std::os::windows::io::AsRawHandle;
-    let file =
-        fs::File::open(path).map_err(|error| path_error("trusted Node runtime", path, error))?;
-    windows_handle_identity(file.as_raw_handle() as isize)
+#[derive(Debug)]
+struct WindowsRuntimePin {
+    _file: fs::File,
+    identity: (u32, u64),
 }
+
+#[cfg(windows)]
+impl PartialEq for WindowsRuntimePin {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+#[cfg(windows)]
+impl Eq for WindowsRuntimePin {}
 
 #[cfg(windows)]
 pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), ExecutionError> {
@@ -37,16 +47,15 @@ pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), Execu
     Ok((information.dwVolumeSerialNumber, file_index))
 }
 
-/// Canonical trusted Node executable with its native file identity captured at construction.
+/// Canonical trusted Node executable with native identity and byte digest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TrustedNodeRuntime {
     pub(super) path: PathBuf,
+    digest: [u8; 32],
     #[cfg(unix)]
     pub(super) identity: NativeIdentity,
     #[cfg(windows)]
-    pub(super) volume_serial_number: u32,
-    #[cfg(windows)]
-    pub(super) file_index: u64,
+    pin: std::sync::Arc<WindowsRuntimePin>,
 }
 
 impl TrustedNodeRuntime {
@@ -57,13 +66,56 @@ impl TrustedNodeRuntime {
                 "trusted Node runtime must be canonical and named node or node.exe",
             ));
         }
-        let metadata = fs::metadata(&canonical)
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A replaced target must not block on a FIFO or follow a new link.
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Retain ordinary read/image access but reject writers and deletion
+            // for every request clone, through verified Job cleanup.
+            options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+        }
+        let file = options
+            .open(&canonical)
+            .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
+        let metadata = file
+            .metadata()
             .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
         if !metadata.is_file() {
             return Err(invalid_request(
                 "trusted Node runtime must be a regular file",
             ));
         }
+        // Bound both reported size and actual reads, including a file growing
+        // after metadata inspection. Stream bytes without allocating the image.
+        const MAX_RUNTIME_BYTES: u64 = 512 * 1024 * 1024;
+        if metadata.len() > MAX_RUNTIME_BYTES {
+            return Err(invalid_request("trusted Node runtime exceeds 512 MiB"));
+        }
+        let mut input = (&file).take(MAX_RUNTIME_BYTES + 1);
+        let mut hash = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > MAX_RUNTIME_BYTES {
+                return Err(invalid_request("trusted Node runtime exceeds 512 MiB"));
+            }
+            hash.update(&buffer[..read]);
+        }
+        let digest = hash.finalize().into();
         #[cfg(unix)]
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -72,6 +124,7 @@ impl TrustedNodeRuntime {
             }
             Ok(Self {
                 path: canonical,
+                digest,
                 identity: NativeIdentity {
                     device: metadata.dev(),
                     inode: metadata.ino(),
@@ -80,15 +133,22 @@ impl TrustedNodeRuntime {
         }
         #[cfg(windows)]
         {
-            let (volume_serial_number, file_index) = windows_file_identity(&canonical)?;
+            use std::os::windows::io::AsRawHandle;
+            let identity = windows_handle_identity(file.as_raw_handle() as isize)?;
             Ok(Self {
                 path: canonical,
-                volume_serial_number,
-                file_index,
+                digest,
+                pin: std::sync::Arc::new(WindowsRuntimePin {
+                    _file: file,
+                    identity,
+                }),
             })
         }
         #[cfg(not(any(unix, windows)))]
-        Ok(Self { path: canonical })
+        Ok(Self {
+            path: canonical,
+            digest,
+        })
     }
 
     pub(super) fn validate(&self, search_paths: &[PathBuf]) -> Result<(), ExecutionError> {
@@ -496,7 +556,9 @@ impl ExecutionRequestBuilder {
         self
     }
 
-    /// Binds the exact canonical Node executable to the first child PATH directory.
+    /// Binds the canonical Node executable and its bytes to the child PATH.
+    /// Windows retains a read-only handle denying write/delete sharing until all
+    /// request clones are dropped. This does not bind libraries or loader inputs.
     pub fn trusted_node_runtime(mut self, path: impl Into<PathBuf>) -> Self {
         self.trusted_node_runtime = Some(path.into());
         self

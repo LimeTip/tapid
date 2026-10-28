@@ -453,6 +453,109 @@ fn trusted_node_runtime_identity_is_retained_and_revalidated() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn trusted_node_runtime_rejects_in_place_byte_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("trusted-node-bytes").unwrap();
+    project.write("node", b"first").unwrap();
+    let runtime = fs::canonicalize(project.path().join("node")).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let request = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap();
+    request.validate_trusted_node_runtime().unwrap();
+    // Same file object and same length: native file identity alone misses this.
+    fs::write(&runtime, b"other").unwrap();
+    assert_eq!(
+        request
+            .validate_trusted_node_runtime()
+            .unwrap_err()
+            .category(),
+        ExecutionErrorCategory::PolicyViolation
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn trusted_node_runtime_retains_windows_write_and_delete_exclusion_across_clones() {
+    let project = tapid_test_support::TempProject::new("trusted-node-pin").unwrap();
+    project.write("node.exe", b"runtime").unwrap();
+    let runtime = fs::canonicalize(project.path().join("node.exe")).unwrap();
+    let writer = fs::OpenOptions::new().write(true).open(&runtime).unwrap();
+    assert!(
+        ExecutionRequest::builder(&runtime)
+            .trusted_node_runtime(&runtime)
+            .executable_search_path(runtime.parent().unwrap())
+            .build()
+            .is_err(),
+        "an existing writer prevents acquiring the runtime pin"
+    );
+    drop(writer);
+    let request = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap();
+    let retained = request.clone();
+    drop(request);
+    retained.validate_trusted_node_runtime().unwrap();
+    assert!(
+        fs::read(&runtime).is_ok(),
+        "approved reads remain available"
+    );
+    let write = fs::OpenOptions::new()
+        .write(true)
+        .open(&runtime)
+        .unwrap_err();
+    assert_eq!(write.raw_os_error(), Some(32), "write sharing violation");
+    let rename = fs::rename(&runtime, project.path().join("replaced.exe")).unwrap_err();
+    assert_eq!(rename.raw_os_error(), Some(32), "delete sharing violation");
+    drop(retained);
+    fs::write(&runtime, b"changed").unwrap();
+    fs::rename(&runtime, project.path().join("replaced.exe")).unwrap();
+}
+
+#[test]
+fn trusted_node_runtime_rejects_oversized_images_before_hashing() {
+    let project = tapid_test_support::TempProject::new("trusted-node-size").unwrap();
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    project.write(name, b"").unwrap();
+    let runtime = fs::canonicalize(project.path().join(name)).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&runtime)
+        .unwrap()
+        .set_len(512 * 1024 * 1024 + 1)
+        .unwrap();
+    let error = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeds 512 MiB"));
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_node_runtime_rejects_a_fifo_without_waiting_for_a_writer() {
+    use std::os::unix::ffi::OsStrExt;
+    let project = tapid_test_support::TempProject::new("trusted-node-fifo").unwrap();
+    let runtime = project.path().join("node");
+    let name = std::ffi::CString::new(runtime.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a live NUL-terminated pathname in this isolated project.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let runtime = fs::canonicalize(runtime).unwrap();
+    let error = ExecutionRequest::builder(&runtime)
+        .trusted_node_runtime(&runtime)
+        .executable_search_path(runtime.parent().unwrap())
+        .build()
+        .unwrap_err();
+    assert!(error.to_string().contains("must be a regular file"));
+}
+
 #[test]
 fn request_builder_preserves_windows_verbatim_boundary_contract() {
     let request = ExecutionRequest::builder("cmd.exe")

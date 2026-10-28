@@ -165,6 +165,19 @@ Authenticated dependency builds remain disabled on Windows at
 mechanisms and unresolved inputs, not native acceptance. No complete Windows
 runtime identity or prepared execution authority exists yet.
 
+Trusted Node requests now bind a streaming SHA-256 of the primary executable
+(bounded to 512 MiB) as well as its native file identity. Revalidation rejects
+in-place changes that preserve file identity and length. On Windows the request
+retains the hashed file handle with read sharing only, rejecting existing writers
+and denying subsequent write/delete opens until the last request clone is
+dropped. The contained execution path keeps its request through Job cleanup.
+This is a primary-runtime pin, not a snapshot of tools, libraries or loader
+configuration, and it does not close ancestor-path replacement, preexisting
+writable mappings, privileged-host mutation, registry or broker inputs. Unix
+byte revalidation alone does not prevent post-validation writes. The native
+Windows write/delete and clone-lifetime regression requires Windows CI; compiling
+it elsewhere does not establish enforcement. Recipe integration remains gated.
+
 The existing native Windows dependency acceptance step runs the runner library's
 `authority_tests` with `--show-output` before the general workspace suite, alongside
 the separate `windows_containment` target. It retains each command's exit status
