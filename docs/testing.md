@@ -197,3 +197,54 @@ checkouts model worktree consumers of the same cache; they do not invoke Git.
 These are deterministic contract tests, not measurements of an external agent's
 reasoning or model tool selection. Existing transaction and containment tests
 remain responsible for their broader platform and attack-path coverage.
+
+### Workflow assertion inventory
+
+The following inventory describes executable assertions, not platform acceptance
+receipts. All scenario names below are in
+[`crates/tapid-cli/tests/agent_workflows.rs`](../crates/tapid-cli/tests/agent_workflows.rs)
+and have the `agent_` prefix. The eight recovered baseline scenarios remain enabled.
+Package-result calls explicitly declare operation, outcome, and exit status;
+`Measurements` requires schema 1, one newline-terminated object, empty stderr,
+an 8 KiB per-call budget, exact CLI invocation counts, and zero unnecessary
+repeated failures. Interrupted calls count even without a delivered result.
+Run measurements include child streams and the separate result-file bytes.
+These counts measure Tapid invocations, not fixture setup or Node discovery.
+
+| Requirement | State | Assertion and deterministic budget |
+| --- | --- | --- |
+| Completion, parseability, output size, calls and retries | covered | Every process sequence checks its expected result and calls `finish`; package success cannot infer exit status (the `why` no-match case exits 1). |
+| Add/remove and replay without graph churn | covered | `dependency_edits_and_repeated_install_preserve_unselected_graph`: four calls, complete unrelated package records and final graph equality; guide sequence: ten calls, unchanged replay lock bytes and original npm lock bytes. |
+| Actionable peer conflict in one JSON call | covered | `stops_on_precise_failures_without_retry_or_file_mutation`: source/name/version, missing peer requirement, declaration pointers, `after_correction`, unchanged manifest/locks/installed sentinel/policy/instructions. One call for each refusal. |
+| Malformed arguments, missing credentials and unsupported project | covered | The same refusal scenario checks typed codes, exit 2 for parsing, null parse retry, correction advice for operational failures and protected bytes. No real credentials or human-output follow-up. |
+| Pending status and lost commit response | covered | `lost_commit_response_recovers_before_repeating_mutation`: four calls including the crash; status reports pending with unchanged state and null retry, both inspections preserve the entire interrupted snapshot, outdated requires recovery first, frozen/offline install settles the journal and preserves committed lock bytes. |
+| Named update including alias and transitive preservation | covered | `named_update_refreshes_selection_and_preserves_unrelated_records`: two calls; unselected alias binding and complete unrelated records survive newer metadata, only parent 1-to-2 replacement and h3 2 addition are allowed, new child edge is checked, manifest and manager locks are preserved. |
+| Resolved preview agrees with apply | covered | `resolved_preview_matches_apply_and_preserves_project_and_cache`: three calls; full project/store/link snapshot equality after preview, zero artifact requests and writes, unprepared artifacts, predicted keys, dependency edges and declaration changes match apply; unrelated records survive. Uses installable archives. |
+| Structured skipped hooks without readiness claims | covered | `install_reports_skipped_hook_identity_and_reason`: one call; complete discovery, exact package/source identity, four default-denied hooks, per-hook warning identity, no execution and no generated sentinel. Skipping is not application readiness. |
+| Trusted run delivery and hostile child output | covered | `run_example_reads_complete_typed_result_file`: one call; prelaunch failure, null receipt, framing/version/operation and incomplete-delivery rejection. `trusted_run_result_rejects_forged_child_success_and_file_interference`: one native call; forged stdout/stderr cannot replace the external result, five result-path tampering attempts fail, real exit 37 and checked Restricted completion are required. Native enforcement must pass in its supported environment; no fallback or skip is added. |
+| Unavailable containment | covered | macOS `unavailable_managed_tree_run_stops_before_child_spawn`: one call; precise unsupported-containment result, ManagedTree request retained, null receipt and unchanged project. Other native controls remain in `cli_cases/run_permissions.rs` and the platform validation lane. |
+| Partial inspection and conservative interpretation | covered | `inspection_distinguishes_no_match_from_partial_metadata`: three calls, confirmed no-match differs from partial offline metadata; neither inspection changes project/store bytes. The preview fixture consumer rejects unknown schema/operation/code/retry, missing or contradictory identity, duplicate keys, empty/truncated/multiple results; partial evidence requests inspection and additive fields stay compatible. This private interpreter is not an external adapter or published schema validator and never grants mutation authority. |
+| Hostile package data, policy and manager conventions | covered | `hostile_package_text_cannot_replace_manager_or_policy`: two calls per npm/pnpm/Yarn convention (setup install then inspection); fake instructions, forged success/receipt, credential requests and bypass advice stay in the typed declared-requirement field, terminal controls are removed, typed diagnostic and null retry remain authoritative, entire snapshot is preserved. Two further calls diagnose an unmanaged tree through status and refuse replacement while preserving manager locks, installed sentinel and instructions. Lock presence alone is not treated as unsupported migration. |
+| Cold locked cache and separate worktrees sharing cache | covered | `separate_checkouts_share_verified_cache_without_graph_changes`: three calls, cold locked hydration followed by offline replay in a separate isolated checkout, exact lock-byte preservation and installed package existence. Temporary checkouts model cache consumers without Git or external services. |
+| Same-project and shared-store contention | covered | `same_project_contention_stops_before_dependency_edit` and `shared_store_contention_requires_wait_without_project_mutation`: one call each; held deterministic locks, typed busy code, `after_contention`, preserved project state. No timing benchmark. |
+| Cancellation before commit versus lost response after commit | covered | `precommit_interruption_recovers_original_project_before_retry`: four calls including deterministic abort at activation; inspection preserves pending state and requires recovery first, recover-only install restores original manifest/lock/installed bytes and settles the journal. This models abrupt cancellation, not graceful signal handling; broader recovery seams remain in `cli.rs::run_lifecycle_recovery_crash_case`. |
+| Stale guide and actual binary channels | covered | `actual_binary_channels_reject_stale_guides_and_stdout_run_results`: four calls; binary version agrees with the pinned guide and rejects a stale requirement, actual help contains the public command inventory, run help exposes result-file delivery, stdout run JSON refuses before launch. |
+| Published discovery and schema coverage | dependent | [#195](https://github.com/LimeTip/tapid/issues/195) owns versioned installed-binary command/result coverage, options/defaults/conflicts and published schemas. Current help is presentation text, not that contract. Consume its validation mechanism when delivered; no replacement protocol is introduced here. |
+| Real-agent comparisons and actual-project adoption | dependent | Optional external comparisons are separate from correctness tests; [#307](https://github.com/LimeTip/tapid/issues/307) owns pilot observations. Scripted sequences and role reviews do not establish adoption. |
+
+The current channel inventory is maintained in
+[JSON result coverage](json-results.md#coverage): package operations and inspection
+use stdout envelopes; root-script execution uses a fresh external result file
+while preserving arbitrary child streams and exits; unsupported stdout channels
+fail before execution. The owning `json_results`, CLI tool/cache/preview/status,
+and run-permission suites cover command-specific contracts beyond the small
+measured lane. Published-schema validation remains dependent rather than being
+inferred from parseability, help wording, or this inventory.
+
+If explicitly running real-agent comparisons later, pin held-out tasks/projects,
+success and correct-refusal criteria, model/host/options, tool versions and
+guide/skill/adapter variants. Report completion and refusal separately, first-attempt
+success, calls, output bytes, retries/recovery, unrelated churn, policy/bypass
+attempts, time/cost and failures. Keep optional named-tokenizer measurements
+separate. Ordinary regression tests require no external model, real credential,
+public registry or pilot participant.
