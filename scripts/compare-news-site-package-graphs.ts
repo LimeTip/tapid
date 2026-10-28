@@ -62,36 +62,30 @@ function installedNodes(project: string): Nodes {
   if (!existsSync(modules) || !statSync(modules).isDirectory())
     throw new Error(`missing installed node_modules tree: ${modules}`);
   const result: Nodes = new Map();
-  function visit(directory: string) {
+  let count = 0;
+  function visit(directory: string, scope = false) {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort(
-      (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+      (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
     )) {
+      if (entry.name.startsWith(".")) continue;
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (entry.name === "package.json") {
-        const parts = relative(modules, path).split(sep);
-        if (
-          parts.some(
-            (part, i) => part === "dist" && parts[i + 1] === "compiled",
-          )
-        )
-          continue;
-        let manifest: Json;
-        try {
-          manifest = readJson(path);
-        } catch {
-          continue;
-        }
-        const identity = pair(manifest);
-        if (!identity) continue;
-        const id = key(identity),
-          instance = {
-            path: relative(modules, dirname(path)).split(sep).join("/"),
-            manifest,
-            manifestPath: path,
-          };
-        result.set(id, [...(result.get(id) ?? []), instance]);
+      if (entry.isSymbolicLink())
+        throw new Error(`unsupported installed package link: ${path}`);
+      if (!entry.isDirectory()) continue;
+      if (!scope && entry.name.startsWith("@")) {
+        visit(path, true);
+        continue;
       }
+      if (++count > 100_000) throw new Error("installed package traversal limit exceeded");
+      const manifestPath = join(path, "package.json"), manifest = readJson(manifestPath);
+      const identity = pair(manifest);
+      if (!identity) throw new Error(`invalid installed package identity: ${manifestPath}`);
+      const id = key(identity), instance = {
+        path: relative(modules, path).split(sep).join("/"), manifest, manifestPath,
+      };
+      result.set(id, [...(result.get(id) ?? []), instance]);
+      const nested = join(path, "node_modules");
+      if (existsSync(nested)) visit(nested);
     }
   }
   visit(modules);
@@ -153,6 +147,7 @@ function reachableGraph(project: string) {
     peerEdges = new Set<string>(),
     missingRequired = new Set<string>();
   for (let index = 0; index < queue.length; index++) {
+    if (index >= 100_000) throw new Error("reachable graph traversal limit exceeded");
     const [parent, parentPair, name, requirement, kind, optional] =
         queue[index],
       id = key([parent, name, kind, requirement]);
@@ -224,6 +219,104 @@ function registryOrigin(value: unknown): string | null {
     return null;
   }
 }
+
+// Refine both graphs together so class numbers have the same meaning on each
+// side. Including the previous class makes every round a partition refinement;
+// an unchanged class count therefore proves a fixed point, including cycles.
+function contextualComparison(projects: string[]) {
+  type Vertex = { path: string; identity: Pair; provenance: unknown; bindings: { label: string; target: number | null }[] };
+  const vertices: Vertex[] = [], roots: number[] = [];
+  const nativeEvaluation = readJson(join(projects[1], "tapid.lock")).lockfileVersion !== 8;
+  const unavailable: { side: number; path: string; reason: string }[] = [];
+  for (const [side, project] of projects.entries()) {
+    const lock = readJson(join(project, side === 0 ? "package-lock.json" : "tapid.lock"));
+    const placements = side === 0 ? lock : lock.lockfileVersion === 8 ? lock.npmLock : null;
+    const seen = new Map<string, number>();
+    const queue: { directory: string; index: number; root: boolean }[] = [];
+    function intern(directory: string, root = false): number {
+      directory = realpathSync(directory);
+      const existing = seen.get(directory);
+      if (existing !== undefined) return existing;
+      if (vertices.length >= 10_000) throw new Error("contextual graph size limit exceeded");
+      const manifest = readJson(join(directory, "package.json"));
+      const identity = pair(manifest) ?? (root ? ["<root>", ""] as Pair : null);
+      if (!identity) throw new Error(`invalid installed package identity: ${directory}`);
+      const index = vertices.length;
+      let provenance: unknown = null;
+      if (!root) {
+        const placement = relative(project, directory).split(sep).join("/");
+        const candidates: Json[] = placements
+          ? [placements.packages?.[placement]].filter(Boolean)
+          : (Object.values(lock.packages ?? {}) as Json[]).filter((record) =>
+            record?.name === identity[0] && record?.version === identity[1]);
+        if (candidates.length !== 1)
+          unavailable.push({ side, path: placement, reason: "missing or ambiguous lock association" });
+        else {
+          const record = candidates[0];
+          provenance = placements
+            ? [registryOrigin(record.resolved), record.resolved, record.integrity]
+            : [registryOrigin(record.registry), record.artifactUrl, record.artifactIntegrity];
+          if (record.version !== identity[1] || (record.name && record.name !== identity[0]) ||
+            (provenance as unknown[]).some((value) => typeof value !== "string" || !value))
+            unavailable.push({ side, path: placement, reason: "incomplete or mismatched lock identity" });
+          // Native contexts describe one selected platform, not npm's original
+          // constraint lists. Only compare a singleton positive constraint to
+          // such a context; richer lists must remain unavailable evidence.
+          const platform = placements
+            ? ["os", "cpu", "libc"].map((field) => {
+                const values = record[field] ?? [];
+                if (!Array.isArray(values) || values.some((value: unknown) => typeof value !== "string"))
+                  throw new Error(`invalid platform constraint at ${placement}: ${field}`);
+                if (nativeEvaluation && (values.length > 1 ||
+                  values.some((value: string) => value.startsWith("!")))) {
+                  unavailable.push({ side, path: placement, reason: "platform constraint needs richer comparison" });
+                }
+                return [...values].sort();
+              })
+            : ["os", "cpu", "libc"].map((field) => {
+                const value = String(record.platformContext ?? "")
+                  .split(";").find((part) => part.startsWith(field + "="))?.slice(field.length + 1);
+                return value ? [decodeURIComponent(value)] : [];
+              });
+          provenance = [provenance, platform];
+        }
+      }
+      seen.set(directory, index);
+      vertices.push({ path: relative(project, directory).split(sep).join("/") || ".", identity, provenance, bindings: [] });
+      queue.push({ directory, index, root });
+      return index;
+    }
+    roots.push(intern(project, true));
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const { directory, index, root } = queue[cursor];
+      const manifest = readJson(join(directory, "package.json"));
+      const declarations = edges(manifest, root);
+      if (!root)
+        for (const [name, range] of Object.entries(manifest.peerDependencies ?? {}))
+          declarations.push([name, String(range), "peerDependency",
+            Boolean(manifest.peerDependenciesMeta?.[name]?.optional)]);
+      vertices[index].bindings = declarations.map(([name, range, kind, optional]) => {
+        const provider = resolveChild(project, directory, name);
+        return { label: key([name, range, kind, optional]),
+          target: provider ? intern(dirname(provider)) : null };
+      }).sort((a, b) => a.label.localeCompare(b.label));
+    }
+  }
+  const classify = (signatures: string[]) => {
+    const classes = new Map([...new Set(signatures)].sort().map((signature, index) => [signature, index]));
+    return signatures.map((signature) => classes.get(signature)!);
+  };
+  let colors = classify(vertices.map((vertex) => key([vertex.identity, vertex.provenance])));
+  for (let round = 0; round <= vertices.length; round++) {
+    const next = classify(vertices.map((vertex, index) => key([colors[index],
+      vertex.bindings.map(({ label, target }) => [label, target === null ? null : colors[target]])])));
+    const stable = new Set(next).size === new Set(colors).size;
+    colors = next;
+    if (stable) return { equal: !unavailable.length && colors[roots[0]] === colors[roots[1]], unavailable,
+      instances: vertices.map((vertex, index) => ({ ...vertex, context: colors[index] })), roots };
+  }
+  throw new Error("contextual graph refinement did not converge");
+}
 function lockRecords(
   project: string,
   nodes: Nodes,
@@ -231,6 +324,23 @@ function lockRecords(
 ): Map<string, Json[]> {
   const result = new Map<string, Json[]>(),
     lock = readJson(join(project, npm ? "package-lock.json" : "tapid.lock"));
+  if (!npm && lock.lockfileVersion === 8) {
+    if (lock.npmLock?.lockfileVersion !== 3)
+      throw new Error("imported Tapid lock must contain npm v3 placement evidence");
+    for (const [id, instances] of nodes)
+      for (const instance of instances) {
+        const record = lock.npmLock.packages?.["node_modules/" + instance.path];
+        result.set(id, [...(result.get(id) ?? []), record && record.version === instance.manifest.version ? {
+            ...record, name: instance.manifest.name,
+            registry: registryOrigin(record.resolved),
+            artifactUrl: record.resolved, artifactIntegrity: record.integrity,
+            platformContext: record.optional === true &&
+              ["os", "cpu", "libc"].some((field) => record[field]?.length)
+              ? "imported-platform" : "",
+          } : {}]);
+      }
+    return result;
+  }
   if (npm) {
     if (lock.lockfileVersion !== 3)
       throw new Error(
@@ -239,8 +349,8 @@ function lockRecords(
     for (const [id, instances] of nodes)
       for (const instance of instances) {
         const record = lock.packages?.["node_modules/" + instance.path];
-        if (record && typeof record === "object")
-          result.set(id, [...(result.get(id) ?? []), record]);
+        result.set(id, [...(result.get(id) ?? []),
+          record && record.version === instance.manifest.version ? record : {}]);
       }
   } else
     for (const record of Object.values(lock.packages ?? {}) as Json[]) {
@@ -261,10 +371,18 @@ function packageMetadata(
 ) {
   const result = new Map<
     string,
-    { sources: Set<string>; integrities: Set<string>; platform: boolean }
+    { sources: Set<string>; artifacts: Set<string>; integrities: Set<string>; platform: boolean; missing: Set<string> }
   >();
   for (const id of nodes.keys()) {
     const matching = records.get(id) ?? [];
+    const missing = new Set<string>();
+    for (const [field, property] of [
+      ["source", npm ? "resolved" : "registry"],
+      ["artifactUrl", npm ? "resolved" : "artifactUrl"],
+      ["integrity", npm ? "integrity" : "artifactIntegrity"],
+    ])
+      if (!matching.length || matching.some((record) =>
+        typeof record[property] !== "string" || !record[property])) missing.add(field);
     const sources = new Set(
       matching
         .map((record) => registryOrigin(record[npm ? "resolved" : "registry"]))
@@ -275,14 +393,17 @@ function packageMetadata(
         .map((record) => record[npm ? "integrity" : "artifactIntegrity"])
         .filter((value) => typeof value === "string"),
     );
+    const artifacts = new Set<string>(matching
+      .map((record) => record[npm ? "resolved" : "artifactUrl"])
+      .filter((value) => typeof value === "string" && value.length > 0));
     const platform = matching.some((record) =>
       npm
         ? record.optional === true &&
           ["os", "cpu", "libc"].some((field) => record[field]?.length)
-        : record.platformContext != null &&
+        : Boolean(record.platformContext) &&
           record.platformContext !== "os=;cpu=;libc=",
     );
-    result.set(id, { sources, integrities, platform });
+    result.set(id, { sources, artifacts, integrities, platform, missing });
   }
   return result;
 }
@@ -293,6 +414,7 @@ export function compare(npmRoot: string, tapidRoot: string) {
     tapidNodes = installedNodes(tapidRoot),
     npmGraph = reachableGraph(npmRoot),
     tapidGraph = reachableGraph(tapidRoot);
+  const contexts = contextualComparison([npmRoot, tapidRoot]);
   const npmMeta = packageMetadata(
       npmNodes,
       lockRecords(npmRoot, npmNodes, true),
@@ -308,25 +430,27 @@ export function compare(npmRoot: string, tapidRoot: string) {
     npmReachable = npmGraph.pairs,
     tapidReachable = tapidGraph.pairs;
   const sourceMismatches: Json[] = [],
+    artifactUrlMismatches: Json[] = [],
     integrityMismatches: Json[] = [],
     metadataMissing: Json[] = [];
-  for (const identity of sorted(intersection(npmReachable, tapidReachable))) {
+  for (const identity of sorted(new Set([...npmReachable, ...tapidReachable]))) {
     const id = key(identity),
       baseline = npmMeta.get(id),
       evaluated = tapidMeta.get(id);
     for (const [field, metadata, mismatches] of [
       ["source", "sources", sourceMismatches],
+      ["artifactUrl", "artifacts", artifactUrlMismatches],
       ["integrity", "integrities", integrityMismatches],
     ] as const) {
       const before: Set<string> = baseline?.[metadata] ?? new Set(),
         after: Set<string> = evaluated?.[metadata] ?? new Set();
-      if (!before.size || !after.size)
+      if (!before.size || !after.size || baseline?.missing.has(field) || evaluated?.missing.has(field))
         metadataMissing.push({
           name: identity[0],
           version: identity[1],
           field,
         });
-      else if (!intersection(before, after).size)
+      else if (difference(before, after).size || difference(after, before).size)
         mismatches.push({
           name: identity[0],
           version: identity[1],
@@ -354,12 +478,22 @@ export function compare(npmRoot: string, tapidRoot: string) {
     id: string,
   ) => ({
     registryOrigins: [...(metadata.get(id)?.sources ?? [])].sort(),
+    artifactUrls: [...(metadata.get(id)?.artifacts ?? [])].sort(),
     integrities: [...(metadata.get(id)?.integrities ?? [])].sort(),
   });
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     baseline: "npm",
     evaluated: "Tapid",
+    contextualGraphEqual: contexts.equal,
+    contextualGraph: contexts,
+    verificationReceipts: {
+      tapid: (() => {
+        const lock = readJson(join(tapidRoot, "tapid.lock"));
+        return { trees: Object.keys(lock.verifiedTrees ?? {}).length,
+          artifacts: Object.keys(lock.verifiedArtifacts ?? {}).length };
+      })(),
+    },
     environment: {
       system: type(),
       machine: machine(),
@@ -426,6 +560,7 @@ export function compare(npmRoot: string, tapidRoot: string) {
       tapidPlatform,
     ),
     sourceIdentityMismatches: sourceMismatches,
+    artifactUrlMismatches,
     integrityMismatches,
     missingProvenance: metadataMissing,
     missingRequiredEdges: {
@@ -434,6 +569,7 @@ export function compare(npmRoot: string, tapidRoot: string) {
     },
   };
   const mismatch =
+    !contexts.equal ||
     [
       report.reachablePackageDifferences,
       report.dependencyEdgeDifferences,
@@ -441,6 +577,7 @@ export function compare(npmRoot: string, tapidRoot: string) {
       report.platformOptionalPackageDifferences,
     ].some((value) => value.npmOnly.length || value.tapidOnly.length) ||
     sourceMismatches.length ||
+    artifactUrlMismatches.length ||
     integrityMismatches.length ||
     metadataMissing.length ||
     npmGraph.missingRequired.size ||
@@ -452,6 +589,8 @@ export function compare(npmRoot: string, tapidRoot: string) {
   const text = [
     "# News-site dependency graph comparison",
     "Baseline: npm; evaluated package manager: Tapid.",
+    `Contextual graph equality: ${contexts.equal}.`,
+    `Unavailable instance associations: ${contexts.unavailable.length}.`,
     `Reachable package identities: npm ${npmReachable.size}, Tapid ${tapidReachable.size}.`,
     `Physical installed identities: npm ${npmPairs.size}, Tapid ${tapidPairs.size}.`,
     `Reachable package differences: npm-only ${report.reachablePackageDifferences.npmOnly.length}, Tapid-only ${report.reachablePackageDifferences.tapidOnly.length}.`,
@@ -461,6 +600,7 @@ export function compare(npmRoot: string, tapidRoot: string) {
     "Shared platform-optional packages: " +
       names(intersection(npmPlatform, tapidPlatform)),
     `Source mismatches: ${sourceMismatches.length}; integrity mismatches: ${integrityMismatches.length}; missing provenance fields: ${metadataMissing.length}.`,
+    `Artifact URL mismatches: ${artifactUrlMismatches.length}.`,
     "",
     "## Physical-only packages (reported even when unreachable)",
     "npm-only: " + names(difference(npmPairs, tapidPairs)),
@@ -470,17 +610,17 @@ export function compare(npmRoot: string, tapidRoot: string) {
   return { report, text, code: mismatch ? 1 : 0 };
 }
 function main(): number {
-  const { values } = parseArgs({
-    options: {
-      "npm-root": { type: "string" },
-      "tapid-root": { type: "string" },
-      json: { type: "string" },
-      text: { type: "string" },
-    },
-  });
-  if (!values["npm-root"] || !values["tapid-root"])
-    throw new Error("--npm-root and --tapid-root are required");
   try {
+    const { values } = parseArgs({
+      options: {
+        "npm-root": { type: "string" },
+        "tapid-root": { type: "string" },
+        json: { type: "string" },
+        text: { type: "string" },
+      },
+    });
+    if (!values["npm-root"] || !values["tapid-root"])
+      throw new Error("--npm-root and --tapid-root are required");
     const { report, text, code } = compare(
       values["npm-root"],
       values["tapid-root"],
