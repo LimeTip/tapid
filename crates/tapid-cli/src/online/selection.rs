@@ -1,11 +1,111 @@
-//! Typed metadata-to-selection handoff. No artifact or store access is permitted here.
+//! Complete metadata selections and separate profile-scoped source preparation.
 use super::*;
 use tapid_lockfile::{
     NativeDeclaration, NativeDeclarationKind, NativeDependency, NativeDependencyKind,
     NativeSelectedPackage, NativeSelection, NativeSourceEvidence,
 };
 
+/// Complete selection and separately verified materialized sources. This is not a
+/// legacy lock and cannot be activated without layout/lifecycle preparation.
+#[allow(dead_code)]
+pub(super) struct PreparedNativeProfile {
+    pub(super) selection: NativeSelection,
+    pub(super) materialized_keys: BTreeSet<String>,
+    pub(super) sources: BTreeMap<String, PreparedNativeSource>,
+    pub(super) transaction: StoreTransaction,
+}
+
+#[allow(dead_code)]
+pub(super) struct PreparedNativeSource {
+    pub(super) integrity: PackageIntegrity,
+    pub(super) digest: ArtifactDigest,
+    pub(super) tree: PathBuf,
+}
+
 impl graph::ResolvedGraph {
+    /// Validate the entire selection, then fetch only its enabled closure. Source
+    /// receipts remain separate so omitted selections never need invented trees.
+    #[allow(dead_code)]
+    pub(super) fn prepare_native_profile(
+        &self,
+        project: &Path,
+        manifest: &PackageManifest,
+        config: &crate::registry::RegistryConfig,
+        store: &Store,
+        profile: tapid_lockfile::InstallProfile,
+    ) -> Result<PreparedNativeProfile, OperationalError> {
+        let selection = self.native_selection(project, manifest, config)?;
+        let materialized_keys = selection.materialized_keys(profile)?;
+        store.recover_transactions()?;
+        fs::create_dir_all(store.root())
+            .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
+        let mut transaction = store.transaction();
+        let mut fetcher = artifact::ArtifactFetcher {
+            store,
+            config,
+            transports: BTreeMap::new(),
+            allowed_origins: config.configured_origins(),
+        };
+        let mut sources = BTreeMap::new();
+        for id in &self.resolution.selected {
+            let key = self.native_package_key(id)?;
+            if !materialized_keys.contains(&key) {
+                continue;
+            }
+            let record = &self.records[&(
+                id.registry.to_string(),
+                id.name.to_string(),
+                id.version.to_string(),
+            )];
+            let (integrity, digest, tree) = fetcher
+                .prepare(id, record, None, &mut transaction)
+                .map_err(|error| error.for_package(id.into()))?;
+            sources.insert(
+                key,
+                PreparedNativeSource {
+                    integrity,
+                    digest,
+                    tree,
+                },
+            );
+        }
+        Ok(PreparedNativeProfile {
+            selection,
+            materialized_keys,
+            sources,
+            transaction,
+        })
+    }
+
+    fn native_package_key(
+        &self,
+        id: &tapid_registry_client::RegistryPackageId,
+    ) -> Result<String, OperationalError> {
+        let record = &self.records[&(
+            id.registry.to_string(),
+            id.name.to_string(),
+            id.version.to_string(),
+        )];
+        let platform = record
+            .platform
+            .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())
+            .map_err(|error| OperationalError::new(ErrorKind::Resolution, error))?;
+        let peer = self
+            .resolution
+            .peer_contexts
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(LockfilePackageKey::from_source(
+            id.registry.clone(),
+            id.name.clone(),
+            id.version.clone(),
+            &peer,
+            &platform,
+        )
+        .to_string())
+    }
+
     // Kept internal until install/replay can consume pending evidence atomically.
     #[allow(dead_code)]
     pub(super) fn native_selection(
@@ -42,24 +142,7 @@ impl graph::ResolvedGraph {
                     "pending native selections require registry sources",
                 ));
             }
-            let platform = record
-                .platform
-                .selected_context(std::env::consts::OS, std::env::consts::ARCH, current_libc())
-                .map_err(|error| invalid(&error))?;
-            let peer = self
-                .resolution
-                .peer_contexts
-                .get(id)
-                .cloned()
-                .unwrap_or_default();
-            let key = LockfilePackageKey::from_source(
-                id.registry.clone(),
-                id.name.clone(),
-                id.version.clone(),
-                &peer,
-                &platform,
-            )
-            .to_string();
+            let key = self.native_package_key(id)?;
             packages.insert(
                 key.clone(),
                 NativeSelectedPackage {
@@ -200,5 +283,171 @@ impl graph::ResolvedGraph {
             packages,
         )
         .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_preparation_verifies_retained_sources_without_publishing() {
+        let project = tapid_test_support::TempProject::new("profile-retained-source").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1"},"devDependencies":{"tool":"1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        let archives: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/npm-import/registry.json"
+        ))
+        .unwrap();
+        let archive = archives["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "shared" && package["version"] == "1.0.0")
+            .unwrap();
+        let bytes = STANDARD
+            .decode(
+                archive["artifact"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("base64:")
+                    .unwrap(),
+            )
+            .unwrap();
+        let fixture = serde_json::json!({"packages":[
+            {"registry":NPM,"name":"shared","version":"1.0.0", "integrity":integrity(&bytes).to_string(),"artifact":"https://registry.npmjs.org/shared.tgz"},
+            {"registry":NPM,"name":"tool","version":"1.0.0", "integrity":integrity(b"missing").to_string(),"artifact":"https://registry.npmjs.org/tool.tgz"}
+        ]});
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let mut graph = graph::resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        // Supply deterministic bytes through the existing in-memory archive seam;
+        // the complete selection still records the canonical registry archive pin.
+        let record_key = (NPM.to_owned(), "shared".to_owned(), "1.0.0".to_owned());
+        graph.records.get_mut(&record_key).unwrap().copied_archive =
+            Some(std::sync::Arc::new(bytes));
+        let store = Store::new(project.path().join("store"));
+        let prepared = graph
+            .prepare_native_profile(
+                project.path(),
+                &manifest,
+                &config,
+                &store,
+                tapid_lockfile::InstallProfile::production(),
+            )
+            .unwrap();
+        assert_eq!(prepared.sources.len(), 1);
+        assert_eq!(prepared.materialized_keys.len(), 1);
+        let (key, receipt) = prepared.sources.first_key_value().unwrap();
+        assert_eq!(
+            key.parse::<LockfilePackageKey>().unwrap().name.as_str(),
+            "shared"
+        );
+        assert!(receipt.tree.join("package/package.json").is_file());
+        assert_eq!(
+            canonical_tree_digest(&receipt.tree).unwrap(),
+            receipt.digest.to_string()
+        );
+        assert_eq!(
+            receipt.integrity.to_string(),
+            archive["integrity"].as_str().unwrap()
+        );
+        assert!(matches!(
+            store.verified_tree_snapshot(&receipt.digest),
+            Err(tapid_store::IngestError::TreeMissing(_))
+        ));
+        drop(prepared);
+        graph.records.get_mut(&record_key).unwrap().copied_archive =
+            Some(std::sync::Arc::new(b"tampered".to_vec()));
+        let error = graph
+            .prepare_native_profile(
+                project.path(),
+                &manifest,
+                &config,
+                &store,
+                tapid_lockfile::InstallProfile::production(),
+            )
+            .err()
+            .expect("retained integrity failure must fail closed");
+        assert!(error.to_string().contains("integrity mismatch"), "{error}");
+        assert!(!project.path().join("node_modules").exists());
+        assert!(!project.path().join("tapid.lock").exists());
+    }
+
+    #[test]
+    fn cold_production_preparation_never_reads_omitted_artifacts() {
+        let project = tapid_test_support::TempProject::new("profile-cold-artifact-access").unwrap();
+        let text = r#"{"name":"app","version":"1.0.0","devDependencies":{"tool":"1"}}"#;
+        project.write("package.json", text.as_bytes()).unwrap();
+        // This URL is a valid pin, but fixture artifact access treats it as a local
+        // filename that does not exist. Any attempted read fails deterministically.
+        let fixture = serde_json::json!({"packages":[{
+            "registry":NPM,"name":"tool","version":"1.0.0",
+            "integrity":integrity(b"unavailable").to_string(),
+            "artifact":"https://registry.npmjs.org/tool.tgz"
+        }]});
+        let fixture = project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let manifest = PackageManifest::parse(text).unwrap();
+        let config = crate::registry::RegistryConfig::default();
+        let graph = graph::resolve_package_graph(
+            project.path(),
+            &manifest,
+            workspace_materialization(project.path(), &config).unwrap(),
+            Some(&fixture),
+            false,
+            &config,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+        let store = Store::new(project.path().join("store"));
+        let prepared = graph
+            .prepare_native_profile(
+                project.path(),
+                &manifest,
+                &config,
+                &store,
+                tapid_lockfile::InstallProfile::production(),
+            )
+            .unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_str(&prepared.selection.to_json().unwrap()).unwrap();
+        assert_eq!(wire["packages"].as_object().unwrap().len(), 1);
+        assert!(prepared.sources.is_empty());
+        assert!(prepared.materialized_keys.is_empty());
+        assert!(!project.path().join("node_modules").exists());
+        assert!(!project.path().join("tapid.lock").exists());
+        drop(prepared);
+        let error = graph
+            .prepare_native_profile(
+                project.path(),
+                &manifest,
+                &config,
+                &store,
+                tapid_lockfile::InstallProfile::default(),
+            )
+            .err()
+            .expect("full preparation must attempt the missing artifact");
+        assert!(
+            error.to_string().contains("cannot read artifact"),
+            "{error}"
+        );
     }
 }
