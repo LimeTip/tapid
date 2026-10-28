@@ -153,6 +153,15 @@ membership. These DTOs are untrusted until that authentication succeeds. There i
 public token verifier or account implementation here. Roles are authority-owned;
 consumers use granted scopes instead of inventing a second role model.
 
+After deserialization, explicitly call `AccountAuthorization::validate()`. It checks
+supported version first (`unsupported_version`), then returns `invalid_request` for
+noncanonical authority/audience HTTPS origins; blank, control-containing or over-4096
+UTF-8 byte subject, tenant or credential IDs; duplicate scopes; unsafe integer times;
+or issued >= expires. Empty scopes are valid and grant nothing. Times may be zero
+but must not exceed 9007199254740991. Recognized scopes are enforced by enum parsing.
+This pure validation does not authenticate introspection, compare configured deployment
+origins, check current time, membership or revocation, or authorize an operation.
+
 The scopes are `read_private`, `submit_analysis`, and `publish_evidence`. The last
 is a separate permission, never implied by read or submit. All private retrieval
 requires `read_private` for the exact tenant. Submission requires `submit_analysis`.
@@ -196,6 +205,18 @@ both missing and unauthorized private records. Detailed authorization reasons ar
 for the caller's own credential/tenant operation, not cross-tenant existence probes.
 Retry metadata conveys no security result, and errors do not advance replay state.
 
+Call `EvidencePublicationRequest::validate()` after deserialization: require the
+supported version, a nonblank control-free tenant of at most 4096 UTF-8 bytes, a
+canonical `sha256-<64 lowercase hex digits>` evidence digest, and an expected sequence
+from 1 through 9007199254740991. This does not prove evidence ownership or authorize
+publication. `SecurityErrorResponse::validate()` requires the supported version and
+optional retry seconds from 0 through 9007199254740991; absent/null retry is valid.
+Both methods return `unsupported_version` before other semantic errors, which return
+`invalid_request`. Unknown codes/fields, duplicate fields and malformed JSON remain
+parsing failures (`malformed` at adapters that map parsing errors to security reasons).
+Deserialization alone does not invoke these methods. This tightens v1 semantic
+validation without changing fields, enum cases or the valid frozen-consumer fixtures.
+
 ## Bounds, evolution and fixtures
 
 Requests, results and errors are UTF-8 JSON. Transport adapters must cap bodies,
@@ -229,7 +250,8 @@ node --experimental-strip-types scripts/dev.ts test -p tapid-attestations --test
 ```
 
 Tests cover applicability substitution, digest mismatch, unsigned/tampered evidence,
-unknown version/issuer/key, removed keys, expiry, future issuance, replay/equivocation,
+unknown version/issuer/key, overlapping and retired keys, signed withdrawal replay,
+expiry, future issuance, replay/equivocation,
 incomplete coverage, unsafe integers, contradictory status, duplicates and bounds.
 They make no claim about live scanner quality, hosted authorization enforcement,
 production trust distribution, persistent replay storage, cross-platform networking,
