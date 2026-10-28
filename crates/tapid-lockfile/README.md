@@ -75,3 +75,18 @@ truncation flag. Native peer edges retain all same-origin contextual candidates
 for explanation; they do not prove an exact security-evidence subject. Consumers
 must establish applicability separately. Graph inspection does not load store
 content, recover transactions, resolve versions, or mutate the lock.
+
+`ImportedNpmGraph::paths_to()` uses the same bounded traversal over npm placement
+keys. Callers supply registry or workspace entry points; local workspace links,
+registry dependencies and recorded peer placements remain traversable, including
+optional and platform-specific branches without host selection. A workspace root
+uses its root-relative source path, not the physical link path. Registry entry
+point section kinds remain generic `dependency`; recorded package peer edges
+are labeled `peer`.
+
+Both graph types provide `paths_to_key()` for explaining one exact native key or
+imported placement. Other same-name occurrences do not consume its displayed
+path budget. Paths retain incoming alias names; imported identity, peer targets
+and platform alternatives remain in the original graph rather than being
+coerced into a native identity. Path truncation describes explanation display,
+not security-check coverage or proof of applicability.

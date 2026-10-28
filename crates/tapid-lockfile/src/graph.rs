@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Lockfile, LockfileError, LockfilePackageKey, LockfilePackageSource};
@@ -164,34 +165,98 @@ impl LockedGraph {
         roots: &[LockedGraphRoot],
         requested: &tapid_core::PackageName,
     ) -> LockedGraphPaths {
-        let mut state = SearchState::default();
-        for root in roots {
-            let Some(source_kind) = self.nodes.get(&root.key).map(source_kind) else {
-                continue;
-            };
-            let mut path = vec![LockedGraphStep {
-                key: root.key.clone(),
-                via: Some(root.name.clone()),
-                edge_kind: Some(root.kind.clone()),
-                source_kind,
-            }];
-            search_paths(
-                &root.key,
-                requested,
-                self,
-                &mut BTreeSet::from([root.key.clone()]),
-                &mut path,
-                &mut state,
-                0,
-            );
-            if state.truncated {
-                break;
-            }
+        paths_to(self, roots, PathTarget::Name(requested.as_str()))
+    }
+
+    /// Explain one exact source/context-qualified key. Other occurrences with
+    /// the same name do not consume the displayed-path limit.
+    pub fn paths_to_key(&self, roots: &[LockedGraphRoot], key: &str) -> LockedGraphPaths {
+        paths_to(self, roots, PathTarget::Key(key))
+    }
+}
+
+impl crate::ImportedNpmGraph {
+    /// Bounded explanation paths over recorded placements, including peers and
+    /// optional/platform branches. Keys in roots and results are npm paths;
+    /// identities and constraints remain available in the imported graph.
+    pub fn paths_to(
+        &self,
+        roots: &[LockedGraphRoot],
+        requested: &tapid_core::PackageName,
+    ) -> LockedGraphPaths {
+        paths_to(
+            &crate::npm_import::ImportedPathGraph::new(self),
+            roots,
+            PathTarget::Name(requested.as_str()),
+        )
+    }
+
+    /// Explain one exact imported placement without collapsing equal names or
+    /// peer contexts. Uses the same bounds as native graph traversal.
+    pub fn paths_to_key(&self, roots: &[LockedGraphRoot], key: &str) -> LockedGraphPaths {
+        paths_to(
+            &crate::npm_import::ImportedPathGraph::new(self),
+            roots,
+            PathTarget::Key(key),
+        )
+    }
+}
+
+pub(crate) trait PathGraph {
+    fn node(&self, key: &str) -> Option<(&str, &'static str)>;
+    fn outgoing(&self, key: &str) -> Cow<'_, [LockedGraphEdge]>;
+}
+
+impl PathGraph for LockedGraph {
+    fn node(&self, key: &str) -> Option<(&str, &'static str)> {
+        self.nodes
+            .get(key)
+            .map(|node| (node.name.as_str(), source_kind(node)))
+    }
+
+    fn outgoing(&self, key: &str) -> Cow<'_, [LockedGraphEdge]> {
+        Cow::Borrowed(self.edges.get(key).map(Vec::as_slice).unwrap_or_default())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PathTarget<'a> {
+    Name(&'a str),
+    Key(&'a str),
+}
+
+fn paths_to(
+    graph: &impl PathGraph,
+    roots: &[LockedGraphRoot],
+    requested: PathTarget<'_>,
+) -> LockedGraphPaths {
+    let mut state = SearchState::default();
+    for root in roots {
+        let Some((_, source_kind)) = graph.node(&root.key) else {
+            continue;
+        };
+        let mut path = vec![LockedGraphStep {
+            key: root.key.clone(),
+            via: Some(root.name.clone()),
+            edge_kind: Some(root.kind.clone()),
+            source_kind,
+        }];
+        search_paths(
+            &root.key,
+            requested,
+            graph,
+            &mut BTreeSet::from([root.key.clone()]),
+            &mut path,
+            &mut state,
+            0,
+        );
+        if state.truncated {
+            break;
         }
-        LockedGraphPaths {
-            paths: state.paths,
-            truncated: state.truncated,
-        }
+    }
+    LockedGraphPaths {
+        paths: state.paths,
+        truncated: state.truncated,
     }
 }
 
@@ -213,8 +278,8 @@ fn source_kind(key: &LockfilePackageKey) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn search_paths(
     current: &str,
-    requested: &tapid_core::PackageName,
-    graph: &LockedGraph,
+    requested: PathTarget<'_>,
+    graph: &impl PathGraph,
     visited: &mut BTreeSet<String>,
     path: &mut Vec<LockedGraphStep>,
     state: &mut SearchState,
@@ -225,10 +290,13 @@ fn search_paths(
         return;
     }
     state.visits += 1;
-    let Some(current_key) = graph.nodes.get(current) else {
+    let Some((name, _)) = graph.node(current) else {
         return;
     };
-    if &current_key.name == requested {
+    if match requested {
+        PathTarget::Name(requested) => name == requested,
+        PathTarget::Key(requested) => current == requested,
+    } {
         if state.paths.len() == MAX_PATHS {
             state.truncated = true;
         } else {
@@ -238,23 +306,19 @@ fn search_paths(
         }
     }
     if depth >= MAX_DEPTH {
-        if graph
-            .edges
-            .get(current)
-            .is_some_and(|edges| !edges.is_empty())
-        {
+        if !graph.outgoing(current).is_empty() {
             state.truncated = true;
         }
         return;
     }
-    for edge in graph.edges.get(current).into_iter().flatten() {
+    for edge in graph.outgoing(current).iter() {
         if state.truncated {
             return;
         }
         if !visited.insert(edge.target.clone()) {
             continue;
         }
-        let Some(source_kind) = graph.nodes.get(&edge.target).map(source_kind) else {
+        let Some((_, source_kind)) = graph.node(&edge.target) else {
             visited.remove(&edge.target);
             continue;
         };
@@ -359,7 +423,7 @@ mod tests {
         }];
         search_paths(
             &root,
-            &requested,
+            PathTarget::Name(requested.as_str()),
             &graph,
             &mut BTreeSet::from([root.clone()]),
             &mut path,
@@ -409,7 +473,7 @@ mod tests {
         let mut state = SearchState::default();
         search_paths(
             &root,
-            &requested,
+            PathTarget::Name(requested.as_str()),
             &graph,
             &mut BTreeSet::from([root.clone()]),
             &mut vec![LockedGraphStep {

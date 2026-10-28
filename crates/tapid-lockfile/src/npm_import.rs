@@ -364,6 +364,100 @@ impl ImportedNpmGraph {
     }
 }
 
+/// One placement index per traversal, shared by all workspace visits.
+pub(crate) struct ImportedPathGraph<'a> {
+    graph: &'a ImportedNpmGraph,
+    placements: BTreeMap<String, ()>,
+}
+
+impl<'a> ImportedPathGraph<'a> {
+    pub(crate) fn new(graph: &'a ImportedNpmGraph) -> Self {
+        Self {
+            graph,
+            placements: graph
+                .packages
+                .keys()
+                .chain(graph.workspace_links.keys())
+                .map(|path| (path.clone(), ()))
+                .collect(),
+        }
+    }
+}
+
+impl crate::graph::PathGraph for ImportedPathGraph<'_> {
+    fn node(&self, key: &str) -> Option<(&str, &'static str)> {
+        self.graph
+            .packages
+            .get(key)
+            .map(|node| (node.name.as_str(), "registry"))
+            .or_else(|| {
+                self.graph
+                    .workspaces
+                    .get(key)
+                    .map(|node| (node["name"].as_str().unwrap_or_default(), "workspace"))
+            })
+    }
+
+    fn outgoing(&self, key: &str) -> std::borrow::Cow<'_, [crate::LockedGraphEdge]> {
+        use crate::LockedGraphEdge;
+        let mut edges = Vec::new();
+        if let Some(package) = self.graph.packages.get(key) {
+            for (kind, targets) in [
+                ("dependency", &package.dependencies),
+                ("peer", &package.peers),
+            ] {
+                edges.extend(targets.iter().map(|(name, target)| LockedGraphEdge {
+                    name: name.clone(),
+                    target: target.clone(),
+                    kind,
+                }));
+            }
+        } else if let Some(member) = self.graph.member_roots.get(key) {
+            edges.extend(
+                member
+                    .dependencies
+                    .iter()
+                    .map(|(name, target)| LockedGraphEdge {
+                        name: name.clone(),
+                        target: target.clone(),
+                        kind: "dependency",
+                    }),
+            );
+            // Registry entry points deliberately omit local links. Reuse npm's
+            // validated placement lookup to retain local workspace edges too.
+            for field in [
+                "dependencies",
+                "devDependencies",
+                "optionalDependencies",
+                "peerDependencies",
+            ] {
+                for name in self.graph.workspaces[key][field]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|fields| fields.keys())
+                {
+                    let peer = field == "peerDependencies";
+                    if let Some(target) = parse::lookup(&self.placements, key, name, peer)
+                        .and_then(|placement| self.graph.workspace_links.get(&placement))
+                    {
+                        let kind = if peer { "peer" } else { "dependency" };
+                        if !edges.iter().any(|edge| {
+                            edge.name == *name && edge.target == *target && edge.kind == kind
+                        }) {
+                            edges.push(LockedGraphEdge {
+                                name: name.clone(),
+                                target: target.clone(),
+                                kind,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        std::borrow::Cow::Owned(edges)
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

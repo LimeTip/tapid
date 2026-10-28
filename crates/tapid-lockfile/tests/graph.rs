@@ -1,6 +1,192 @@
 use std::collections::BTreeMap;
 use tapid_lockfile::{LockedPackage, Lockfile, RegistryIntegrityProvenance};
 
+#[test]
+fn imported_paths_preserve_alias_placements_and_contextual_duplicates() {
+    let mut input: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-import-package-lock.json")).unwrap();
+    input["packages"][""]["dependencies"]["renamed"] = serde_json::json!("npm:shared@1.0.0");
+    let mut alias = input["packages"]["node_modules/shared"].clone();
+    alias["name"] = serde_json::json!("shared");
+    input["packages"]["node_modules/renamed"] = alias;
+    let mut nested = input["packages"]["node_modules/consumer"].clone();
+    nested["peerDependencies"]["shared"] = serde_json::json!("2.0.0");
+    input["packages"]["node_modules/parent"]["dependencies"]["consumer"] =
+        serde_json::json!("1.0.0");
+    input["packages"]["node_modules/parent/node_modules/consumer"] = nested;
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &input.to_string(),
+        &input["packages"][""].to_string(),
+        &format!("sha256-{}", "a".repeat(64)),
+    )
+    .unwrap();
+    let before = lock.to_json().unwrap();
+    let graph = lock.graph().unwrap();
+    let roots = graph
+        .roots
+        .iter()
+        .map(|(name, key)| tapid_lockfile::LockedGraphRoot {
+            key: key.clone(),
+            name: name.clone(),
+            kind: "dependencies".into(),
+        })
+        .collect::<Vec<_>>();
+    let paths = graph.paths_to(&roots, &"consumer".parse().unwrap());
+    assert!(!paths.truncated);
+    assert_eq!(paths.paths.len(), 2);
+    assert_eq!(
+        paths.paths[0].steps.last().unwrap().key,
+        "node_modules/consumer"
+    );
+    assert_eq!(
+        paths.paths[1].steps.last().unwrap().key,
+        "node_modules/parent/node_modules/consumer"
+    );
+    assert_ne!(
+        graph.peer_context("node_modules/consumer"),
+        graph.peer_context("node_modules/parent/node_modules/consumer")
+    );
+    let shared = graph.paths_to(&roots, &"shared".parse().unwrap());
+    assert!(
+        shared
+            .paths
+            .iter()
+            .any(|path| path
+                .steps
+                .last()
+                .is_some_and(|step| step.key == "node_modules/renamed"
+                    && step.via.as_deref() == Some("renamed")))
+    );
+    let native = graph.paths_to(&roots, &"native".parse().unwrap());
+    assert_eq!(
+        native.paths.len(),
+        1,
+        "recorded optional platforms must not be host-filtered"
+    );
+    assert_eq!(lock.to_json().unwrap(), before);
+}
+
+#[test]
+fn imported_workspace_paths_retain_member_source_and_exact_peer_placement() {
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-import-package-lock.json")).unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});
+    let member = serde_json::json!({"name":"member","version":"1.0.0","dependencies":{"consumer":"1"},"optionalDependencies":{"native":"1"}});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root, "packages/member":member,
+        "node_modules/member":{"resolved":"packages/member","link":true},
+        "packages/member/node_modules/consumer":reference["packages"]["node_modules/consumer"],
+        "packages/member/node_modules/shared":reference["packages"]["node_modules/shared"],
+        "packages/member/node_modules/native":reference["packages"]["node_modules/native"]
+    }});
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &input.to_string(),
+        &root.to_string(),
+        &format!("sha256-{}", "a".repeat(64)),
+    )
+    .unwrap();
+    let graph = lock.graph().unwrap();
+    let roots = [tapid_lockfile::LockedGraphRoot {
+        key: "packages/member".into(),
+        name: "member".into(),
+        kind: "workspace".into(),
+    }];
+    let paths = graph.paths_to(&roots, &"shared".parse().unwrap());
+    assert!(!paths.truncated);
+    assert_eq!(paths.paths.len(), 1);
+    let steps = &paths.paths[0].steps;
+    assert_eq!(steps.len(), 3);
+    assert_eq!(steps[0].key, "packages/member");
+    assert_eq!(steps[0].source_kind, "workspace");
+    assert_eq!(steps[2].key, "packages/member/node_modules/shared");
+    assert_eq!(steps[2].edge_kind.as_deref(), Some("peer"));
+    assert_eq!(
+        graph
+            .paths_to(&roots, &"native".parse().unwrap())
+            .paths
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn imported_workspace_selection_traverses_local_workspace_dependencies() {
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-import-package-lock.json")).unwrap();
+    let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});
+    let input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":root,
+        "packages/a":{"name":"a","version":"1.0.0","dependencies":{"b":"1"}},
+        "packages/b":{"name":"b","version":"1.0.0","dependencies":{"a":"1","shared":"1"}},
+        "node_modules/a":{"resolved":"packages/a","link":true},
+        "node_modules/b":{"resolved":"packages/b","link":true},
+        "node_modules/shared":reference["packages"]["node_modules/shared"]
+    }});
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &input.to_string(),
+        &root.to_string(),
+        &format!("sha256-{}", "a".repeat(64)),
+    )
+    .unwrap();
+    let graph = lock.graph().unwrap();
+    let paths = graph.paths_to_key(
+        &[tapid_lockfile::LockedGraphRoot {
+            key: "packages/a".into(),
+            name: "a".into(),
+            kind: "workspace".into(),
+        }],
+        "node_modules/shared",
+    );
+    assert!(!paths.truncated);
+    assert_eq!(paths.paths.len(), 1);
+    assert_eq!(
+        paths.paths[0]
+            .steps
+            .iter()
+            .map(|step| step.key.as_str())
+            .collect::<Vec<_>>(),
+        ["packages/a", "packages/b", "node_modules/shared"]
+    );
+    assert_eq!(paths.paths[0].steps[1].source_kind, "workspace");
+    assert_eq!(paths.paths[0].steps[1].via.as_deref(), Some("b"));
+}
+
+#[test]
+fn imported_exact_paths_do_not_spend_the_display_budget_on_other_aliases() {
+    let mut input: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-import-package-lock.json")).unwrap();
+    let mut package = input["packages"]["node_modules/shared"].clone();
+    package["name"] = serde_json::json!("shared");
+    for index in 0..51 {
+        let name = format!("alias{index:02}");
+        input["packages"][""]["dependencies"][&name] = serde_json::json!("npm:shared@1.0.0");
+        input["packages"][format!("node_modules/{name}")] = package.clone();
+    }
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &input.to_string(),
+        &input["packages"][""].to_string(),
+        &format!("sha256-{}", "a".repeat(64)),
+    )
+    .unwrap();
+    let graph = lock.graph().unwrap();
+    let roots = graph
+        .roots
+        .iter()
+        .map(|(name, key)| tapid_lockfile::LockedGraphRoot {
+            key: key.clone(),
+            name: name.clone(),
+            kind: "dependencies".into(),
+        })
+        .collect::<Vec<_>>();
+    let by_name = graph.paths_to(&roots, &"shared".parse().unwrap());
+    assert_eq!(by_name.paths.len(), 50);
+    assert!(by_name.truncated);
+    let exact = graph.paths_to_key(&roots, "node_modules/alias50");
+    assert_eq!(exact.paths.len(), 1);
+    assert!(!exact.truncated);
+    assert_eq!(exact.paths[0].steps[0].via.as_deref(), Some("alias50"));
+}
+
 fn package(registry: &str, name: &str) -> LockedPackage {
     LockedPackage::new_with_provenance(
         registry,
@@ -46,6 +232,21 @@ fn projection_preserves_registry_collisions_and_alias_bindings() {
         edges
             .iter()
             .any(|edge| edge.name == "shared" && edge.target == public_key)
+    );
+    let paths = graph.paths_to_key(
+        &[tapid_lockfile::LockedGraphRoot {
+            key: root_key,
+            name: "root".into(),
+            kind: "dependencies".into(),
+        }],
+        &private_key,
+    );
+    assert!(!paths.truncated);
+    assert_eq!(paths.paths.len(), 1);
+    assert_eq!(paths.paths[0].steps[1].key, private_key);
+    assert_eq!(
+        paths.paths[0].steps[1].via.as_deref(),
+        Some("private-alias")
     );
 }
 
