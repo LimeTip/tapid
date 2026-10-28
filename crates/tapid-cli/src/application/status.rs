@@ -135,7 +135,7 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
         ],
         capabilities: json!({
             "experimental": true,
-            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION],
+            "lock_schemas": [4, 5, 6, tapid_lockfile::LOCKFILE_VERSION, 8, tapid_lockfile::LIFECYCLE_LOCKFILE_VERSION, tapid_lockfile::COPIED_SOURCE_LOCKFILE_VERSION, tapid_lockfile::COMPATIBILITY_LOCKFILE_VERSION],
             "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",

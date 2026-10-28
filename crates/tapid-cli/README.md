@@ -512,8 +512,11 @@ compared with this Tapid version. Other managers, manager ranges/integrity
 suffixes, and any declared `devEngines` are unsupported. No declaration runs
 Corepack or delegates to another manager.
 
-Native/imported replay currently reports selected-package evidence as unknown;
-these observations are not yet persisted in native locks. Offline replay does
-not fetch metadata or rewrite locks to enrich the report. Inspected absence is
-`not_declared`, never a claim of universal runtime support. Status and explain
+Fresh native locks persist selected declarations (including inspected absence and
+malformed types) under schema 11. Native replay reads this evidence without Node
+or metadata requests; older native locks and imported replay without evidence
+report unknown. Copied sources use their verified original manifest. Offline
+replay does not fetch metadata or rewrite locks to enrich the report. Inspected
+absence is `not_declared`, never a claim of universal runtime support. Status and
+explain
 have not yet acquired this install report.

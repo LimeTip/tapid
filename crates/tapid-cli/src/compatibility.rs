@@ -115,6 +115,7 @@ impl Report {
         &mut self,
         key: &str,
         requirement: &tapid_registry_client::NodeEngineRequirement,
+        provenance: &'static str,
     ) {
         use tapid_registry_client::NodeEngineRequirement as R;
         let declaration = match requirement {
@@ -132,7 +133,7 @@ impl Report {
         self.facts.push(Fact {
             location: "engines/node".into(),
             identity: key.into(),
-            provenance: "registry_metadata",
+            provenance,
             requirement: match requirement {
                 R::Range(range) => Some(range.clone()),
                 _ => None,
@@ -141,6 +142,14 @@ impl Report {
             status,
             reason,
         });
+    }
+
+    pub(crate) fn locked_package(&mut self, key: &str, package: &tapid_lockfile::LockedPackage) {
+        self.selected_package(
+            key,
+            &registry_node_engine(package.node_engine()),
+            "native_lock",
+        );
     }
 
     /// Historical locks have no declaration evidence. Omission cannot mean absence.
@@ -175,5 +184,33 @@ fn node_evaluation(
                 ("unevaluable_range", "unsupported", "unsupported_node_range")
             }
         }
+    }
+}
+
+pub(crate) fn lock_node_engine(
+    requirement: &tapid_registry_client::NodeEngineRequirement,
+) -> tapid_lockfile::LockedNodeEngine {
+    use tapid_lockfile::LockedNodeEngine as L;
+    use tapid_registry_client::NodeEngineRequirement as R;
+    match requirement {
+        R::Unknown => L::Unknown,
+        R::NotDeclared => L::NotDeclared,
+        R::Range(range) => L::Range(range.clone()),
+        R::MalformedEngines => L::MalformedEngines,
+        R::MalformedNode => L::MalformedNode,
+    }
+}
+
+pub(crate) fn registry_node_engine(
+    requirement: &tapid_lockfile::LockedNodeEngine,
+) -> tapid_registry_client::NodeEngineRequirement {
+    use tapid_lockfile::LockedNodeEngine as L;
+    use tapid_registry_client::NodeEngineRequirement as R;
+    match requirement {
+        L::Unknown => R::Unknown,
+        L::NotDeclared => R::NotDeclared,
+        L::Range(range) => R::Range(range.clone()),
+        L::MalformedEngines => R::MalformedEngines,
+        L::MalformedNode => R::MalformedNode,
     }
 }

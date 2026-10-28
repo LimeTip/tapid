@@ -1261,7 +1261,7 @@ fn record_compatibility(
     project: &Path,
     links: &tapid_linker::WorkspaceLinkPlan,
     lock: &Lockfile,
-    node_engines: &BTreeMap<String, tapid_registry_client::NodeEngineRequirement>,
+    node_engines: &BTreeMap<String, (tapid_registry_client::NodeEngineRequirement, &'static str)>,
 ) -> Result<(), OperationalError> {
     let report = outcome
         .compatibility
@@ -1277,10 +1277,12 @@ fn record_compatibility(
             .replace('\\', "/");
         report.manifest(&manifest, &location);
     }
-    for key in lock.packages().keys() {
+    for (key, package) in lock.packages() {
         match node_engines.get(key) {
-            Some(requirement) => report.selected_package(key, requirement),
-            None => report.unknown_package(key),
+            Some((requirement, provenance)) => {
+                report.selected_package(key, requirement, provenance)
+            }
+            None => report.locked_package(key, package),
         }
     }
     Ok(())

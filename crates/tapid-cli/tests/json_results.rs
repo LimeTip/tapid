@@ -1642,7 +1642,7 @@ fn advisory_compatibility_distinguishes_absent_malformed_and_manager_requirement
 }
 
 #[test]
-fn native_replay_reports_unknown_selected_evidence_without_rewriting_lock() {
+fn native_replay_preserves_selected_evidence_without_rewriting_lock() {
     let project = TempProject::new("json-compatibility-replay").unwrap();
     project
         .write(
@@ -1682,14 +1682,14 @@ fn native_replay_reports_unknown_selected_evidence_without_rewriting_lock() {
     assert!(output.status.success(), "{replay}");
     assert_eq!(replay["data"]["replayed"], true);
     let report = &replay["data"]["compatibility"];
-    assert_eq!(report["evidence_complete"], false);
-    assert_eq!(report["strict_satisfied"], false);
+    assert_eq!(report["evidence_complete"], true);
+    assert_eq!(report["strict_satisfied"], true);
     assert!(
         report["facts"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|f| f["status"] == "unknown_evidence" && f["provenance"] == "unavailable")
+            .any(|f| f["status"] == "not_declared" && f["provenance"] == "native_lock")
     );
     assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
 }
@@ -1734,4 +1734,105 @@ fn compatibility_presentation_bounds_do_not_hide_full_report_rejection() {
             .unwrap()
             .contains(&serde_json::json!("/data/compatibility/facts"))
     );
+}
+
+#[test]
+fn native_replay_retains_ranges_malformed_and_historical_unknown_evidence() {
+    for (engines, status, requirement) in [
+        (
+            serde_json::json!({"node":">=22"}),
+            "unchecked_runtime",
+            serde_json::json!(">=22"),
+        ),
+        (
+            serde_json::json!({"node":false}),
+            "unsupported",
+            serde_json::Value::Null,
+        ),
+        (
+            serde_json::Value::Null,
+            "unsupported",
+            serde_json::Value::Null,
+        ),
+    ] {
+        let project = TempProject::new("json-native-engine-evidence").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+            )
+            .unwrap();
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/npm-aliases.json")).unwrap();
+        fixture["packages"][0]["engines"] = engines;
+        project
+            .write("registry.json", fixture.to_string().as_bytes())
+            .unwrap();
+        let store = project.path().join("store");
+        let (output, fresh) = invoke(
+            &project,
+            &[
+                "install",
+                "--json",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{fresh}");
+        fs::remove_file(project.path().join("registry.json")).unwrap();
+        let lock_path = project.path().join("tapid.lock");
+        let original = fs::read(&lock_path).unwrap();
+        for historical in [false, true] {
+            if historical {
+                let mut lock: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                lock["lockfileVersion"] = 7.into();
+                for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+                    package.as_object_mut().unwrap().remove("nodeEngine");
+                }
+                fs::write(&lock_path, lock.to_string()).unwrap();
+            }
+            let before = fs::read(&lock_path).unwrap();
+            let (output, replay) = invoke(
+                &project,
+                &[
+                    "install",
+                    "--offline",
+                    "--json",
+                    "--store-dir",
+                    store.to_str().unwrap(),
+                ],
+            );
+            assert!(output.status.success(), "{replay}");
+            let report = &replay["data"]["compatibility"];
+            assert_eq!(report["evidence_complete"], !historical);
+            let fact = report["facts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["identity"].as_str().unwrap().contains("|h3@1.0.0|"))
+                .unwrap();
+            assert_eq!(
+                fact["status"],
+                if historical {
+                    "unknown_evidence"
+                } else {
+                    status
+                }
+            );
+            assert_eq!(
+                fact["provenance"],
+                if historical {
+                    "unavailable"
+                } else {
+                    "native_lock"
+                }
+            );
+            if !historical {
+                assert_eq!(fact["requirement"], requirement);
+            }
+            assert_eq!(fs::read(&lock_path).unwrap(), before);
+        }
+    }
 }

@@ -30,6 +30,7 @@ fn outdated_schema_6_uses_direct_root_instead_of_newer_transitive_version() {
     lock["lockfileVersion"] = 6.into();
     lock.as_object_mut().unwrap().remove("rootBindings");
     for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package.as_object_mut().unwrap().remove("nodeEngine");
         if let Some(aliases) = package.as_object_mut().unwrap().remove("dependencyAliases") {
             for (local, actual) in aliases.as_object().unwrap() {
                 let dependencies = package["dependencies"].as_object_mut().unwrap();

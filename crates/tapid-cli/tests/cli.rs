@@ -236,26 +236,17 @@ fn install_output_counts_exact_lock_selections() {
     let manifest = br#"{"name":"output","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#;
     project.write("package.json", manifest).unwrap();
     let args = ["install", "--registry-fixture", "registry.json"];
-    for (index, expected) in [
+    for expected in [
         "Lock selections: 1 added, 0 changed, 0 reused, 0 removed",
         "Lock selections: 0 added, 0 changed, 1 reused, 0 removed",
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ] {
         let output = run(project.path(), &args);
         assert!(output.status.success(), "{output:?}");
         assert!(
             String::from_utf8_lossy(&output.stdout).contains(expected),
             "{output:?}"
         );
-        if index == 0 {
-            assert!(output.stderr.is_empty(), "{output:?}");
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains("Compatibility warning:"), "{stderr}");
-            assert!(stderr.contains("unknown_evidence (selected_package_evidence_unavailable, requirement: unspecified)"), "{stderr}");
-        }
+        assert!(output.stderr.is_empty(), "{output:?}");
     }
     let output = run(project.path(), &["install", "--offline", "--frozen"]);
     assert!(output.status.success(), "{output:?}");
@@ -808,6 +799,9 @@ fn legacy_replay_rejects_same_local_name_from_different_registries() {
     )
     .into();
     lock["lockfileVersion"] = 6.into();
+    for package in lock["packages"].as_object_mut().unwrap().values_mut() {
+        package.as_object_mut().unwrap().remove("nodeEngine");
+    }
     lock.as_object_mut().unwrap().remove("rootBindings");
     let lock_bytes = lock.to_string();
     fs::write(dir.join("tapid.lock"), &lock_bytes).unwrap();
@@ -2286,7 +2280,7 @@ fn root_install_links_ordinary_workspace_dependencies_without_registry_resolutio
 
     let lock: serde_json::Value =
         serde_json::from_slice(&fs::read(dir.join("tapid.lock")).unwrap()).unwrap();
-    assert_eq!(lock["lockfileVersion"], 7);
+    assert_eq!(lock["lockfileVersion"], 11);
     assert!(
         lock["workspacePackages"]
             .as_object()
@@ -7234,6 +7228,9 @@ fn offline_replay_uses_exact_roots_when_names_have_transitive_versions() {
 
     let mut legacy = canonical;
     legacy["lockfileVersion"] = 4.into();
+    for package in legacy["packages"].as_object_mut().unwrap().values_mut() {
+        package.as_object_mut().unwrap().remove("nodeEngine");
+    }
     legacy.as_object_mut().unwrap().remove("roots");
     legacy.as_object_mut().unwrap().remove("rootBindings");
     fs::write(
@@ -8056,6 +8053,10 @@ fn copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay(
     let lock = Lockfile::from_json(std::str::from_utf8(&locked).unwrap()).unwrap();
     assert_eq!(lock.packages().len(), 2);
     assert!(lock.root_bindings()["copied"].starts_with("file:vendor/pkg.tgz#sha256-"));
+    assert_eq!(
+        lock.packages()[&lock.root_bindings()["copied"]].node_engine(),
+        &tapid_lockfile::LockedNodeEngine::NotDeclared
+    );
     let why = run(dir, &["--json", "why", "h3"]);
     assert!(
         why.status.success(),

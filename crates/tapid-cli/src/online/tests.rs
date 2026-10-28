@@ -678,6 +678,7 @@ fn record(version: &str, dependency_requirement: Option<&str>) -> PackageRecord 
 
 fn named_record(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageRecord {
     PackageRecord {
+        node_engine_provenance: "unavailable",
         node_engine: Default::default(),
         git_reference: None,
         copied_archive: None,

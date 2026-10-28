@@ -104,15 +104,20 @@ are `unsupported`, and unavailable selected-package evidence is
 `unknown_evidence`. Exact Tapid manager versions can be `satisfied` or
 `incompatible` independently of Node evidence.
 
+Native schema-11 replay reports persisted declarations with `native_lock`
+provenance. Historical native omission remains `unknown_evidence`; replay does
+not rewrite the lock to supply evidence. Fresh copied-source declarations come
+from the verified original manifest (`verified_source_manifest`), independently
+of registry metadata.
+
 Compatibility strings use the envelope's sanitization and text bounds. The
 presentation includes at most 1,024 facts, `omitted_facts`, and
 `details_complete`; any omission or shortened string is also named in
 `truncated_fields`. `strict_satisfied` evaluates all internal facts before
 presentation bounds. Evidence completeness describes declaration availability,
-not runtime identification or display completeness. Native/imported replay
-currently reports unknown selected-package evidence without fetching metadata
-or enriching frozen locks. See the [current CLI scope](../crates/tapid-cli/README.md#advisory-compatibility-observations).
-
+not runtime identification or display completeness. Replay uses available lock
+evidence without fetching metadata or enriching frozen locks; unavailable evidence
+remains unknown. See the [current CLI scope](../crates/tapid-cli/README.md#advisory-compatibility-observations).
 
 `tapid --json install --dry-run`, `add --dry-run`, `remove --dry-run`, and `update --dry-run` instead return a resolved graph preview under the version 1 envelope. The operation retains its canonical command name. Successful previews use `outcome: "success"`, `changes.state: "unchanged"`, empty affected-file lists, null retry advice, and exit 0. This payload is an observation, not an executable plan or a prepared installation.
 

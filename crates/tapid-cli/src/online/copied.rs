@@ -198,7 +198,10 @@ fn record(source: PackageSource, bytes: Vec<u8>) -> Result<PackageRecord, Operat
         .map(|(name, _)| name.clone())
         .collect();
     Ok(PackageRecord {
-        node_engine: Default::default(),
+        node_engine_provenance: "verified_source_manifest",
+        node_engine: tapid_registry_client::NodeEngineRequirement::from_engines(
+            platform_json.get("engines"),
+        ),
         git_reference: None,
         registry: source,
         name: manifest.name().clone(),

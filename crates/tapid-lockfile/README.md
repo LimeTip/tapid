@@ -13,7 +13,7 @@ Deterministic lockfile models and canonical JSON serialization for Tapid.
 
 The current contract provides:
 
-- Schema version `7`, `9` when approved dependency hooks produce derived trees, or `10` when copied sources are present, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
+- Schema version `7`, `9` when approved dependency hooks produce derived trees, or `10` when copied sources are present, and `11` when Node declaration evidence is recorded, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
 - Exact package name and version keys, registry origin, canonical padded SHA-512 SRI, required schema 6 registry-integrity provenance, SHA-256 unpacked digest, and explicit `treeDigest` replay identity.
 - Deterministic package ordering through `BTreeMap` serialization.
 - HTTPS registry and artifact URL validation.
@@ -50,7 +50,7 @@ CLI frozen installation can hydrate missing trees using recorded artifact URLs a
 
 Schema 9 adds ordered `derivedHooks` records with exact recipe keys, verified output tree digests, and store-local HMAC attestations. Source archive integrity and `treeDigest` retain their original meanings. Replay validates every recipe and output before selecting the final installed tree. Older schemas cannot contain derived-hook records. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).
 
-`ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements, root and member-level links to declared workspace members, separate member registry entry points with local or hoisted placements, member manifest digests, and constraints. It records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, or schema 9 with approved lifecycle outputs. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. `graph()` returns a shared `Arc<ImportedNpmGraph>` cached after validation; the cache is never serialized, and deserialized data is validated before caching. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).
+`ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements, root and member-level links to declared workspace members, separate member registry entry points with local or hoisted placements, member manifest digests, and constraints. It records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, schema 9 with approved lifecycle outputs, schema 10 with copied sources, or schema 11 with Node declaration evidence. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. `graph()` returns a shared `Arc<ImportedNpmGraph>` cached after validation; the cache is never serialized, and deserialized data is validated before caching. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).
 
 Schema 10 adds immutable copied package sources. File source identities pin a
 root-relative archive path and SHA-256; Git identities pin a canonical HTTPS
@@ -59,3 +59,15 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registry` field stores the complete source identity for copied entries, without
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
+
+Schema 11 preserves selected Node declaration evidence in every artifact package's
+`nodeEngine` object. Its `state` is `unknown`, `not_declared`, `range` (with a
+string `range` field), `malformed_engines`, or `malformed_node`. It does not evaluate
+ranges or authenticate registry metadata as archive content. New producers opt
+in by calling `LockedPackage::set_node_engine`; insertion promotes the graph to
+schema 11 and explicitly marks any historical package evidence as unknown.
+Historical omission remains unknown through `node_engine()`, never inspected
+absence. Schema 11 rejects missing evidence, invalid states and unexpected fields;
+older schemas reject populated evidence. Frozen readers do not enrich locks.
+Schema 11 retains alias/root validation, lifecycle output authentication and
+copied-source restrictions from schemas 7, 9 and 10. Older clients reject it.
