@@ -68,6 +68,8 @@ Download verification checks package bytes against registry-declared integrity. 
 
 See the [supported subset and limitations](#supported-subset-and-limitations) and [production adoption gate](docs/production-adoption.md) before evaluating Tapid for a production project.
 
+The [backlog reconciliation and delivery sequence](docs/backlog-reconciliation.md) records historical dispositions, implementation evidence, and remaining standalone adoption work.
+
 ## What Tapid manages
 
 Tapid focuses on safer dependency selection and installation: it uses explicit package identities and integrity checks, and makes installs deterministic and recoverable. Vulnerability intelligence, publisher/provenance signals, and human audit attestations are product goals—not capabilities to assume are implemented today. Check [Supported subset and limitations](#supported-subset-and-limitations) for current guarantees.
