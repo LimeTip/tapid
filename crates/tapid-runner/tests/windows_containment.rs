@@ -133,6 +133,167 @@ fn command_request_with_policy(
 }
 
 #[test]
+fn windows_profile_storage_is_fresh_and_not_readable_by_the_next_execution() {
+    let project = tapid_test_support::TempProject::new("windows-profile-isolation").unwrap();
+    windows_acl::initialize_inheritance(project.path());
+    let root = fs::canonicalize(project.path()).unwrap();
+    let child = root.join("profile-probe.exe");
+    fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+    let mut profiles = Vec::new();
+    for mode in ["profile-first", "profile-second"] {
+        let request = ExecutionRequest::builder(child.as_os_str())
+            .args([
+                "--exact",
+                "windows_profile_storage_probe_helper",
+                "--nocapture",
+            ])
+            .executable_search_path(&root)
+            .project_root(&root)
+            .policy(managed_policy())
+            .env("TAPID_TEST_MARKER", mode)
+            .build()
+            .unwrap();
+        let outcome = execute(&request).expect("profile probe must execute");
+        let stdout = String::from_utf8_lossy(outcome.stdout());
+        assert_eq!(
+            outcome.termination(),
+            &Termination::Exited(0),
+            "stdout={stdout}; stderr={}",
+            String::from_utf8_lossy(outcome.stderr())
+        );
+        assert_eq!(
+            outcome.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        if mode == "profile-second" {
+            assert!(
+                stdout.contains("previous-profile-input:unavailable"),
+                "{stdout}"
+            );
+        }
+        let profile = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("profile-storage:"))
+            .expect("actual-token profile path");
+        let profile = PathBuf::from(profile);
+        assert!(profile.is_absolute());
+        assert!(
+            !profile.join("tapid-cross-run-input").try_exists().unwrap(),
+            "profile sentinel survived cleanup"
+        );
+        profiles.push(profile.clone());
+        project
+            .write(
+                "previous-profile.txt",
+                profile.as_os_str().to_str().unwrap().as_bytes(),
+            )
+            .unwrap();
+    }
+    assert_ne!(
+        profiles[0], profiles[1],
+        "profile storage must not be reused"
+    );
+}
+
+#[test]
+fn windows_profile_storage_probe_helper() {
+    let mode = std::env::var("TAPID_TEST_MARKER").unwrap_or_default();
+    if !matches!(mode.as_str(), "profile-first" | "profile-second") {
+        return;
+    }
+    let profile = current_appcontainer_storage();
+    let sentinel = profile.join("tapid-cross-run-input");
+    assert!(
+        !sentinel.try_exists().unwrap(),
+        "fresh profile contains a previous sentinel"
+    );
+    fs::write(&sentinel, b"private-profile-input").expect("own profile write control");
+    assert_eq!(fs::read(&sentinel).unwrap(), b"private-profile-input");
+    if mode == "profile-second" {
+        let previous =
+            fs::read_to_string("previous-profile.txt").expect("prior profile path input");
+        assert_ne!(profile, PathBuf::from(&previous));
+        let error = fs::read(PathBuf::from(previous).join("tapid-cross-run-input"))
+            .expect_err("prior profile must not provide an input");
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            ),
+            "{error}"
+        );
+        println!("previous-profile-input:unavailable");
+    }
+    println!("profile-storage:{}", profile.display());
+}
+
+fn current_appcontainer_storage() -> PathBuf {
+    use std::{mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, LocalFree},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation,
+            Isolation::GetAppContainerFolderPath, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
+            TokenAppContainerSid,
+        },
+        System::{
+            Com::CoTaskMemFree,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+    let mut token = 0;
+    // SAFETY: valid current-process pseudo-handle and writable output handle.
+    assert_ne!(
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+        0
+    );
+    let mut required = 0;
+    // SAFETY: null/zero requests the required buffer size.
+    unsafe { GetTokenInformation(token, TokenAppContainerSid, null_mut(), 0, &mut required) };
+    assert!(required as usize >= size_of::<TOKEN_APPCONTAINER_INFORMATION>());
+    let mut buffer = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: aligned buffer has the size returned by the API.
+    let queried = unsafe {
+        GetTokenInformation(
+            token,
+            TokenAppContainerSid,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    };
+    // SAFETY: release the handle opened above, after the query.
+    unsafe { CloseHandle(token) };
+    assert_ne!(queried, 0);
+    // SAFETY: successful query returned TOKEN_APPCONTAINER_INFORMATION and its SID.
+    let info = unsafe { &*buffer.as_ptr().cast::<TOKEN_APPCONTAINER_INFORMATION>() };
+    assert!(!info.TokenAppContainer.is_null());
+    let mut sid = null_mut();
+    // SAFETY: SID remains owned by buffer through conversion.
+    assert_ne!(
+        unsafe { ConvertSidToStringSidW(info.TokenAppContainer, &mut sid) },
+        0
+    );
+    let mut path = null_mut();
+    // SAFETY: sid is a NUL-terminated API allocation; path is a writable output.
+    let result = unsafe { GetAppContainerFolderPath(sid, &mut path) };
+    // SAFETY: release exactly the string allocated by conversion.
+    unsafe { LocalFree(sid.cast()) };
+    assert!(result >= 0, "profile folder query: {result:#x}");
+    assert!(!path.is_null());
+    let mut length = 0;
+    // SAFETY: successful API output is a NUL-terminated UTF-16 string.
+    while unsafe { *path.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: the scan established this initialized slice's length.
+    let owned = OsString::from_wide(unsafe { std::slice::from_raw_parts(path, length) });
+    // SAFETY: this API's output is allocated with CoTaskMemAlloc.
+    unsafe { CoTaskMemFree(path.cast()) };
+    PathBuf::from(owned)
+}
+
+#[test]
 fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_and_descendants() {
     ambient_authority_probe("AAP", "*S-1-15-2-1:(OI)(CI)(RX)");
 }

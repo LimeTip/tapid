@@ -169,7 +169,7 @@ runtime identity or prepared execution authority exists yet.
 | --- | --- | --- |
 | All Application Packages | LPAC opt-out and actual suspended-token access checks; explicit per-profile project grants | The root/descendant Rust probe attempts an AAP-granted copied executable, reads, and absolute/searched DLL loads. Host controls validate the executable and DLL; approved copies load inside containment. Undeclared operations must fail with `PermissionDenied`. Native execution of these extended probes is pending. |
 | All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
-| Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | Test initial contents, cross-run influence, and deletion failure. Unique names alone do not identify initial profile bytes or registry state. |
+| Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | The native cross-run control derives each profile folder from the actual child token, writes and rereads a private sentinel, requires its removal after completion, and checks that a second execution gets a different folder and cannot read the previous sentinel. Native execution is pending. Full initial contents and deletion-failure controls remain unresolved. Unique names alone do not identify initial profile bytes or registry state. |
 | Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
 | COM / brokers | No complete activation or response inventory | Probe native activation independently of compatibility hooks. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
 | Inherited handles | Process attribute handle list restricts inherited standard handles; compatibility delegates exact metadata handles and EOF stdin | Preserve the explicit handle list and test bypass paths. A metadata handle is not permission to consume arbitrary file bytes. |
@@ -198,6 +198,18 @@ without calling Node APIs. Searched loads change `SetDllDirectoryW` only inside
 isolated helper processes and restore the default search path afterward.
 These sampled controls do not cover secondary DLL dependencies, precedence
 mutations, manual mapping, side-by-side assemblies or arbitrary broker inputs.
+
+`windows_profile_storage_is_fresh_and_not_readable_by_the_next_execution` uses
+two executions of a private Rust fixture through the existing runner interface.
+The fixture queries `TokenAppContainerSid` and `GetAppContainerFolderPath` rather
+than trusting an environment variable for the storage location. It requires own
+profile write/read success and prior-sentinel absence or access denial, while
+the host checks sentinel removal after kernel-owned cleanup. The sentinel name
+is fixed only within each fresh OS-owned profile; no existing user profile or
+credentials are read. This is a sampled storage control, not an inventory of all
+profile initial bytes, registry state, or cross-profile broker authority. Native
+Windows execution with guard setup is required before claiming these assertions
+hold.
 
 ## Private Windows dependency write and key validation
 
