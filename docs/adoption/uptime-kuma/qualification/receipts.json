@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "id": "uptime-kuma-qualification-2026-10-28",
+  "project": "uptime-kuma",
+  "counting": "Runner launches including failed launches; internal subprocesses excluded",
+  "cleanup": "Process group; detached descendants are outside this guarantee",
+  "launches": 5,
+  "phases": [
+    {
+      "id": "tag",
+      "outcome": "passed",
+      "command": [
+        "/usr/bin/curl",
+        "-fLsS",
+        "--max-time",
+        "30",
+        "https://api.github.com/repos/louislam/uptime-kuma/git/ref/tags/1.23.16"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-10-28T13:12:45.495Z",
+      "elapsedMs": 338,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "{\n  \"ref\": \"refs/tags/1.23.16\",\n  \"node_id\": \"MDM6UmVmMzgyNDk2MzYxOnJlZnMvdGFncy8xLjIzLjE2\",\n  \"url\": \"https://api.github.com/repos/louislam/uptime-kuma/git/refs/tags/1.23.16\",\n  \"object\": {\n    \"sha\": \"5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7\",\n    \"type\": \"commit\",\n    \"url\": \"https://api.github.com/repos/louislam/uptime-kuma/git/commits/5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7\"\n  }\n}\n",
+      "truncated": false,
+      "assertions": [
+        true
+      ],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "source",
+      "outcome": "passed",
+      "command": [
+        "/usr/bin/curl",
+        "-fLsS",
+        "--max-time",
+        "60",
+        "https://codeload.github.com/louislam/uptime-kuma/tar.gz/5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7",
+        "-o",
+        "[REDACTED]/source.tar.gz"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-10-28T13:12:45.834Z",
+      "elapsedMs": 445,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {
+        "[REDACTED]/source.tar.gz": "ebeb190bdd2d8585e57726866c57ab6dce7027e486ae7fef52cd570d00cad141"
+      },
+      "manualSteps": []
+    },
+    {
+      "id": "sqlite",
+      "outcome": "passed",
+      "command": [
+        "/usr/bin/curl",
+        "-fLsS",
+        "--max-time",
+        "30",
+        "https://registry.npmjs.org/@louislam/sqlite3/-/sqlite3-15.1.6.tgz",
+        "-o",
+        "[REDACTED]/sqlite.tgz"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-10-28T13:12:46.280Z",
+      "elapsedMs": 477,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {
+        "[REDACTED]/sqlite.tgz": "e93f8e67cabb4ada332d24bf049b371cc92306fdfa3ba889b4a0bded6b6b509d"
+      },
+      "manualSteps": []
+    },
+    {
+      "id": "sqlite-integrity",
+      "outcome": "passed",
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--input-type=module",
+        "-e",
+        "import {createHash} from 'node:crypto'; import {readFileSync} from 'node:fs'; const actual='sha512-'+createHash('sha512').update(readFileSync('sqlite.tgz')).digest('base64'); if(actual!=='sha512-cVf7hcMrfywYnycatLvorngTFpL3BSWvEy7/NrEfcTyQX8xxj9fdeD553oCTv5fIAk85fluo6mzPq89V3YzrVA==') process.exit(1); console.log(actual);"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-10-28T13:12:46.758Z",
+      "elapsedMs": 98,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "sha512-cVf7hcMrfywYnycatLvorngTFpL3BSWvEy7/NrEfcTyQX8xxj9fdeD553oCTv5fIAk85fluo6mzPq89V3YzrVA==\n",
+      "truncated": false,
+      "assertions": [
+        true
+      ],
+      "inputs": {
+        "[REDACTED]/sqlite.tgz": "e93f8e67cabb4ada332d24bf049b371cc92306fdfa3ba889b4a0bded6b6b509d"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "hook-manifest",
+      "outcome": "passed",
+      "command": [
+        "/usr/bin/tar",
+        "-xOf",
+        "[REDACTED]/sqlite.tgz",
+        "package/package.json"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-10-28T13:12:46.857Z",
+      "elapsedMs": 16,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "{\\u000d\n  \"name\": \"@louislam/sqlite3\",\\u000d\n  \"description\": \"Asynchronous, non-blocking SQLite3 bindings\",\\u000d\n  \"version\": \"15.1.6\",\\u000d\n  \"homepage\": \"https://github.com/TryGhost/node-sqlite3\",\\u000d\n  \"author\": {\\u000d\n    \"name\": \"Mapbox\",\\u000d\n    \"url\": \"https://mapbox.com/\"\\u000d\n  },\\u000d\n  \"binary\": {\\u000d\n    \"module_name\": \"node_sqlite3\",\\u000d\n    \"module_path\": \"./lib/binding/napi-v{napi_build_version}-{platform}-{arch}\",\\u000d\n    \"host\": \"https://github.com/louislam/node-sqlite3/releases/download/\",\\u000d\n    \"remote_path\": \"v{version}\",\\u000d\n    \"package_name\": \"napi-v{napi_build_version}-{platform}-{arch}-{libc}.tar.gz\",\\u000d\n    \"napi_versions\": [\\u000d\n      6\\u000d\n    ]\\u000d\n  },\\u000d\n  \"contributors\": [\\u000d\n    \"Konstantin Käfer <mail@kkaefer.com>\",\\u000d\n    \"Dane Springmeyer <dane@mapbox.com>\",\\u000d\n    \"Will White <will@mapbox.com>\",\\u000d\n    \"Orlando Vazquez <ovazquez@gmail.com>\",\\u000d\n    \"Artem Kustikov <kustikoff@gmail.com>\",\\u000d\n    \"Eric Fredricksen <efredricksen@gmail.com>\",\\u000d\n    \"John Wright <mrjjwright@gmail.com>\",\\u000d\n    \"Ryan Dahl <ry@tinyclouds.org>\",\\u000d\n    \"Tom MacWright <tom@mapbox.com>\",\\u000d\n    \"Carter Thaxton <carter.thaxton@gmail.com>\",\\u000d\n    \"Audrius Kažukauskas <audrius@neutrino.lt>\",\\u000d\n    \"Johannes Schauer <josch@pyneo.org>\",\\u000d\n    \"Nathan Rajlich <nathan@tootallnate.net>\",\\u000d\n    \"AJ ONeal <coolaj86@gmail.com>\",\\u000d\n    \"Mithgol\",\\u000d\n    \"Ben Noordhuis <ben@strongloop.com>\"\\u000d\n  ],\\u000d\n  \"files\": [\\u000d\n    \"binding.gyp\",\\u000d\n    \"deps/\",\\u000d\n    \"lib/*.js\",\\u000d\n    \"lib/*.d.ts\",\\u000d\n    \"src/\"\\u000d\n  ],\\u000d\n  \"repository\": {\\u000d\n    \"type\": \"git\",\\u000d\n    \"url\": \"git://github.com/louislam/node-sqlite3.git\"\\u000d\n  },\\u000d\n  \"dependencies\": {\\u000d\n    \"@mapbox/node-pre-gyp\": \"^1.0.0\",\\u000d\n    \"node-addon-api\": \"^4.2.0\",\\u000d\n    \"tar\": \"^6.1.11\"\\u000d\n  },\\u000d\n  \"devDependencies\": {\\u000d\n    \"eslint\": \"6.8.0\",\\u000d\n    \"mocha\": \"7.2.0\",\\u000d\n    \"node-pre-gyp-github\": \"1.4.4\"\\u000d\n  },\\u000d\n  \"peerDependencies\": {\\u000d\n    \"node-gyp\": \"8.x\"\\u000d\n  },\\u000d\n  \"peerDependenciesMeta\": {\\u000d\n    \"node-gyp\": {\\u000d\n      \"optional\": true\\u000d\n    }\\u000d\n  },\\u000d\n  \"optionalDependencies\": {\\u000d\n    \"node-gyp\": \"8.x\"\\u000d\n  },\\u000d\n  \"scripts\": {\\u000d\n    \"build\": \"node-pre-gyp build\",\\u000d\n    \"build:debug\": \"node-pre-gyp build --debug\",\\u000d\n    \"install\": \"node-pre-gyp install --fallback-to-build\",\\u000d\n    \"pretest\": \"node test/support/createdb.js\",\\u000d\n    \"test\": \"mocha -R spec --timeout 480000\",\\u000d\n    \"pack\": \"node-pre-gyp package\",\\u000d\n    \"build-binaries\": \"npm run build-linux && npm run build-linux-arm && npm run build-linux-alpine && npm run extract-tar\",\\u000d\n    \"build-linux\": \"docker buildx build -f build.dockerfile --platform linux/amd64,linux/arm64 --output type=tar,dest=build/out.tar . --progress plain\",\\u000d\n    \"build-linux-arm\": \"docker buildx build -f build-arm.dockerfile --platform linux/arm/v7 --output type=tar,dest=build/out-armv7.tar . --progress plain\",\\u000d\n    \"build-linux-alpine\": \"docker buildx build -f build-alpine.dockerfile --platform linux/amd64,linux/arm64,linux/arm/v7 --output type=tar,dest=build/out-alpine.tar .\",\\u000d\n    \"extract-tar\": \"node tools/extract-tar.js\",\\u000d\n    \"npm-publish-dry-run\": \"npm publish --dry-run\",\\u000d\n    \"npm-publish\": \"npm publish\"\\u000d\n  },\\u000d\n  \"license\": \"BSD-3-Clause\",\\u000d\n  \"keywords\": [\\u000d\n    \"sql\",\\u000d\n    \"sqlite\",\\u000d\n    \"sqlite3\",\\u000d\n    \"database\"\\u000d\n  ],\\u000d\n  \"main\": \"./lib/sqlite3\",\\u000d\n  \"types\": \"./lib/sqlite3.d.ts\",\\u000d\n  \"renovate\": {\\u000d\n    \"extends\": [\\u000d\n      \"@tryghost:base\"\\u000d\n    ]\\u000d\n  }\\u000d\n}\\u000d\n",
+      "truncated": false,
+      "assertions": [
+        true
+      ],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    }
+  ]
+}
