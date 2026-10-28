@@ -88,7 +88,9 @@ separate placement contract and rejects these ordinary-lock fields. Schema 11
 replay through `validate_replay` still fails explicitly. The opt-in
 `validate_replay_with_selection` checks exact target/profile facts, validates the
 ledger, and retains manifest-digest and integrity-provenance checks;
-normal CLI selection does not yet emit this schema. This persistence API alone
+the CLI emits this schema for ordinary registry-only graphs without workspace
+members when optional metadata/candidate omissions are recorded. Workspace and
+copied-source selection generation remain pending. This persistence API alone
 does not establish complete optional-dependency failure support.
 
 Imported schema 12 provides a separate `ImportedSelection` persistence building

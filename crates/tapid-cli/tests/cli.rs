@@ -9035,6 +9035,199 @@ fn imported_recorded_omissions_replay_without_restoring_absent_placements() {
 }
 
 #[test]
+fn named_update_preserves_unrelated_optional_root_when_metadata_disappears() {
+    let project = tapid_test_support::TempProject::new("optional-update-scope").unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"@actual/scoped":"1.2.0"},"optionalDependencies":{"h3":"1.0.0"}}"#).unwrap();
+    let mut registry: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    project
+        .write("registry.json", registry.to_string().as_bytes())
+        .unwrap();
+    let installed = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json"],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    registry["packages"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|package| package["name"] != "h3");
+    project
+        .write("registry.json", registry.to_string().as_bytes())
+        .unwrap();
+    let updated = run(
+        project.path(),
+        &[
+            "update",
+            "@actual/scoped",
+            "--registry-fixture",
+            "registry.json",
+        ],
+    );
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/h3/package.json")
+            .is_file()
+    );
+    let lock = Lockfile::from_json(&fs::read_to_string(project.path().join("tapid.lock")).unwrap())
+        .unwrap();
+    assert!(lock.root_bindings().contains_key("h3"));
+}
+
+#[test]
+fn install_records_absent_optional_root_but_preserves_required_overlap() {
+    for required in [false, true] {
+        let project = tapid_test_support::TempProject::new("optional-root-selection").unwrap();
+        let mut manifest = serde_json::json!({"name":"demo","version":"1.0.0","optionalDependencies":{"local":"npm:@vendor/native@^1"}});
+        if required {
+            manifest["dependencies"] = serde_json::json!({"other":"npm:@vendor/native@^1"});
+        }
+        project
+            .write("package.json", manifest.to_string().as_bytes())
+            .unwrap();
+        project
+            .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+            .unwrap();
+        let output = run(
+            project.path(),
+            &["install", "--registry-fixture", "registry.json", "--json"],
+        );
+        assert_eq!(
+            output.status.success(),
+            !required,
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        if required {
+            assert!(!project.path().join("tapid.lock").exists());
+        } else {
+            let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+            let lock: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(lock["selection"]["omissions"][0]["name"], "local");
+            assert_eq!(
+                lock["selection"]["omissions"][0]["reason"],
+                "metadataAbsent"
+            );
+            let replay = run(project.path(), &["ci", "--offline", "--json"]);
+            assert!(
+                replay.status.success(),
+                "{}",
+                String::from_utf8_lossy(&replay.stdout)
+            );
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        }
+    }
+}
+
+#[test]
+fn install_records_transitive_optional_metadata_absence_for_replay() {
+    let project = tapid_test_support::TempProject::new("optional-first-selection").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut registry: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/npm-aliases.json")).unwrap();
+    registry["packages"][0]["optionalDependencies"] =
+        serde_json::json!({"native":"npm:@vendor/native@^1"});
+    project
+        .write("registry.json", registry.to_string().as_bytes())
+        .unwrap();
+    let output = run(
+        project.path(),
+        &["install", "--registry-fixture", "registry.json", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let lock: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(lock["lockfileVersion"], 11);
+    assert_eq!(lock["selection"]["omissions"][0]["name"], "native");
+    assert_eq!(
+        lock["selection"]["omissions"][0]["reason"],
+        "metadataAbsent"
+    );
+    let installed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        installed["selection"]["omissions"][0]["requirement"],
+        "npm:@vendor/native@^1"
+    );
+    for args in [
+        vec!["install", "--offline", "--json"],
+        vec![
+            "ci",
+            "--offline",
+            "--registry-fixture",
+            "registry.json",
+            "--json",
+        ],
+        vec!["install", "--frozen", "--json"],
+    ] {
+        let output = run(project.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+        assert!(
+            project
+                .path()
+                .join("node_modules/h3/package.json")
+                .is_file()
+        );
+        assert!(!project.path().join("node_modules/native").exists());
+    }
+    // Recovered metadata must not reselect an omitted branch, even with a cold store.
+    let mut recovered = registry["packages"][0].clone();
+    recovered["name"] = "@vendor/native".into();
+    recovered["optionalDependencies"] = serde_json::json!({});
+    registry["packages"].as_array_mut().unwrap().push(recovered);
+    project
+        .write("registry.json", registry.to_string().as_bytes())
+        .unwrap();
+    let cold = project.path().join("cold-store");
+    let output = run(
+        project.path(),
+        &[
+            "ci",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            cold.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), bytes);
+    let why = run(project.path(), &["why", "@vendor/native", "--json"]);
+    assert!(
+        why.status.success(),
+        "{}",
+        String::from_utf8_lossy(&why.stdout)
+    );
+}
+
+#[test]
 fn recorded_optional_omissions_replay_offline_and_remain_visible() {
     use tapid_lockfile::*;
     let project = tapid_test_support::TempProject::new("recorded-omission-replay").unwrap();

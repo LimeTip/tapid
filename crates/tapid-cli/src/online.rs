@@ -33,6 +33,7 @@ use routing::transport_for_route;
 use routing::{artifact_transport_for_package, registry_for_requirement};
 
 mod platform;
+mod selection;
 use platform::current_platform_matches;
 pub(crate) use platform::{current_libc, selection_target};
 
@@ -172,6 +173,8 @@ struct FixturePackage {
     peer_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "optionalPeerDependencies")]
     optional_peer_dependencies: BTreeSet<String>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: BTreeMap<String, String>,
 }
 #[derive(Debug, Deserialize)]
 struct Fixture {
@@ -953,6 +956,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
+        omissions,
         candidate_exclusions,
         metadata_lookups: _,
         resolution,
@@ -1256,6 +1260,13 @@ pub(crate) fn resolve_and_fetch_with_lock(
             .collect(),
     )
     .map_err(OperationalError::from)?;
+    selection::record_registry_selection(
+        &mut lock,
+        &resolution,
+        &records,
+        registry_config,
+        omissions,
+    )?;
     let instance_keys = instances
         .iter()
         .map(|instance| {

@@ -27,7 +27,7 @@ The generated release installers select archives through `https://tapid.dev/rele
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
-For ordinary locks with recorded selection facts, `tapid why` also explains accepted optional declaration omissions, matching local aliases or actual package names. These read-only reports describe the lock's recorded target and profile, including when inspected on a different host. This does not enable installation replay of recorded-selection locks. Matching omissions exit successfully; absence from both selected paths and the omission ledger exits 1. Omission details are bounded and incomplete reports are marked explicitly. See the [JSON result contract](../../docs/json-results.md) for machine-readable fields.
+For ordinary locks with recorded selection facts, `tapid why` also explains accepted optional declaration omissions, matching local aliases or actual package names. These read-only reports describe the lock's recorded target and profile, including when inspected on a different host. Matching omissions exit successfully; absence from both selected paths and the omission ledger exits 1. Omission details are bounded and incomplete reports are marked explicitly. See the [JSON result contract](../../docs/json-results.md) for machine-readable fields.
 
 ## Commands
 
@@ -360,9 +360,15 @@ missing selected artifacts still fail offline and may be hydrated during frozen
 installation. Imported locks retain their existing ci restriction. Replay does
 not retry omitted branches. Human and JSON install outcomes include the recorded
 target/profile and at most 50 omission records, with explicit incomplete-detail
-counts. Normal resolution/import does not yet produce these selection schemas;
-artifact/hook omission selection and complete optional-failure semantics remain
-unfinished. Preview and status integration is not established by this replay API.
+counts. Ordinary registry-only graphs without workspace members now emit schema
+11 when recording omitted transitive optional declarations. They also accept and
+record confirmed metadata absence for optional-only root declarations; a required
+declaration to the same registry/package keeps absence fatal, including through
+another alias. Metadata transport errors remain fatal. Existing transitive
+candidate/platform exclusions retain their reasons in the ledger. Workspace and
+copied-source selection generation, imported schema 12 generation, artifact/hook
+omission selection and complete optional-failure semantics remain unfinished.
+Preview and status integration is not established by this replay API.
 
 ## Experimental Node.js root-script runner and `.bin` handling
 

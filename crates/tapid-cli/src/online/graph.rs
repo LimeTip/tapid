@@ -2,6 +2,7 @@ use super::*;
 use crate::application::lifecycle::UpdateRequest;
 
 pub(super) struct ResolvedGraph {
+    pub omissions: Vec<tapid_lockfile::AcceptedOmission>,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,
@@ -113,7 +114,7 @@ pub(super) fn resolve_package_graph(
                     dependencies: p.dependencies.clone(),
                     peer_dependencies: p.peer_dependencies.clone(),
                     optional_peer_dependencies: p.optional_peer_dependencies.clone(),
-                    optional_dependencies: BTreeMap::new(),
+                    optional_dependencies: p.optional_dependencies.clone(),
                     platform: PackagePlatform::unrestricted(),
                     fixture: true,
                 },
@@ -333,6 +334,77 @@ pub(super) fn resolve_package_graph(
             seed.extend(provider_records);
         }
     }
+    let mut omissions = Vec::new();
+    if workspace_locked.is_empty() && roots.iter().all(|root| root.registry.registry().is_some()) {
+        let required = entry_points
+            .iter()
+            .filter(|(_, entry)| {
+                entry.section != tapid_resolver::EntryPointSection::OptionalDependencies
+            })
+            .map(|(dependency, _)| {
+                (
+                    dependency.registry.clone(),
+                    dependency
+                        .requirement
+                        .package_name(&dependency.name)
+                        .clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let mut absent = BTreeSet::new();
+        for (dependency, entry) in &entry_points {
+            let actual = dependency.requirement.package_name(&dependency.name);
+            let identity = (dependency.registry.clone(), actual.clone());
+            if entry.section != tapid_resolver::EntryPointSection::OptionalDependencies
+                || required.contains(&identity)
+            {
+                continue;
+            }
+            // Preserve compatible locked roots outside an explicit refresh scope.
+            // Their existing artifact pin does not require packument availability.
+            if preferred
+                .roots
+                .get(&(
+                    dependency.registry.clone(),
+                    dependency.name.clone(),
+                    actual.clone(),
+                ))
+                .is_some_and(|version| {
+                    seed.iter().any(|record| {
+                        record.registry == dependency.registry
+                            && &record.name == actual
+                            && &record.version == version
+                            && dependency.requirement.matches_locked_version(version)
+                            && current_platform_matches(&record.platform)
+                    })
+                })
+            {
+                continue;
+            }
+            // Only a confirmed empty response qualifies here. Transport, identity,
+            // authentication and malformed metadata errors still propagate.
+            let candidates = fetch_records(&dependency.registry, actual)?;
+            if candidates.is_empty() {
+                absent.insert((dependency.registry.clone(), dependency.name.clone()));
+                omissions.push(tapid_lockfile::AcceptedOmission {
+                    origin: tapid_lockfile::OmissionOrigin::Root,
+                    name: dependency.name.to_string(),
+                    requirement: dependency.requirement.raw.clone(),
+                    registry: dependency.registry.to_string(),
+                    target: None,
+                    reason: tapid_lockfile::OmissionReason::MetadataAbsent,
+                });
+            } else {
+                seed.extend(candidates);
+            }
+        }
+        roots.retain(|dependency| {
+            !absent.contains(&(dependency.registry.clone(), dependency.name.clone()))
+        });
+        entry_points.retain(|(dependency, _)| {
+            !absent.contains(&(dependency.registry.clone(), dependency.name.clone()))
+        });
+    }
     resolving.set(true);
     let (mut resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
         &roots,
@@ -413,6 +485,7 @@ pub(super) fn resolve_package_graph(
         })
         .transpose()?;
     Ok(ResolvedGraph {
+        omissions,
         candidate_exclusions,
         updated_manifest,
         metadata_lookups,
