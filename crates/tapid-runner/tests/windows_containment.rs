@@ -134,6 +134,17 @@ fn command_request_with_policy(
 
 #[test]
 fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_and_descendants() {
+    ambient_authority_probe("AAP", "*S-1-15-2-1:(OI)(CI)(RX)");
+}
+
+#[test]
+fn windows_inventories_all_restricted_application_packages_authority() {
+    // Characterization, not a denial claim: LPAC's AAP opt-out does not prove
+    // exclusion of ARAP. Record each operation for the authority checkpoint.
+    ambient_authority_probe("ARAP", "*S-1-15-2-2:(OI)(CI)(RX)");
+}
+
+fn ambient_authority_probe(trustee: &str, grant: &str) {
     let project = tapid_test_support::TempProject::new("windows-lpac-project").unwrap();
     let outside = tapid_test_support::TempProject::new("windows-lpac-outside").unwrap();
     project.write("approved.txt", b"approved-input").unwrap();
@@ -141,6 +152,11 @@ fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_a
     let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     let undeclared_executable = outside.path().join("undeclared.exe");
     fs::copy(&executable, &undeclared_executable).unwrap();
+    // Reuse the native addon fixture: it resolves Node exports only when called,
+    // so ordinary LoadLibrary/GetProcAddress can validate it without Node.
+    let undeclared_library = outside.path().join("undeclared.dll");
+    windows_node::compile_launcher(&undeclared_library);
+    fs::copy(&undeclared_library, project.path().join("approved.dll")).unwrap();
     windows_acl::initialize_inheritance(project.path());
     windows_acl::initialize_inheritance(outside.path());
     let system32 =
@@ -148,7 +164,7 @@ fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_a
             .unwrap();
     let grant = Command::new(system32.join("icacls.exe"))
         .arg(outside.path())
-        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+        .args(["/grant", grant])
         .output()
         .unwrap();
     assert!(
@@ -156,7 +172,7 @@ fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_a
         "{}",
         String::from_utf8_lossy(&grant.stderr)
     );
-    // The host can read the fixture. Its only package-side grant is ambient AAP;
+    // The host can read the fixture. Its added package-side grant is ambient;
     // neither this file nor its directory appears in the execution policy.
     assert_eq!(fs::read(&secret).unwrap(), b"ambient-input");
     // A valid PE image and successful host launch distinguish access denial
@@ -168,14 +184,19 @@ fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_a
             "--nocapture",
         ])
         .env("TAPID_TEST_MARKER", "ambient-target")
+        .env("TAPID_TEST_LIBRARY", &undeclared_library)
         .output()
         .unwrap();
     assert!(host_control.status.success(), "{host_control:?}");
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("undeclared-target-executed"));
+    assert!(String::from_utf8_lossy(&host_control.stdout).contains("host-dynamic-library-valid"));
     let baseline = project_dacl(outside.path());
     let root = fs::canonicalize(project.path()).unwrap();
     let child = root.join("probe.exe");
     fs::copy(&executable, &child).unwrap();
+    project
+        .write("ambient-trustee.txt", trustee.as_bytes())
+        .unwrap();
     project
         .write("outside-path.txt", secret.to_str().unwrap().as_bytes())
         .unwrap();
@@ -183,6 +204,12 @@ fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_a
         .write(
             "outside-executable.txt",
             undeclared_executable.to_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+    project
+        .write(
+            "outside-library.txt",
+            undeclared_library.to_str().unwrap().as_bytes(),
         )
         .unwrap();
     let request = ExecutionRequest::builder(child.as_os_str())
@@ -218,11 +245,23 @@ fn windows_denies_ambient_all_application_packages_reads_and_execution_in_root_a
         stdout.contains("approved-child"),
         "descendant positive control missing: {stdout}"
     );
-    assert!(
-        !stdout.contains("ambient-input"),
-        "undeclared AAP input was readable: {stdout}"
-    );
-    assert!(!stdout.contains("undeclared-target-executed"), "{stdout}");
+    for mode in ["ambient-root", "ambient-child"] {
+        for operation in ["read", "execute", "load-library", "search-library"] {
+            let denied = format!("{trustee}:{mode}:{operation}:denied");
+            let allowed = format!("{trustee}:{mode}:{operation}:allowed");
+            if trustee == "AAP" {
+                assert!(stdout.contains(&denied), "{stdout}");
+                assert!(!stdout.contains(&allowed), "{stdout}");
+            } else {
+                assert!(
+                    stdout.contains(&denied) ^ stdout.contains(&allowed),
+                    "{stdout}"
+                );
+            }
+        }
+    }
+    // --show-output in the native workspace lane retains these observations.
+    println!("ambient authority inventory ({trustee}):\n{stdout}");
     assert_eq!(project_dacl(outside.path()), baseline);
 }
 
@@ -233,20 +272,68 @@ fn windows_ambient_read_probe_helper() {
         return;
     }
     assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
+    let trustee = fs::read_to_string("ambient-trustee.txt").unwrap();
+    assert!(matches!(trustee.as_str(), "AAP" | "ARAP"));
     let outside = fs::read_to_string("outside-path.txt").unwrap();
-    let denied = fs::read(outside).expect_err("undeclared AAP file must be denied");
-    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    match fs::read(outside) {
+        Ok(bytes) => {
+            assert_eq!(bytes, b"ambient-input");
+            assert_ne!(trustee, "AAP", "undeclared AAP file must be denied");
+            println!("{trustee}:{mode}:read:allowed");
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("{trustee}:{mode}:read:denied");
+        }
+    }
     let outside_executable = fs::read_to_string("outside-executable.txt").unwrap();
-    let denied = Command::new(outside_executable)
+    let launch = Command::new(outside_executable)
         .args([
             "--exact",
             "windows_ambient_execution_target_helper",
             "--nocapture",
         ])
         .env("TAPID_TEST_MARKER", "ambient-target")
-        .output()
-        .expect_err("undeclared AAP executable must be denied before target execution");
-    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        .output();
+    match launch {
+        Ok(output) => {
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("undeclared-target-executed"));
+            assert_ne!(trustee, "AAP", "undeclared AAP executable must be denied");
+            println!("{trustee}:{mode}:execute:allowed");
+        }
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            println!("{trustee}:{mode}:execute:denied");
+        }
+    }
+    load_authority_probe_library(&fs::canonicalize("approved.dll").unwrap())
+        .expect("approved dynamic DLL must load");
+    load_searched_authority_probe_library(&fs::canonicalize("approved.dll").unwrap())
+        .expect("approved searched DLL must load");
+    let outside_library = fs::read_to_string("outside-library.txt").unwrap();
+    let outside_library = std::path::Path::new(&outside_library);
+    for (operation, result) in [
+        (
+            "load-library",
+            load_authority_probe_library(outside_library),
+        ),
+        (
+            "search-library",
+            load_searched_authority_probe_library(outside_library),
+        ),
+    ] {
+        match result {
+            Ok(()) => {
+                assert_ne!(trustee, "AAP", "undeclared AAP DLL must be denied");
+                println!("{trustee}:{mode}:{operation}:allowed");
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                println!("{trustee}:{mode}:{operation}:denied");
+            }
+        }
+    }
     if mode == "ambient-root" {
         println!("approved-root");
         let status = Command::new(std::env::current_exe().unwrap())
@@ -267,9 +354,62 @@ fn windows_ambient_read_probe_helper() {
     }
 }
 
+fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetDllDirectoryW(path: *const u16) -> i32;
+    }
+    let directory: Vec<_> = path
+        .parent()
+        .unwrap()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: this helper changes loader state only in the isolated probe process.
+    if unsafe { SetDllDirectoryW(directory.as_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = load_authority_probe_library(std::path::Path::new(path.file_name().unwrap()));
+    // SAFETY: null restores the default search path before returning the observation.
+    assert_ne!(unsafe { SetDllDirectoryW(std::ptr::null()) }, 0);
+    result
+}
+
+fn load_authority_probe_library(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryW(path: *const u16) -> isize;
+        fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
+        fn FreeLibrary(module: isize) -> i32;
+    }
+    let path: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: the test owns a NUL-terminated path to a disposable native fixture.
+    let module = unsafe { LoadLibraryW(path.as_ptr()) };
+    if module == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: module remains loaded through symbol lookup; no N-API code is called.
+    let export = unsafe { GetProcAddress(module, c"napi_register_module_v1".as_ptr().cast()) };
+    // SAFETY: release exactly the reference returned by LoadLibraryW.
+    let released = unsafe { FreeLibrary(module) };
+    assert_ne!(released, 0, "release dynamic fixture");
+    assert!(!export.is_null(), "loaded the expected native fixture");
+    Ok(())
+}
+
 #[test]
 fn windows_ambient_execution_target_helper() {
     if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-target") {
+        if let Some(library) = std::env::var_os("TAPID_TEST_LIBRARY") {
+            let library = PathBuf::from(library);
+            load_authority_probe_library(&library).expect("valid host DLL control");
+            load_searched_authority_probe_library(&library)
+                .expect("valid host searched DLL control");
+            println!("host-dynamic-library-valid");
+        }
         println!("undeclared-target-executed");
     }
 }

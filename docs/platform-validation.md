@@ -167,8 +167,8 @@ runtime identity or prepared execution authority exists yet.
 
 | Input channel | Current mechanism / concrete input | Required closure and evidence |
 | --- | --- | --- |
-| All Application Packages | LPAC opt-out and actual suspended-token access checks; explicit per-profile project grants | The root/descendant Rust probe now attempts an AAP-only copied executable as well as reads. A successful host launch proves fixture validity; contained launches must fail with `PermissionDenied`. Native execution of this extended probe is pending. |
-| All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | Inventory effective read/execute authority, including mutable application locations. Deny or bind the complete accessible set; AAP controls do not cover this channel. |
+| All Application Packages | LPAC opt-out and actual suspended-token access checks; explicit per-profile project grants | The root/descendant Rust probe attempts an AAP-granted copied executable, reads, and absolute/searched DLL loads. Host controls validate the executable and DLL; approved copies load inside containment. Undeclared operations must fail with `PermissionDenied`. Native execution of these extended probes is pending. |
+| All Restricted Application Packages | LPAC does not establish exclusion of this separate trustee | The shared isolated fixture grants `S-1-15-2-2` read/execute access and records each root/descendant read, launch, absolute DLL load and searched DLL load as allowed or denied. This is characterization, not a denial gate. Native observations are pending; deny or bind the complete accessible set before authentication. |
 | Profile storage | `WindowsAppContainer::create` creates a unique profile and fails on creation error; explicit cleanup deletes it after execution | Test initial contents, cross-run influence, and deletion failure. Unique names alone do not identify initial profile bytes or registry state. |
 | Registry | Launch installs `registryRead`; actual-token validation permits that exact enabled capability | Investigate socket-provider initialization without it. Enumerate necessary values and referenced files; mutable unbounded reads prevent authentication. No registry-value identity is currently computed. |
 | COM / brokers | No complete activation or response inventory | Probe native activation independently of compatibility hooks. Deny undeclared operations or bind each required operation's complete inputs; arbitrary host responses cannot be a trusted OS assumption. |
@@ -186,6 +186,18 @@ further fixture development. The extended AAP control is owned by the existing
 native Windows workspace test suite and requires its guard setup. Compilation
 or a zero-test macOS invocation is not an enforcement receipt. This checkpoint
 does not establish #157 project-script acceptance or #274 integrated adoption.
+
+The nonignored `windows_inventories_all_restricted_application_packages_authority`
+test emits `ARAP:<process>:<operation>:allowed|denied` observations through the
+native workspace lane's `--show-output`. Its passing status validates the probe
+and approved controls; it does **not** certify ARAP exclusion. Any allowed result
+is an input outside the declared project/tool set and must be resolved before
+prepared authority or recipe integration. The AAP test retains strict denial
+assertions. Both tests reuse the Rust native addon fixture and resolve its export
+without calling Node APIs. Searched loads change `SetDllDirectoryW` only inside
+isolated helper processes and restore the default search path afterward.
+These sampled controls do not cover secondary DLL dependencies, precedence
+mutations, manual mapping, side-by-side assemblies or arbitrary broker inputs.
 
 ## Private Windows dependency write and key validation
 
