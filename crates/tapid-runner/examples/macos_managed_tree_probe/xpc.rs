@@ -87,3 +87,17 @@ pub fn client() -> io::Result<()> {
     }
     Ok(())
 }
+
+pub fn transport_controls() -> io::Result<()> {
+    let pointer = symbol(c"probe_transport_controls")?;
+    let entry: unsafe extern "C" fn(*mut i64) = unsafe { std::mem::transmute(pointer) };
+    let mut observed = [0i64; 4];
+    unsafe { entry(observed.as_mut_ptr()) };
+    println!(
+        "xpc_transport_controls={observed:?} expected=[15,-1,-2,-2] candidate_enforcement=none"
+    );
+    if observed != [15, -1, -2, -2] {
+        return Err(io::Error::other("XPC transport controls incomplete"));
+    }
+    Ok(())
+}

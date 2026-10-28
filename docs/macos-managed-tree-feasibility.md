@@ -266,3 +266,106 @@ the current sequential payload stops on the first mismatch. Candidate-specific
 ownership/accounting and negative authority evidence require a runnable native
 candidate. macOS 26 remains a separate platform requirement. No evaluated
 candidate yet establishes ManagedTree, and issue #275 remains incomplete.
+
+## Broker, reparenting, RSS and transport continuation
+
+This continuation extends the private research example; production containment,
+public interfaces and strict rejection are unchanged. The preceding recovered-run
+results remain historical. Current commands, exit codes, environment observations,
+source hashes, binary hashes and raw logs are indexed in
+[continuation-run/index.json](macos-managed-tree-evidence/continuation-run/index.json).
+It is dirty-workspace development evidence, not clean-revision acceptance.
+
+Additional commands after resolving `PROBE` from compiler-artifact metadata:
+
+```sh
+"$PROBE" broker
+"$PROBE" rapid-reparent 8
+"$PROBE" rlimits
+```
+
+`broker` runs a local Unix-socket fixture with four fixed 33-byte requests.
+It checks `getpeereid` and a random per-run 32-byte capability, denies a wrong
+capability, an ungranted operation and a truncated frame, and permits one fixed
+synthetic write into a separate temporary project. Requests accept no paths.
+The server has a three-second accept deadline, 250 ms stream timeouts and a
+finite request count; the harness always joins it. These are same-process
+synthetic clients, all with the same UID. They test the broker's protocol, not
+identity separation between a sandboxed worker and a trusted broker. A capability
+holder is intentionally authorized; UID alone is insufficient. No real service,
+credential or privileged helper is contacted. The result is unverified for
+containment even when all protocol controls complete.
+
+`rapid-reparent` accepts 1–16 repetitions, rejects invalid counts before spawn,
+and reuses the existing double-fork/exec and setsid leaf. Each repetition waits
+for acknowledgement and a delayed marker after intermediate parents exit.
+Eight repetitions completed in this run. These reproduce surviving descendants;
+they do not measure a race-free ownership boundary or prove assignment before
+untrusted execution. Marker evidence and finite self-expiry remain diagnostics.
+
+`rlimits` compares three sequential fresh processes with no limit against three
+fresh processes requesting `RLIMIT_RSS = 1048576` bytes. Each successful workload
+touches 2097152 bytes and holds it for 200 ms. Limit changes occur only inside
+the disposable child, with readback required after successful setup. This host
+rejects the RSS setup with `EINVAL`; the explicit setup-stage result is unsupported,
+not a memory enforcement result. The no-limit controls complete. The controller
+records setup separately and does not change the test runner's or account's limits.
+This does not implement CPU, per-UID process limits or inherited/concurrent RSS
+comparisons, and it never equates touched bytes with resident-memory accounting.
+
+The XPC bridge now sends a hello exchange and requires a typed acknowledgement
+before dispatching the authority payload. `xpc-transport` runs four anonymous
+endpoint controls through the packaged bridge, without registering a service:
+a successful two-exchange round trip, malformed acknowledgement, withheld reply
+and late reply after timeout. Rust requires results `[15, -1, -2, -2]`.
+The callback owns its captured state and semaphore through timeout/cancellation;
+it never writes through a pointer into the caller's returned stack. The first
+silent fixture accidentally dropped its request, causing XPC's interruption reply;
+retaining it through the deadline corrected that fixture. Current transport controls
+pass. They do not authenticate or sandbox the anonymous endpoint. Run them with
+the rebuilt bridge adjacent to the executable, as in the packaging instructions:
+
+```sh
+"$PROBE_APP/Contents/MacOS/Probe" xpc-transport
+"$PROBE_APP/Contents/MacOS/Probe" xpc
+```
+
+### Helper-route inventory
+
+| Route | Documented interface / bounded evaluation | Remaining uncertainty |
+| --- | --- | --- |
+| Bundled application XPC | Current signed research bundle and separate worker sandbox; anonymous transport controls pass | Named worker startup and its authority controls still require an execution-capable native environment; transport success alone proves no authority restriction. |
+| Broader-authority Unix broker | Synthetic capability/UID fixture above | Separate, detached and sandboxed callers remain untested; no statement about system brokers follows. |
+| Global Mach / NSXPC service | Apple documents connecting to advertised LaunchAgent/LaunchDaemon services with [`NSXPCConnection`](https://developer.apple.com/documentation/foundation/nsxpcconnection/init%28machservicename%3Aoptions%3A%29?language=objc). Its [sandbox exception reference](https://developer.apple.com/library/archive/documentation/Miscellaneous/Reference/EntitlementKeyReference/Chapters/AppSandboxTemporaryExceptionEntitlements.html) documents global Mach lookup exceptions. | No arbitrary installed service was contacted, and no lookup exception was added. Effective denial of system-service requests remains unverified. These references do not establish every service's caller authorization. |
+| Privileged helper / service registration | [`SMAppService`](https://developer.apple.com/documentation/servicemanagement/smappservice) controls bundled login items, agents and daemons. | No helper was installed, registered or invoked; no privileged fixture is available. Availability of this API supplies neither authorization nor a ManagedTree boundary. |
+| Inherited descriptors and synthetic environment | Existing production descriptor controls and the probe's explicit synthetic environment | Native containment setup still prevents the negative controls. Do not duplicate the production descriptor sanitizer or treat clearing environment alone as descriptor isolation. |
+
+The Apple helper references above were retrieved for this continuation. This is
+an interface inventory, not an exhaustive audit of installed helpers or a claim
+that every host service is safe. Testing unidentified real privileged services
+would exceed the disposable fixture scope.
+
+Independent coding remains: separate/detached broker clients, per-operation
+and detached authority records, additional CPU/process/inherited-limit comparisons,
+and missing-service transport controls. Native candidate membership, cleanup,
+aggregate accounting and negative authority tests require successful candidate
+setup. macOS 26 evidence remains unavailable. These gaps keep #275 incomplete;
+no weaker mechanism is accepted as ManagedTree and no production worker is enabled.
+
+The current run is macOS 27.0.1 build 26A434, Darwin 27.0.0 arm64, SDK 26.5,
+Rust 1.99.0, UID 501. Ten example tests and the one focused strict-rejection test
+pass. Workspace formatting, Clippy with warnings denied, architecture and the
+separate integration workspace pass (one consumer and four contract tests).
+Workspace tests stop at CLI integration with 271 passes and five failures after
+282, eight and six passes in earlier suites. The runner suite reports 152 passes
+and 25 failures. The CLI failures explicitly report native probe profile
+installation failure; the runner log retains its setup and downstream receipt
+assertions. These are failed runs, not passing native acceptance. Native probe
+commands `rejection`, `authority` and named `xpc` exit 2; positive marker/profile
+setup, contained negative authority and worker acknowledgement remain unavailable.
+The local bundle compiles, signs and verifies, but those checks do not resolve
+startup. Linux isolated validation can check portable code only. No validation
+command is configured in this task's engine handoff, and no source-matched
+isolated receipt is available. Remaining independent coding keeps this at a
+partial implementation checkpoint; macOS 26 and capable native execution remain
+later evidence requirements.

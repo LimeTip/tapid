@@ -1,4 +1,10 @@
 #[cfg(target_os = "macos")]
+#[path = "broker.rs"]
+mod broker;
+#[cfg(target_os = "macos")]
+#[path = "rlimit.rs"]
+mod rlimit;
+#[cfg(target_os = "macos")]
 #[path = "xpc.rs"]
 mod xpc;
 use std::io;
@@ -26,6 +32,12 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
     }
     match args.as_slice() {
         #[cfg(target_os = "macos")]
+        [command] if command == "rlimits" => rlimit::run(),
+        #[cfg(target_os = "macos")]
+        [command, mode] if command == "rlimit-child" => rlimit::child(mode),
+        #[cfg(target_os = "macos")]
+        [command] if command == "broker" => broker::run(),
+        #[cfg(target_os = "macos")]
         [command] if command == "authority" => authority::run(),
         #[cfg(target_os = "macos")]
         [command, expected, outside, tcp, unix, depth] if command == "authority-payload" => {
@@ -42,7 +54,15 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         [command] if command == "xpc" => xpc::client(),
         #[cfg(target_os = "macos")]
-        [command] if command == "lineage" => lineage(),
+        [command] if command == "xpc-transport" => xpc::transport_controls(),
+        #[cfg(target_os = "macos")]
+        [command] if command == "lineage" => {
+            lineage(&["ordinary", "setsid", "setpgid", "double-fork"])
+        }
+        #[cfg(target_os = "macos")]
+        [command, count] if command == "rapid-reparent" => {
+            lineage(&vec!["double-fork"; repetitions(count)?])
+        }
         #[cfg(target_os = "macos")]
         [command, transition] if command == "worker" => worker(transition),
         #[cfg(target_os = "macos")]
@@ -50,7 +70,7 @@ pub fn run(args: Vec<String>) -> io::Result<()> {
         [command] if command == "rejection" => rejection(),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: macos_managed_tree_probe rejection|lineage|cleanup|limits|authority|xpc (native macOS only)",
+            "usage: macos_managed_tree_probe rejection|lineage|rapid-reparent <1..16>|cleanup|limits|rlimits|broker|authority|xpc (native macOS only)",
         )),
     }
 }
@@ -248,6 +268,17 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod native_tests {
     #[test]
+    fn rapid_reparent_repetitions_are_bounded_before_spawn() {
+        assert_eq!(super::repetitions("8").unwrap(), 8);
+        for value in ["0", "17", "-1", "invalid"] {
+            assert_eq!(
+                super::repetitions(value).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
     fn child_payload_rejects_unbounded_delay_and_unknown_transition() {
         for (transition, delay) in [("setsid", "999999"), ("unknown", "1"), ("setsid", "0")] {
             assert!(super::child(transition, delay).is_err());
@@ -344,7 +375,21 @@ fn worker(transition: &str) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn lineage() -> io::Result<()> {
+fn repetitions(value: &str) -> io::Result<usize> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|count| (1..=16).contains(count))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "rapid-reparent requires 1..16 repetitions",
+            )
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn lineage(transitions: &[&str]) -> io::Result<()> {
     use std::{
         fs,
         process::Command,
@@ -354,7 +399,7 @@ fn lineage() -> io::Result<()> {
     println!(
         "candidate=unsandboxed-diagnostic requested=observed-lineage enforced=none authoritative_boundary=none candidate_cleanup=none"
     );
-    for transition in ["ordinary", "setsid", "setpgid", "double-fork"] {
+    for (iteration, &transition) in transitions.iter().enumerate() {
         let mut observation = record::Observation::diagnostic(transition, "cleanup on worker exit");
         let root = TempProject::new("lineage-diagnostic")?;
         let start = Instant::now();
@@ -386,7 +431,7 @@ fn lineage() -> io::Result<()> {
         observation.observed = format!("{acknowledged} delayed_marker={observed}");
         observation.emit()?;
         println!(
-            "case={transition} worker_status={status} acknowledgement={acknowledged:?} delayed_marker={observed} elapsed_us={} verdict=diagnostic-only harness_rescue=finite-child-self-expiry",
+            "iteration={iteration} case={transition} worker_status={status} acknowledgement={acknowledged:?} delayed_marker={observed} elapsed_us={} verdict=diagnostic-only harness_rescue=finite-child-self-expiry",
             start.elapsed().as_micros()
         );
         if !observed {
