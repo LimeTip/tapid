@@ -495,3 +495,12 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+The initial package-security gate emits
+`POLICY_SECURITY_EVIDENCE_UNAVAILABLE` as an operational error when any configured
+security rule is required. `changes.state` is `unchanged` and dependency hooks
+have not executed. Advisory-only requirements use the same code in `warnings`
+and do not block installation; no security coverage is established. There is no
+evidence-backed allow result or per-package security coverage report yet. The
+[policy configuration](../crates/tapid-policy/README.md) documents this initial
+implementation's limits.

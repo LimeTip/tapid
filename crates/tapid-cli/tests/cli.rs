@@ -9095,3 +9095,188 @@ fn sandbox_json_rejects_install_before_privileged_management() {
 }
 #[path = "cli_cases/preview.rs"]
 mod preview_tests;
+
+#[test]
+fn security_required_missing_denies_before_hooks() {
+    let project = tapid_test_support::TempProject::new("security-required-missing").unwrap();
+    let home = tapid_test_support::TempHome::new("security-required-missing").unwrap();
+    let manifest =
+        br#"{"name":"policy-fixture","version":"1.0.0","dependencies":{"native-demo":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    write_dependency_script_fixture(
+        &project,
+        "H4sIAAAAAAAC/+3QwUoDMRSF4TxKyFrHDFMquHCl0ILYRSu4K2F60dF2EpK0CKXvbqaCC1cWRBD/b3PCyb0EElz76p7kInxk9ZJ8r36YLcaj0TGLr2mby+bzfOzretzUSlv1C7Ypu1ieV//T3vRuI+ZKl8zdTs5XsvHmTJudxNT5fripK1vZoUtt7EJOpdubEKXry9+t18OItM9ey5u02ywrfa3nk9nD3c3yfrZY3j5O54th+8Tx4FM+dSVKcFG+NX44KAAAAAAAAAAAAAAAAAD4y94B7nP/yQAoAAA=",
+    );
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[security]
+version = 1
+[[security.rules]]
+id = "malware"
+kind = "malware"
+mode = "required"
+sources = ["approved-provider"]
+max-age-seconds = 3600
+status = "cached"
+"#,
+        )
+        .unwrap();
+    let output = command_support::command_in_home(
+        project.path(),
+        home.path(),
+        &[
+            "install",
+            "--json",
+            "--registry-fixture",
+            "registry.json",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+        ],
+        true,
+    )
+    .arg("--store-dir")
+    .arg(home.path().join("store"))
+    .output()
+    .unwrap();
+    assert!(!output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json.to_string()
+            .contains("POLICY_SECURITY_EVIDENCE_UNAVAILABLE"),
+        "{json}"
+    );
+    assert_eq!(json["lifecycle"]["hooks_executed"], 0);
+    assert!(!home.path().join("store").exists());
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    for path in ["tapid.lock", "node_modules", "hook-sentinel"] {
+        assert!(!project.path().join(path).exists(), "unexpected {path}");
+    }
+}
+
+#[test]
+fn security_required_denial_preserves_existing_project_and_store_across_modes() {
+    let project = tapid_test_support::TempProject::new("security-existing").unwrap();
+    let home = tapid_test_support::TempHome::new("security-existing").unwrap();
+    let manifest =
+        br#"{"name":"policy-fixture","version":"1.0.0","dependencies":{"unavailable":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    project.write("tapid.lock", b"prior lock bytes").unwrap();
+    project
+        .write("package-lock.json", b"prior imported lock bytes")
+        .unwrap();
+    project
+        .write("node_modules/keep/sentinel", b"active")
+        .unwrap();
+    home.write("store/sentinel", b"verified").unwrap();
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[security]
+version = 1
+[[security.rules]]
+id = "malware"
+kind = "malware"
+mode = "required"
+sources = ["provider"]
+max-age-seconds = 60
+status = "current"
+"#,
+        )
+        .unwrap();
+    for args in [
+        vec!["install"],
+        vec!["install", "--offline"],
+        vec!["install", "--frozen"],
+        vec!["ci"],
+        vec!["ci", "--offline"],
+        vec!["prune"],
+        vec!["add", "new-package@1.0.0"],
+        vec!["update"],
+        vec!["remove", "unavailable"],
+        vec![
+            "install",
+            "--allow-unapproved-dependency-scripts",
+            "--unsafe-no-dependency-sandbox",
+        ],
+    ] {
+        let output = command_support::command_in_home(project.path(), home.path(), &args, true)
+            .arg("--store-dir")
+            .arg(home.path().join("store"))
+            .arg("--json")
+            .output()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{args:?}: {json}");
+        assert!(
+            json.to_string()
+                .contains("POLICY_SECURITY_EVIDENCE_UNAVAILABLE"),
+            "{args:?}: {json}"
+        );
+        assert_eq!(json["changes"]["state"], "unchanged");
+        if let Some(lifecycle) = json.get("lifecycle").filter(|v| !v.is_null()) {
+            assert_eq!(lifecycle["hooks_executed"], 0);
+        }
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            b"prior lock bytes"
+        );
+        assert_eq!(
+            fs::read(project.path().join("package-lock.json")).unwrap(),
+            b"prior imported lock bytes"
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/keep/sentinel")).unwrap(),
+            b"active"
+        );
+        assert_eq!(
+            fs::read(home.path().join("store/sentinel")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(fs::read_dir(home.path().join("store")).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn security_advisory_unavailable_warns_without_requiring_a_service() {
+    let project = tapid_test_support::TempProject::new("security-advisory").unwrap();
+    project
+        .write("package.json", br#"{"name":"empty","version":"1.0.0"}"#)
+        .unwrap();
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[security]
+version = 1
+[[security.rules]]
+id = "malware"
+kind = "malware"
+mode = "advisory"
+sources = ["provider"]
+max-age-seconds = 60
+status = "cached"
+"#,
+        )
+        .unwrap();
+    let output = run(project.path(), &["install", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{json}");
+    assert!(
+        json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "POLICY_SECURITY_EVIDENCE_UNAVAILABLE"),
+        "{json}"
+    );
+}

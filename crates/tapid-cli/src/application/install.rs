@@ -262,6 +262,30 @@ pub(crate) fn run_with_execution(
         ..
     } = request;
     let mut session = InstallSession::new(project_dir);
+    let config = match crate::registry::RegistryConfig::load(project_dir) {
+        Ok(config) => config,
+        Err(error) => {
+            return Err(session.fail(OperationalError::new(
+                ErrorKind::RegistryConfiguration,
+                error,
+            )));
+        }
+    };
+    if let Some(policy) = config.security {
+        let decision = policy
+            .unavailable_evidence()
+            .expect("loaded policy is validated");
+        if decision.decision == tapid_policy::Decision::Deny {
+            return Err(session.fail(OperationalError::new(
+                ErrorKind::SecurityEvidenceUnavailable,
+                "POLICY_SECURITY_EVIDENCE_UNAVAILABLE: required authenticated security evidence is unavailable; no dependency hooks or activation were performed",
+            )));
+        }
+        session
+            .outcome
+            .warnings
+            .push(Warning::SecurityEvidenceUnavailable);
+    }
     session.outcome.warnings.extend(overrides.warnings());
     if allow_unverified_registry_artifacts
         && matches!(

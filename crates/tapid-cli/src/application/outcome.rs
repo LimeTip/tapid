@@ -17,6 +17,7 @@ pub(crate) use lifecycle::LifecycleReport;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorKind {
+    SecurityEvidenceUnavailable,
     InvalidRequest,
     Project,
     ProjectChanged,
@@ -46,6 +47,7 @@ pub(crate) enum ErrorKind {
 impl ErrorKind {
     pub(crate) fn code(self) -> &'static str {
         match self {
+            Self::SecurityEvidenceUnavailable => "POLICY_SECURITY_EVIDENCE_UNAVAILABLE",
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::Project => "PROJECT_UNAVAILABLE",
             Self::ProjectChanged => "PROJECT_CHANGED",
@@ -343,6 +345,7 @@ impl fmt::Display for LifecycleIdentity {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Warning {
+    SecurityEvidenceUnavailable,
     UnapprovedDependencyScriptsAllowed,
     DependencyScriptsWithoutContainment,
     UpdateGraphChange {
@@ -362,6 +365,7 @@ pub(crate) enum Warning {
 impl Warning {
     pub(crate) fn code(&self) -> &'static str {
         match self {
+            Self::SecurityEvidenceUnavailable => "POLICY_SECURITY_EVIDENCE_UNAVAILABLE",
             Self::UnapprovedDependencyScriptsAllowed => "UNAPPROVED_DEPENDENCY_SCRIPTS_ALLOWED",
             Self::DependencyScriptsWithoutContainment => "DEPENDENCY_SCRIPTS_WITHOUT_CONTAINMENT",
             Self::UpdateGraphChange { .. } => "UPDATE_GRAPH_CHANGE",
@@ -392,6 +396,7 @@ impl fmt::Display for Warning {
             );
         }
         f.write_str(match self {
+            Self::SecurityEvidenceUnavailable => "optional security evidence is unavailable; security coverage was not established",
             Self::UnapprovedDependencyScriptsAllowed => "dependency hook approval is bypassed for this invocation; generated outputs will not enter the verified build cache",
             Self::DependencyScriptsWithoutContainment => "dependency hooks execute without containment; they can access the host and leave surviving descendants; generated outputs will not enter the verified build cache",
             Self::UnverifiedRegistryArtifactsAllowed => "npm artifacts without registry integrity are not authenticated against a registry-declared digest",

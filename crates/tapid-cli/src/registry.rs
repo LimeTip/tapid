@@ -10,6 +10,7 @@ const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryDocument {
+    security: Option<tapid_policy::SecurityPolicy>,
     #[serde(default)]
     registries: BTreeMap<String, RegistryEntry>,
     #[serde(default, rename = "run")]
@@ -34,6 +35,7 @@ pub(crate) struct RegistryRoute {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RegistryConfig {
     routes: BTreeMap<String, RegistryEntry>,
+    pub(crate) security: Option<tapid_policy::SecurityPolicy>,
 }
 
 impl RegistryConfig {
@@ -69,6 +71,9 @@ impl RegistryConfig {
     fn parse(input: &str) -> Result<Self, String> {
         let document: RegistryDocument =
             toml::from_str(input).map_err(|_| "invalid registry configuration".to_owned())?;
+        if let Some(policy) = &document.security {
+            policy.validate().map_err(str::to_owned)?;
+        }
         let mut routes = BTreeMap::new();
         for (scope, entry) in document.registries {
             if scope != "default" && !valid_scope(&scope) {
@@ -91,7 +96,10 @@ impl RegistryConfig {
             }
             routes.insert(scope, entry);
         }
-        Ok(Self { routes })
+        Ok(Self {
+            routes,
+            security: document.security,
+        })
     }
 
     fn selected_entry<'a>(&'a self, name: &PackageName) -> (Option<&'a RegistryEntry>, &'a str) {
