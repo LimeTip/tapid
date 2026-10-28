@@ -74,3 +74,11 @@ Where Windows denies libuv's `NUL` reopen for ignored stdin, the compatibility c
 Compatibility import coverage excludes Windows system DLL internals, launches during DLL initialization, manually mapped modules, and dynamically resolved process-creation calls. These paths retain AppContainer and Job containment but are not promised Node compatibility propagation. Unrecognized application import tables or failed import patching reject startup or terminate the contained process before returning from the load.
 
 Windows `network=false` additionally requires the administrator-installed network guard. Run `tapid sandbox install` once from an administrator terminal; ordinary runs then register denial without elevation. `tapid sandbox status` inspects service state. The deny-only LocalSystem service owns persistent WFP filters for each verified execution's exact package SID and removes them only after a fresh empty-Job check. Missing guard setup fails before project code starts. Service-crash orphans retain denial and prevent blanket uninstallation. This guard is separate from the existing standard-user `network=true` socket/DNS broker. Native service installation and bind-denial acceptance are pending; see the scope document above.
+
+Dependency lifecycle requests also retain each declared tool through
+`ExecutionRequestBuilder::verified_executable`, checked against the approval's
+SHA-256 used in its recipe. The existing bounded executable reader and native
+identity checks cover secondary executables as well as Node. Windows retains
+read-only handles across request clones; Unix rechecks bytes before execution.
+This does not close loader, registry, search-order or host mutation races and
+does not enable authenticated Windows dependency builds.

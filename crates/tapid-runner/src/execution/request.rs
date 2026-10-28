@@ -47,7 +47,7 @@ pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), Execu
     Ok((information.dwVolumeSerialNumber, file_index))
 }
 
-/// Canonical trusted Node executable with native identity and byte digest.
+/// Canonical executable identity shared by declared tools and trusted Node bindings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TrustedNodeRuntime {
     pub(super) path: PathBuf,
@@ -66,7 +66,16 @@ impl TrustedNodeRuntime {
                 "trusted Node runtime must be canonical and named node or node.exe",
             ));
         }
+        Self::checked_executable(path)
+    }
+
+    fn checked_executable(path: &Path) -> Result<Self, ExecutionError> {
+        let canonical = canonical_path(path, "trusted executable")?;
+        if canonical != path {
+            return Err(invalid_request("trusted executable path must be canonical"));
+        }
         let mut options = fs::OpenOptions::new();
+
         options.read(true);
         #[cfg(unix)]
         {
@@ -172,7 +181,11 @@ impl TrustedNodeRuntime {
                 "search paths must contain the trusted runtime parent",
             ));
         }
-        let current = Self::checked(&self.path).map_err(|_| {
+        self.validate_identity()
+    }
+
+    fn validate_identity(&self) -> Result<(), ExecutionError> {
+        let current = Self::checked_executable(&self.path).map_err(|_| {
             ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
                 "trusted Node runtime identity changed after request construction",
@@ -222,6 +235,7 @@ pub struct ExecutionRequest {
     pub(super) arguments: Vec<OsString>,
     pub(super) executable_search_paths: Vec<PathBuf>,
     pub(super) trusted_node_runtime: Option<TrustedNodeRuntime>,
+    verified_executables: Vec<TrustedNodeRuntime>,
     pub(super) windows_verbatim_arguments: bool,
     pub(super) allow_process_memory_stats: bool,
     pub(super) project_root: PathBuf,
@@ -238,6 +252,7 @@ impl ExecutionRequest {
             arguments: Vec::new(),
             executable_search_paths: Vec::new(),
             trusted_node_runtime: None,
+            verified_executables: Vec::new(),
             windows_verbatim_arguments: false,
             allow_process_memory_stats: false,
             project_root: PathBuf::from("."),
@@ -271,6 +286,11 @@ impl ExecutionRequest {
             .as_path()
     }
     pub(super) fn validate_trusted_node_runtime(&self) -> Result<(), ExecutionError> {
+        // Check secondary tools even when macOS uses a reserved Node binding.
+        for executable in &self.verified_executables {
+            executable.validate_identity()?;
+        }
+
         #[cfg(target_os = "macos")]
         if let Some(binding) = &self.reserved_node {
             return binding.validate();
@@ -522,6 +542,7 @@ pub struct ExecutionRequestBuilder {
     arguments: Vec<OsString>,
     executable_search_paths: Vec<PathBuf>,
     trusted_node_runtime: Option<PathBuf>,
+    verified_executables: Vec<(PathBuf, String)>,
     windows_verbatim_arguments: bool,
     allow_process_memory_stats: bool,
     project_root: PathBuf,
@@ -561,6 +582,20 @@ impl ExecutionRequestBuilder {
     /// request clones are dropped. This does not bind libraries or loader inputs.
     pub fn trusted_node_runtime(mut self, path: impl Into<PathBuf>) -> Self {
         self.trusted_node_runtime = Some(path.into());
+        self
+    }
+
+    /// Retains a canonical declared executable against its approved SHA-256 digest.
+    /// At most 64 images of at most 512 MiB each are accepted. Bytes and native
+    /// identity are rechecked before execution; Windows also retains read-only
+    /// handles denying write/delete sharing across request clones. This does not
+    /// bind libraries, directory entries, or loader resolution.
+    pub fn verified_executable(
+        mut self,
+        path: impl Into<PathBuf>,
+        digest: impl Into<String>,
+    ) -> Self {
+        self.verified_executables.push((path.into(), digest.into()));
         self
     }
 
@@ -661,6 +696,27 @@ impl ExecutionRequestBuilder {
                 Ok(working_directory)
             })
             .transpose()?;
+        if self.verified_executables.len() > 64 {
+            return Err(invalid_request(
+                "execution request exceeds 64 declared executables",
+            ));
+        }
+        let mut verified_executables = Vec::new();
+        for (path, expected) in &self.verified_executables {
+            let executable = TrustedNodeRuntime::checked_executable(path)?;
+            let actual = executable
+                .digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if expected != &format!("sha256-{actual}") {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::PolicyViolation,
+                    "declared executable bytes do not match the approved digest",
+                ));
+            }
+            verified_executables.push(executable);
+        }
         let trusted_node_runtime = self
             .trusted_node_runtime
             .as_deref()
@@ -676,6 +732,7 @@ impl ExecutionRequestBuilder {
             arguments: self.arguments,
             executable_search_paths: self.executable_search_paths,
             trusted_node_runtime,
+            verified_executables,
             windows_verbatim_arguments: self.windows_verbatim_arguments,
             allow_process_memory_stats: self.allow_process_memory_stats,
             project_root: self.project_root,

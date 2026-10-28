@@ -165,6 +165,17 @@ Authenticated dependency builds remain disabled on Windows at
 mechanisms and unresolved inputs, not native acceptance. No complete Windows
 runtime identity or prepared execution authority exists yet.
 
+Declared lifecycle executables now use the same bounded byte/native-identity
+reader as Node. Request construction compares each prepared tool with its
+approved SHA-256 (already included in generated-output recipes); generic
+prelaunch validation rechecks secondary tools even when a reserved macOS Node
+binding is present. Windows retains their read-only handles until the last
+request clone drops. Controls reject a mismatched approval digest and same-inode
+secondary-byte mutation before execution, plus native Windows write/rename
+attempts while a request clone survives. These changes do not bind ordered loader
+resolution, registry inputs, DLLs or the complete executable search directories.
+Native Windows pin controls still require the existing Windows CI lane.
+
 Trusted Node requests now bind a streaming SHA-256 of the primary executable
 (bounded to 512 MiB) as well as its native file identity. Revalidation rejects
 in-place changes that preserve file identity and length. On Windows the request

@@ -3125,3 +3125,75 @@ fn native_write_grant_does_not_imply_read_authority() {
     assert_ne!(outcome.termination(), &Termination::Exited(0));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn declared_executable_rejects_bytes_outside_the_approved_digest() {
+    let project = tapid_test_support::TempProject::new("declared-executable-digest").unwrap();
+    project.write("tool", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("tool")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // SHA-256 of "abd", not the bytes in the executable.
+    let result = ExecutionRequest::builder(&tool)
+        .verified_executable(
+            &tool,
+            "sha256-a52d159f262b2c6ddb724a61840befc36eb30c88877a4030b65cbe86298449c9",
+        )
+        .build();
+    assert_eq!(
+        result.unwrap_err().category(),
+        ExecutionErrorCategory::PolicyViolation
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn declared_executable_mutation_rejects_execution_before_capture_or_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("secondary-executable-mutation").unwrap();
+    project.write("tool", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("tool")).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let request = ExecutionRequest::builder("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    fs::write(&tool, b"abd").unwrap();
+    let capture = project.path().join("capture");
+    let error = execute_uncontained(&request, &capture).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    assert!(
+        !capture.exists(),
+        "changed secondary bytes must fail before capture setup"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn declared_executable_retains_windows_pins_until_last_request_clone_drops() {
+    let project = tapid_test_support::TempProject::new("secondary-executable-pin").unwrap();
+    project.write("tool.exe", b"abc").unwrap();
+    let tool = fs::canonicalize(project.path().join("tool.exe")).unwrap();
+    let request = ExecutionRequest::builder(&tool)
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    let retained = request.clone();
+    drop(request);
+    assert!(fs::OpenOptions::new().write(true).open(&tool).is_err());
+    assert!(fs::rename(&tool, project.path().join("moved.exe")).is_err());
+    drop(retained);
+    fs::OpenOptions::new().write(true).open(&tool).unwrap();
+    fs::rename(&tool, project.path().join("moved.exe")).unwrap();
+}
