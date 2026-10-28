@@ -5,6 +5,7 @@ use crate::application::outcome::{
 mod cache;
 mod dependency;
 mod explain;
+mod info;
 mod outdated;
 mod preview;
 mod tools;
@@ -13,6 +14,7 @@ mod why;
 pub(crate) use cache::cache_result;
 pub(crate) use dependency::installed;
 pub(crate) use explain::explain;
+pub(crate) use info::info;
 pub(crate) use outdated::outdated;
 pub(crate) use preview::preview;
 pub(crate) use tools::tools;
@@ -265,7 +267,7 @@ fn status_text(value: &mut Value, pointer: &str, truncated: &mut Vec<String>) {
     }
 }
 
-fn emit(result: Value, status: u8) -> ExitCode {
+pub(crate) fn emit(result: Value, status: u8) -> ExitCode {
     // One newline-terminated object. A broken output channel is an I/O failure.
     let mut stdout = std::io::stdout().lock();
     if serde_json::to_writer(&mut stdout, &result).is_err() || stdout.write_all(b"\n").is_err() {
