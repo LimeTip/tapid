@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:envelope:v1",
+  "title": "Tapid JSON result envelope v1",
+  "description": "Common framing only. Does not validate command data, diagnostic context, lifecycle evidence, or warning-specific details.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "operation",
+    "outcome",
+    "project",
+    "project_path",
+    "changes",
+    "truncated_fields",
+    "warnings",
+    "warning_details",
+    "warning_details_complete",
+    "warning_details_omitted",
+    "lifecycle",
+    "errors",
+    "retry",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "operation": {
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "success",
+        "failure",
+        "partial"
+      ]
+    },
+    "project": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_path": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/path"
+        }
+      ]
+    },
+    "changes": {
+      "type": "object",
+      "required": [
+        "state",
+        "files",
+        "paths"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unchanged",
+            "rolled_back",
+            "committed",
+            "committed_cleanup_pending",
+            "recovery_required"
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        }
+      }
+    },
+    "truncated_fields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warning_details": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "warning_details_complete": {
+      "type": "boolean"
+    },
+    "warning_details_omitted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "lifecycle": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "retry": {
+      "enum": [
+        null,
+        "after_correction",
+        "after_contention",
+        "do_not_repeat",
+        "recover_first"
+      ]
+    },
+    "data": {
+      "description": "Opaque command payload. Validate separately using the advertised payload schema, when available."
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "object",
+      "required": [
+        "encoding",
+        "value"
+      ],
+      "properties": {
+        "encoding": {
+          "enum": [
+            "utf8",
+            "unix_bytes_base64",
+            "windows_utf16le_base64"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unavailable": {
+          "const": "capacity_exceeded"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "unavailable"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

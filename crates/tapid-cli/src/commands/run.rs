@@ -1,12 +1,12 @@
 use crate::filesystem::read::{ReadError, read_bounded_file};
 use clap::Args as ClapArgs;
 mod permissions;
+mod planning;
+mod preflight;
 mod result;
 use result::RunFailure;
 use std::{
-    env,
     ffi::OsString,
-    fs,
     io::{self, Write},
     path::PathBuf,
     process::ExitCode,
@@ -25,6 +25,9 @@ pub(crate) struct Args {
     /// Exact Node executable; otherwise the first valid Node on the host PATH is used.
     #[arg(long)]
     pub(crate) node_runtime: Option<PathBuf>,
+    /// Inspect script selection and requested permissions without executing or reading environment values.
+    #[arg(long, conflicts_with_all = ["result_file", "receipt_json"])]
+    pub(crate) preflight: bool,
     /// Emit the versioned receipt as one JSON line on stderr after child output.
     #[arg(long)]
     pub(crate) receipt_json: bool,
@@ -53,7 +56,10 @@ fn config_error_category(category: tapid_runner::ConfigErrorCategory) -> &'stati
     }
 }
 
-pub(crate) fn run(args: Args) -> ExitCode {
+pub(crate) fn run(args: Args, json: bool) -> ExitCode {
+    if args.preflight {
+        return preflight::run(&args, json);
+    }
     let mut result_file = match args.result_file.as_deref() {
         Some(path) => match result::create_file(path, &args.project_dir) {
             Ok(file) => Some(file),
@@ -88,136 +94,13 @@ fn execute(
     args: &Args,
     policy_inputs: &mut Option<serde_json::Value>,
 ) -> Result<tapid_runner::ExecutionOutcome, RunFailure> {
-    let project_dir = match fs::canonicalize(&args.project_dir) {
-        Ok(path) if path.is_dir() => path,
-        Ok(path) => {
-            eprintln!(
-                "error: project directory is not a directory: {}",
-                path.display()
-            );
-            return Err(RunFailure::ProjectUnavailable);
-        }
-        Err(error) => {
-            eprintln!(
-                "error: cannot access project directory '{}': {error}",
-                args.project_dir.display()
-            );
-            return Err(RunFailure::ProjectUnavailable);
-        }
-    };
-    let (manifest, working_directory) = if let Some(workspace_name) = args.workspace.as_deref() {
-        let workspace = match tapid_manifest::Workspace::discover(&project_dir) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::WorkspaceInvalid);
-            }
-        };
-        let manifest = match workspace.select(Some(workspace_name)) {
-            Ok(manifest) => manifest.clone(),
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::WorkspaceInvalid);
-            }
-        };
-        let member_manifest = match workspace.select_path(Some(workspace_name)) {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::WorkspaceInvalid);
-            }
-        };
-        let Some(working_directory) = member_manifest.parent() else {
-            eprintln!("error: workspace member manifest has no parent");
-            return Err(RunFailure::WorkspaceInvalid);
-        };
-        (manifest, working_directory.to_owned())
-    } else {
-        let manifest = match super::manifest::read_manifest(&project_dir.join("package.json")) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return Err(RunFailure::ManifestInvalid);
-            }
-        };
-        (manifest, project_dir.clone())
-    };
-    let Some(script) = manifest.scripts().get(&args.script).cloned() else {
-        match args.workspace.as_deref() {
-            Some(workspace_name) => eprintln!(
-                "error: workspace member '{workspace_name}' package script is missing: {}",
-                args.script
-            ),
-            None => eprintln!("error: root package script is missing: {}", args.script),
-        }
-        return Err(RunFailure::ScriptMissing);
-    };
-    let config_path = project_dir.join("tapid.toml");
-    let invocation_mode = args.permissions.enabled();
-    let config_bytes = match read_run_config(&config_path) {
-        Ok(bytes) => bytes,
-        Err(ReadError::CapacityExceeded) => {
-            eprintln!("error: invalid run configuration (capacity-exceeded)");
-            return Err(RunFailure::ConfigInvalid);
-        }
-        Err(ReadError::Io(error)) => {
-            if error.kind() == std::io::ErrorKind::NotFound && invocation_mode {
-                Vec::new()
-            } else {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!("error: required run configuration is missing: tapid.toml");
-                } else {
-                    eprintln!("error: cannot read run configuration 'tapid.toml': {error}");
-                }
-                return Err(RunFailure::ConfigUnavailable);
-            }
-        }
-    };
-    let config = match tapid_runner::RunConfig::parse_toml_bytes(&config_bytes) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!(
-                "error: invalid run configuration ({})",
-                config_error_category(error.category())
-            );
-            return Err(RunFailure::ConfigInvalid);
-        }
-    };
-    if !invocation_mode && config.exact_profile(&args.script).is_none() {
-        eprintln!(
-            "error: run policy profile is missing for script: {}",
-            args.script
-        );
-        return Err(RunFailure::ProfileMissing);
-    }
-    let selection = match args.permissions.select(&config, &args.script) {
-        Ok(selection) => selection,
-        Err(error) => {
-            eprintln!(
-                "error: invalid invocation permissions ({})",
-                config_error_category(error.category())
-            );
-            return Err(RunFailure::PermissionsInvalid);
-        }
-    };
-    *policy_inputs = Some(selection.provenance(&args.permissions));
-    let registry_config = match crate::registry::RegistryConfig::parse_toml_bytes(&config_bytes) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return Err(RunFailure::RegistryConfigurationInvalid);
-        }
-    };
-    let registry_credential_names = registry_config.credential_environment_names();
-    if registry_config
-        .allowlist_contains_registry_credentials(selection.policy.environment(), cfg!(windows))
-    {
-        eprintln!("error: registry credential environment variables cannot be passed to scripts");
-        return Err(RunFailure::EnvironmentInvalid);
-    }
+    let mut evidence = planning::SelectionEvidence::default();
+    let plan = planning::select(args, &mut evidence);
+    *policy_inputs = evidence.policy_inputs;
+    let plan = plan?;
     let ambient_environment = match crate::run::read_allowlisted_environment_with_denied(
-        selection.policy.environment(),
-        &registry_credential_names,
+        plan.selection.policy.environment(),
+        &plan.registry_credential_names,
     ) {
         Ok(environment) => environment,
         Err(error) => {
@@ -225,48 +108,7 @@ fn execute(
             return Err(RunFailure::EnvironmentInvalid);
         }
     };
-    let host_path = args
-        .node_runtime
-        .is_none()
-        .then(|| env::var_os("PATH"))
-        .flatten();
-    let host = crate::run::HostExecutionEnvironment {
-        node_runtime: args.node_runtime.as_deref(),
-        path: host_path.as_deref(),
-        allowlisted: &ambient_environment,
-        allow_process_memory_stats: args.allow_process_memory_stats,
-    };
-    let prepared_result = if invocation_mode {
-        crate::run::prepare_execution_request_with_policy(
-            &project_dir,
-            &working_directory,
-            &selection.policy,
-            selection.ceiling.as_ref(),
-            &script,
-            &args.arguments,
-            host,
-        )
-    } else if args.workspace.is_some() {
-        crate::run::prepare_execution_request_with_working_directory(
-            &project_dir,
-            &working_directory,
-            &args.script,
-            &config,
-            &script,
-            &args.arguments,
-            host,
-        )
-    } else {
-        crate::run::prepare_execution_request(
-            &project_dir,
-            &args.script,
-            &config,
-            &script,
-            &args.arguments,
-            host,
-        )
-    };
-    let prepared = match prepared_result {
+    let prepared = match plan.prepare(args, &ambient_environment) {
         Ok(prepared) => prepared,
         Err(error) => {
             eprintln!("error: {error}");

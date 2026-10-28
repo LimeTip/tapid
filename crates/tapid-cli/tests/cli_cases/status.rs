@@ -1,5 +1,331 @@
 use super::*;
 
+#[test]
+fn status_reports_lifecycle_hook_evidence_without_assurance() {
+    let project = tapid_test_support::TempProject::new("status-hook-evidence").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0","scripts":{"postinstall":"SECRET_SCRIPT_BODY","test":"ignored"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let (_, value) = status(project.path(), &[]);
+    let lifecycle = &value["data"]["lifecycle"];
+    assert_eq!(
+        lifecycle["manifest_declarations"][0]["hooks"],
+        serde_json::json!(["postinstall"])
+    );
+    assert_eq!(
+        lifecycle["manifest_declarations"][0]["evidence"],
+        "local_observation"
+    );
+    assert_eq!(lifecycle["dependency_source_discovery"], "unchecked");
+    assert_eq!(lifecycle["completeness"], "incomplete");
+    assert_eq!(
+        lifecycle["backend_and_toolchain_prerequisites"],
+        "unchecked"
+    );
+    assert_eq!(lifecycle["enforcement"], "not_established");
+    assert!(!value.to_string().contains("SECRET_SCRIPT_BODY"));
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!project.path().join("node_modules").exists());
+    let human = run(project.path(), &["status"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("postinstall"));
+    assert!(human.contains("backend_and_toolchain_prerequisites"));
+    assert!(!human.contains("SECRET_SCRIPT_BODY"));
+}
+
+#[test]
+fn status_reports_recorded_derived_hooks_as_unverified_lock_metadata() {
+    let project = tapid_test_support::TempProject::new("status-recorded-hooks").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let package = tapid_lockfile::LockedPackage::new_with_provenance(
+        "https://registry.npmjs.org",
+        "native-package",
+        "1.0.0",
+        &format!("sha512-{}", STANDARD.encode([1; 64])),
+        &digest,
+        tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let key = package.key();
+    lock.insert_package(package).unwrap();
+    lock.set_roots(vec![key.clone()]).unwrap();
+    lock.set_derived_hooks(
+        &key,
+        vec![
+            tapid_lockfile::DerivedHookOutput::new(
+                "install",
+                &digest,
+                &digest,
+                &format!("hmac-sha256-{}", "b".repeat(64)),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let (_, value) = status(project.path(), &[]);
+    let recorded = &value["data"]["lifecycle"]["recorded_derived_hooks"][0];
+    assert_eq!(recorded["hook"], "install");
+    assert_eq!(recorded["package"], key);
+    assert_eq!(recorded["source"], "lockfile_metadata");
+    assert_eq!(recorded["verification"], "unchecked");
+    assert!(!value.to_string().contains("hmac-sha256-"));
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn status_bounds_recorded_hook_evidence_and_marks_it_incomplete() {
+    let project = tapid_test_support::TempProject::new("status-hook-bound").unwrap();
+    let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+    project.write("package.json", manifest).unwrap();
+    let mut lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(manifest))).unwrap();
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let output = tapid_lockfile::DerivedHookOutput::new(
+        "install",
+        &digest,
+        &digest,
+        &format!("hmac-sha256-{}", "b".repeat(64)),
+    )
+    .unwrap();
+    let mut roots = Vec::new();
+    for index in 0..129 {
+        let package = tapid_lockfile::LockedPackage::new_with_provenance(
+            "https://registry.npmjs.org",
+            &format!("package-{index}"),
+            "1.0.0",
+            &format!("sha512-{}", STANDARD.encode([1; 64])),
+            &digest,
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        let key = package.key();
+        lock.insert_package(package).unwrap();
+        lock.set_derived_hooks(&key, vec![output.clone()]).unwrap();
+        roots.push(key);
+    }
+    lock.set_roots(roots).unwrap();
+    let bytes = lock.to_json().unwrap();
+    project.write("tapid.lock", bytes.as_bytes()).unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success());
+    assert_eq!(
+        value["data"]["lifecycle"]["recorded_derived_hooks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        128
+    );
+    assert_eq!(value["data"]["lifecycle"]["completeness"], "truncated");
+    assert_eq!(value["data"]["truncated"], true);
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+}
+
+#[test]
+fn status_lifecycle_facts_cover_members_without_treating_absence_as_verified() {
+    let project = tapid_test_support::TempProject::new("status-member-hooks").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/web/package.json",
+            br#"{"name":"web","version":"1.0.0","scripts":{"prepare":"PRIVATE_HOOK_COMMAND"}}"#,
+        )
+        .unwrap();
+    let (_, value) = status(project.path(), &["--workspace", "web"]);
+    let facts = value["data"]["lifecycle"]["manifest_declarations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0]["hooks"], serde_json::json!([]));
+    assert_eq!(facts[1]["hooks"], serde_json::json!(["prepare"]));
+    assert_eq!(value["data"]["lifecycle"]["completeness"], "incomplete");
+    assert!(!value.to_string().contains("PRIVATE_HOOK_COMMAND"));
+    assert!(!project.path().join("node_modules").exists());
+}
+
+#[test]
+fn status_reports_actions_and_separates_imported_replay_from_mutation() {
+    let project = tapid_test_support::TempProject::new("status-operation-support").unwrap();
+    let root = r#"{"name":"root","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#;
+    project.write("package.json", root.as_bytes()).unwrap();
+    let npm = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":{"name":"root","version":"1.0.0"}
+    }});
+    let lock = tapid_lockfile::ImportedNpmLockfile::import(
+        &npm.to_string(),
+        root,
+        &format!("sha256-{:x}", Sha256::digest(root.as_bytes())),
+    )
+    .unwrap()
+    .to_json()
+    .unwrap();
+    project.write("tapid.lock", lock.as_bytes()).unwrap();
+    let (output, value) = status(project.path(), &[]);
+    assert!(!output.status.success(), "{value}");
+    let data = &value["data"];
+    assert_eq!(data["manifest_lock_agreement"], "match");
+    assert_eq!(
+        data["operations"]["imported_replay"]["support"],
+        "supported"
+    );
+    assert_eq!(
+        data["operations"]["imported_replay"]["scope"],
+        "manifest_receipts_only"
+    );
+    assert_eq!(
+        data["operations"]["native_resolution"]["support"],
+        "unsupported"
+    );
+    assert_eq!(
+        data["operations"]["dependency_mutation"]["support"],
+        "unsupported"
+    );
+    let blocker = data["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["code"] == "UNSUPPORTED_OVERRIDE")
+        .unwrap();
+    assert_eq!(blocker["action"]["id"], "review_manifest_requirement");
+    assert_eq!(blocker["action"]["parameters"]["field"], "/overrides");
+    assert_eq!(
+        blocker["operations"],
+        serde_json::json!(["native_resolution", "dependency_mutation"])
+    );
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        root.as_bytes()
+    );
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        lock.as_bytes()
+    );
+    assert!(!project.path().join("node_modules").exists());
+    let human = run(project.path(), &["status"]);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("review_manifest_requirement"));
+    assert!(human.contains("Migration guide:"));
+}
+
+#[test]
+fn status_action_paths_preserve_hashes_in_project_names() {
+    let project = tapid_test_support::TempProject::new("status-action-hash").unwrap();
+    project
+        .write(
+            "with#hash/package.json",
+            br#"{"name":"root","version":"1.0.0","overrides":{"jsr:@std/path":"1"}}"#,
+        )
+        .unwrap();
+    let directory = project.path().join("with#hash");
+    let (_, value) = status(&directory, &[]);
+    let blocker = value["data"]["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["code"] == "UNSUPPORTED_OVERRIDE")
+        .unwrap();
+    assert_eq!(
+        blocker["action"]["parameters"]["path"],
+        directory
+            .canonicalize()
+            .unwrap()
+            .join("package.json")
+            .display()
+            .to_string()
+    );
+    assert_eq!(blocker["action"]["parameters"]["field"], "/overrides");
+}
+
+#[test]
+fn status_checks_npm_import_forms_without_importing() {
+    for version in [2, 3] {
+        let project = tapid_test_support::TempProject::new("status-npm-input").unwrap();
+        let root = br#"{"name":"root","version":"1.0.0"}"#;
+        project.write("package.json", root).unwrap();
+        let lock = Lockfile::new(&format!("sha256-{:x}", Sha256::digest(root))).unwrap();
+        let lock = lock.to_json().unwrap();
+        project.write("tapid.lock", lock.as_bytes()).unwrap();
+        let npm = serde_json::json!({"lockfileVersion":version,"packages":{"":{"name":"root","version":"1.0.0"}}}).to_string();
+        project.write("package-lock.json", npm.as_bytes()).unwrap();
+        let (output, value) = status(project.path(), &[]);
+        assert_eq!(output.status.success(), version == 3, "{value}");
+        assert_eq!(
+            value["data"]["operations"]["npm_import"]["support"],
+            if version == 3 {
+                "supported"
+            } else {
+                "unsupported"
+            }
+        );
+        assert_eq!(
+            value["data"]["operations"]["npm_import"]["scope"],
+            "npm_graph_and_root_manifest_only"
+        );
+        if version == 2 {
+            let blocker = value["data"]["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["code"] == "NPM_IMPORT_UNSUPPORTED")
+                .unwrap();
+            assert_eq!(blocker["operations"], serde_json::json!(["npm_import"]));
+            assert_eq!(blocker["action"]["id"], "review_npm_import");
+        }
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            lock.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("package-lock.json")).unwrap(),
+            npm.as_bytes()
+        );
+        assert!(!project.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn status_rejects_non_utf8_npm_input_without_repair() {
+    let project = tapid_test_support::TempProject::new("status-npm-utf8").unwrap();
+    project
+        .write("package.json", br#"{"name":"root","version":"1.0.0"}"#)
+        .unwrap();
+    project.write("package-lock.json", &[0xff]).unwrap();
+    let (_, value) = status(project.path(), &[]);
+    assert_eq!(
+        value["data"]["operations"]["npm_import"]["support"],
+        "unsupported"
+    );
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "NPM_IMPORT_UNSUPPORTED")
+    );
+    assert_eq!(
+        fs::read(project.path().join("package-lock.json")).unwrap(),
+        [0xff]
+    );
+    assert!(!project.path().join("tapid.lock").exists());
+}
+
 fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::Value) {
     let mut args = vec!["status", "--json"];
     args.extend_from_slice(extra);
@@ -8,7 +334,20 @@ fn status(project: &Path, extra: &[&str]) -> (std::process::Output, serde_json::
         output.stderr.is_empty(),
         "status JSON must leave stderr empty"
     );
-    let value = serde_json::from_slice(&output.stdout).expect("status JSON result");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("status JSON result");
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../schemas/cli/status.v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(&value["data"]),
+        "{}",
+        validator
+            .iter_errors(&value["data"])
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     (output, value)
 }
 
@@ -463,6 +802,7 @@ fn status_rejects_symlink_metadata_without_following_it() {
         .unwrap();
     std::os::unix::fs::symlink("private", project.path().join("package.json")).unwrap();
     std::os::unix::fs::symlink("private", project.path().join("tapid.lock")).unwrap();
+    std::os::unix::fs::symlink("private", project.path().join("package-lock.json")).unwrap();
     std::os::unix::fs::symlink(
         "private",
         project.path().join(".tapid-lifecycle-journal.json"),
@@ -471,6 +811,17 @@ fn status_rejects_symlink_metadata_without_following_it() {
     let (output, value) = status(project.path(), &[]);
     assert!(!output.status.success());
     assert_eq!(value["data"]["recovery"], "unknown");
+    assert!(
+        value["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["code"] == "NPM_IMPORT_UNREADABLE")
+    );
+    assert_eq!(
+        value["data"]["operations"]["npm_import"]["support"],
+        "unchecked"
+    );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret data"));
     assert_eq!(
         fs::read(project.path().join("private")).unwrap(),

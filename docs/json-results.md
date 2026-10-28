@@ -19,7 +19,9 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `cache`, `cache info`, `cache clean`, `clean` | Package cache inspection, preview, or cleanup result |
 | `init` | Creates `package.json` with committed change state; handled failures return a typed error |
 | `license`, `upgrade` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before execution |
-| `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
+| `run --preflight` | Read-only names-only script planning result |
+| `capabilities` | Offline installed-binary discovery |
+| Ordinary `run` | `JSON_UNSUPPORTED_COMMAND`, exit 1, before launching a child |
 | Private release helpers, no command | `JSON_UNSUPPORTED_COMMAND`, exit 1 |
 | Invalid arguments | `ARGUMENT_INVALID`, exit 2 |
 | `--help`, `-h`, or `help` with `--json` | Successful `help` result, exit 0 |
@@ -100,6 +102,7 @@ Ordinary install and mutating lifecycle results contain `data.package_count` and
 | `preview_kind` | `"resolved_graph"` |
 | `artifacts_prepared` | Always `false` |
 | `target` | Current OS/architecture/libc inspection target, with `unspecified` when libc is unavailable |
+| `starting_state` | Rechecked manifest, lock, routing and lifecycle-policy input evidence; a non-atomic observation that excludes credentials, artifact bytes, installed state and runtime assurance |
 | `declarations` | Declaration edits with `section`, `name`, `before`, and `after`; absent requirements are null |
 | `packages` | Package records and graph changes described below |
 | `root_changes` | Changed graph root bindings with `name`, `before`, and `after`; absent bindings are null, present bindings are package keys |
@@ -107,6 +110,12 @@ Ordinary install and mutating lifecycle results contain `data.package_count` and
 | `limitations` | Presentation strings describing unavailable evidence and preview limits |
 
 Declarations follow dependency-section order: `dependencies`, `devDependencies`, `optionalDependencies`, then `peerDependencies`, with names sorted within each section. Packages sort by canonical package key; root changes sort by binding name. Empty change lists are arrays, not null.
+
+The preview schema describes `starting_state` when present, including its own
+`schema_version: 1` and `consistency: "rechecked_non_atomic_observation"`.
+It remains optional for compatibility with earlier version 1 previews. Exact-source
+digests identify observed input bytes; they do not establish compatibility or
+authorize executing a saved plan.
 
 Each package entry contains `key`, `source`, `name`, `version`, `integrity`, `dependencies`, `change`, `before`, `after`, and `reasons`. A package record contains the first six fields. `dependencies` maps local dependency names to selected package keys. `integrity` contains available integrity metadata or null; it does not attest artifact bytes. `before` and `after` contain the corresponding record or null when absent. The top-level record describes the after state when present, otherwise the before state. Canonical keys distinguish source, name, version, peer context, and platform context.
 
@@ -312,6 +321,44 @@ validators. Their registry routing, platform selection, and ancestor installatio
 layout checks are listed as unperformed.
 The shared store is not inspected. Blockers contain stable `code`
 and bounded `location` fields, using JSON pointers for dependency declarations.
+Each blocker also carries affected `operations` and an `action` with an allowlisted
+`id`, a description, and `parameters.path`/`parameters.field` (null when unavailable).
+Actions are review advice, never executable shell commands or authorization to mutate
+the project. Unknown reasons or actions require conservative handling.
+`migration_guide` links to the maintained npm migration instructions.
+
+`operations` assesses `npm_import`, `imported_replay`, `native_resolution`, and
+`dependency_mutation` independently. Each assessment has `support` (`supported`,
+`unsupported`, or `unchecked`), `scope`, `evidence` (`local_observation` or
+`deferred_check`), and `maturity` (`experimental`). A supported assessment applies
+only to its stated scope: imported replay's `manifest_receipts_only` does not
+establish routing, layout, artifacts, or install readiness. Native manifest
+blockers can coexist with matching imported receipts; their absence leaves
+resolution and dependency mutation unchecked. Never infer compatibility from
+unchecked operations, missing identifiers, or truncated reports.
+
+`lifecycle.manifest_declarations` lists only lifecycle hook names from bounded
+root/member manifest inspection, using the manifest parser's hook rules. Each
+entry identifies its path, `project_manifest` source, `declared_scripts_only`
+scope, and `local_observation` evidence. Script bodies are omitted. An empty
+list does not establish absence of dependency hooks or implicit native builds.
+`recorded_derived_hooks` exposes names and package identities from validated native
+lock metadata, with `verification: "unchecked"`; it does not authenticate those
+records or verify generated trees. Both lists are limited to 128 entries, with
+the report marked truncated if further records are omitted.
+Lifecycle `completeness` remains `incomplete` even when no hooks are found,
+or `truncated` when lifecycle records exceeded their collection bound.
+`dependency_source_discovery`, `backend_and_toolchain_prerequisites`, and
+`approvals_and_derived_outputs` remain `unchecked`; `enforcement` is
+`not_established`. Manifest discovery errors and snapshot limits still apply.
+These facts do not approve hooks, inspect package trees, or launch backend probes.
+
+When `package-lock.json` is present, status uses the existing npm import parser
+to assess `npm_graph_and_root_manifest_only`. It reads at most 32 MiB and rejects
+non-regular files. Unsupported input reports `NPM_IMPORT_UNSUPPORTED`; unavailable
+input bytes report `NPM_IMPORT_UNREADABLE`. An absent npm lock leaves this operation
+unchecked. Parser acceptance does not establish the import command's separate
+workspace-receipt, routing, or layout requirements; those checks remain unperformed.
 A selected member does not limit full-workspace checks. Registry data includes
 origins, credential variable names, and `credentials: "not_read"`.
 Root peer dependencies remain declarations rather than installable specs; member
@@ -350,6 +397,7 @@ Status blocker codes are `MANIFEST_INVALID_OR_MISSING`, `WORKSPACE_INVALID`, `WO
 `LOCKFILE_INVALID`, `LOCK_MANIFEST_MISMATCH`, `LOCK_WORKSPACE_MISMATCH`,
 `LOCK_ROOT_BINDINGS_INVALID`, `LOCK_REPLAY_UNSUPPORTED`, `INSTALLATION_NOT_MANAGED`,
 `RECOVERY_REQUIRED`, `RECOVERY_STATE_INVALID`, and `SNAPSHOT_CHANGED`.
+Npm input checks also report `NPM_IMPORT_UNSUPPORTED` and `NPM_IMPORT_UNREADABLE`.
 `INSPECTION_TRUNCATED` appears in the envelope's errors when entry or display
 limits prevent a complete report. A lock can agree with manifests and still
 have a replay blocker, such as a legacy schema requiring regeneration or
@@ -495,3 +543,152 @@ has `outcome: "failure"`, `data: null`, incomplete coverage, and a hook with
 `authorization: "exact_policy"`, `disposition: "blocked"`, and
 `reason: "authenticated_output_missing_or_mismatched"`. Earlier observations stay
 in the report, while `changes.state` describes preservation or rollback.
+
+## Script planning and installed-binary discovery
+
+`tapid --json run build --preflight` emits a `run-preflight` envelope with
+`data.contract: "tapid.run-preflight"` and independent `data.schema_version: 1`.
+It selects the same root/member script, configuration policy, invocation inputs,
+credential-name restrictions, runtime path and checked request preparation as
+launch. Environment entries contain names only. Script bodies and forwarded
+argument values are omitted. `--preflight` conflicts with `--result-file` and
+`--receipt-json`, and branches before either result-file creation or environment
+value collection. It never executes a child or recovers project transactions.
+
+`data.policy_inputs` separates configuration, invocation and effective requests.
+`data.runtime` describes a locally validated runtime path, with identity at launch
+still deferred. `data.blockers` contains stable codes, local input locations and
+typed next actions. Exit 1 reports a local blocker or shortened output. Exit 0
+means only that the listed local checks found no blockers. Backend prerequisites,
+native probes, actual enforcement, descendant cleanup and environment-value
+limits remain explicitly unchecked. The snapshot is not atomic. A successful
+preflight must never be used as permission to bypass checked launch. The runner
+also supplies side-effect-free platform exclusions reused by launch. On macOS,
+ManagedTree and configured resource limits produce typed static blockers without
+installing a native probe profile. Absence of these exclusions remains unchecked
+host support, never evidence of enforcement.
+
+Preflight dimension declarations remain request-specific: a static platform
+exclusion marks affected dimensions as `unsupported`, with
+`evidence: "static_declaration"` and the same stable reason as the blocker.
+A rejected assurance request identifies descendant cleanup; a rejected resource
+limit identifies only configured limit dimensions. Other dimensions remain
+`unchecked` with launch evidence deferred. Neither state establishes enforcement,
+and the first static blocker does not enumerate every possible launch failure.
+
+`tapid --json capabilities` requires no project, configuration, credentials,
+store or network. Its `tapid.capabilities` contract version 1 reports the actual
+Tapid version separately. Clap supplies public command paths, aliases, argument
+defaults, arity, groups and conflicts. Explicit metadata describes result channels,
+possible effects and additional application constraints. Ordinary run uses its
+separate result/receipt channels; only preflight accepts global JSON.
+
+Schema coverage is currently `partial`. The catalog advertises
+`tapid.run-preflight.v1`, `tapid.capabilities.v1`, `tapid.status.v1`, and
+`tapid.schema-export.v1`, targeting the envelope's `data` payload for preflight,
+default discovery, status, and schema export respectively.
+`tapid.run-result.v1` targets the complete trusted `result_file` object, and
+`tapid.run-receipt.v1` targets the legacy `stderr_receipt` object. The run modes
+name their separate channels; neither accepts global JSON. Schema validity checks
+shape and versions, not authenticity or successful child exit. A legacy receipt
+remains mixed with child stderr and is never a trusted result channel.
+The packaged completed examples are synthetic format fixtures, not execution evidence.
+Status preserves its existing payload fields: select its version using the catalog
+and envelope version, rather than requiring a new payload contract field. The separate
+`schema_export` mode returns a wrapper covered by `tapid.schema-export.v1`.
+Export an advertised schema with
+`tapid --json capabilities --schema tapid.run-preflight.v1`; the envelope contains
+`data.id` and `data.schema`. Only advertised identifiers are accepted; paths,
+URLs and unknown versions return `SCHEMA_UNKNOWN` without fetching anything.
+Human-mode export prints the schema object directly. The schema and an example
+are packaged under `crates/tapid-cli/schemas/cli/` and embedded into the binary.
+`tapid.envelope.v1` targets the complete common result envelope. Modes using
+`stdout_envelope` name it as `envelope_schema`; `schema_coverage: envelope_only`
+means the command payload has no published schema. The envelope checks framing,
+change states, native path encodings, warning/error code presence and retry values.
+It deliberately leaves `data`, diagnostic contexts, lifecycle records and
+warning-specific details opaque. Validate a published payload schema separately.
+The first discovery slice intentionally leaves other payload families and structured inputs without published schemas. Consumers must treat
+missing schema coverage, unknown reason/command identifiers and unavailable
+observations as unchecked. Unknown contract versions are unsupported; unknown
+additive fields may be ignored. Contract versions are independent of Tapid release
+versions. These declarations neither prove project compatibility nor establish
+runner assurance.
+
+Cache cleaning has separate `default` (`yes: false`, including `--dry-run`)
+and `remove` (`yes: true`) modes. Only removal declares possible store writes;
+both remain offline with envelope-only schema coverage. Clap advertises the
+`--yes`/`--dry-run` conflict. Installation declarations remain conservative:
+possible hook execution requires the existing lifecycle authorization policy;
+a static declaration does not grant that authorization.
+
+The public contract fixtures maintain the following acceptance boundaries:
+
+| Requirement | Maintained evidence | Limit |
+| --- | --- | --- |
+| Selected member, conflicting workspace ranges and peer exclusions | `machine_contracts::discovery_guides_read_only_project_and_script_inspection`, focused `cli` status fixtures | Selection does not verify workspace linking or transitive resolution. |
+| Imported replay versus native resolution and mutation | `machine_contracts::discovery_guides_imported_replay_without_promising_native_mutation` | Matching receipts do not verify installed bytes or future mutations. |
+| Registry origins, credential names, hooks and recovery files | Discovery-guided inspection plus focused status fixtures | Values and hook bodies are withheld; dependency source discovery and backend/toolchain prerequisites remain unchecked. |
+| Script permissions and request-specific platform exclusions | Focused `run_preflight_` fixtures and preflight schema negative tests | No code runs; enforcement and cleanup require launch evidence. |
+| Mode effects, conflicts and schema coverage | Discovery mode, replay, cache and catalog fixtures | Unknown identifiers and uncovered payloads require conservative handling. |
+
+Reports link to the maintained [npm migration guide](npm-lockfile-import.md).
+Source-verified dependency hook discovery remains follow-up work in
+[#310](https://github.com/LimeTip/tapid/issues/310); external corpus comparison
+requires pinned pilot inputs from [#307](https://github.com/LimeTip/tapid/issues/307).
+Neither missing evidence is replaced with a compatibility claim.
+
+`tapid.schema-export.v1` describes the `data` wrapper returned by
+`tapid --json capabilities --schema <ID>`: `id` names the selected contract and
+`schema` contains its embedded object schema. This wrapper has no additional
+`contract` or `schema_version` fields; the advertised identifier selects its
+version. Validate the exported schema's payload separately. Wrapper validation
+does not establish project compatibility or process enforcement. Unknown
+additive fields may be ignored; unknown identifiers require explicit handling.
+
+Preflight blocker locations also include `selected_manifest` when shared script
+selection identified it; otherwise this value is null. A missing script identifies
+`field: "scripts"` and the requested `key`, including for selected workspace members.
+These are local selection facts, not proof that runtime launch checks passed.
+
+`tapid.manifest-validation.v1` describes successful `manifest validate` data:
+`action: "validate"` and `valid: true`. Validation failures carry null data and
+use the common failure envelope instead. This contract describes manifest parsing,
+not dependency resolution, workspace discovery, launch assurance, or complete
+project compatibility. The structural input contract is described below.
+
+`tapid.package-manifest.v1` is a structural input schema for `package.json`,
+exported offline through `capabilities --schema`. Discovery lists it under
+`input_schemas` for `manifest validate`, with catalog target `input`, separately
+from the result payload schema. It checks required string name/version fields,
+metadata types, string-valued maps and bin shapes. Passing this schema is only a
+necessary condition: the maintained manifest parser still validates names,
+versions and executable paths. Workspace declarations and unknown fields are
+preserved without validation by this structural schema; discovery, resolution,
+routing and launch checks remain separate. The identifier selects v1 independently
+of the Tapid version and permits additive unknown fields.
+
+Discovery separates `install`, `add`, `remove` and `update` into ordinary mutation and
+`dry_run` modes. Preview modes may fetch registry metadata but declare no project,
+store or other writes, child execution or hook execution. Their successful `data` payload is covered by the offline-exportable
+`tapid.dependency-preview.v1` schema. It describes declaration, root and package
+changes, before/after graph reasons, and metadata effects. Failure data remains
+null under the common envelope. Neither schema validation nor a successful
+preview establishes artifact availability, runtime compatibility or an executable
+installation plan. The identifier selects v1 independently of the Tapid version;
+consumers must allow additive fields.
+
+Discovery modes for `install` and `ci` include `conditional_effects`. Start with
+that mode's base `effects`, then apply every rule whose `when` argument values
+match the invocation. Rule keys are maintained Clap argument identifiers;
+omitted effects retain their base value. Rules only narrow possible effects.
+Offline disables network and hook execution; frozen install disables hooks but
+still permits retrieval of missing pinned content. Neither flag makes an install
+read-only. The dry-run mode remains read-only under either flag. Hook permission
+in an online base mode is a possibility subject to lifecycle policy, approval,
+and backend checks, never evidence of approval or execution.
+
+The top-level `constraints` also exposes application-level install conflicts:
+`package` and `allow_unverified_registry_artifacts` each conflict with any of
+`offline` or `frozen`. These supplement the conflicts derived from Clap; they do
+not move validation or imply every application prerequisite is statically checked.

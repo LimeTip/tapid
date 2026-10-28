@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:package-manifest:v1",
+  "title": "Tapid package manifest structural input v1",
+  "description": "Necessary structural checks for PackageManifest::parse, not sufficient semantic validation. Package/dependency names, versions, executable commands and paths require the maintained parser. Workspace discovery, dependency specs, routing, resolution and execution compatibility are unchecked. Unknown fields are preserved by the parser.",
+  "type": "object",
+  "required": [
+    "name",
+    "version"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "private": {
+      "type": "boolean"
+    },
+    "description": {
+      "type": "string"
+    },
+    "license": {
+      "type": "string"
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "devDependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "optionalDependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "peerDependencies": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "overrides": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "scripts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "bin": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  }
+}

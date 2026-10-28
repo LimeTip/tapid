@@ -1,0 +1,586 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:status:v1",
+  "title": "Tapid status payload v1 (envelope data; version selected by catalog)",
+  "type": "object",
+  "required": [
+    "assessment",
+    "manifest_lock_agreement",
+    "workspace",
+    "installation",
+    "recovery",
+    "recovery_guidance",
+    "registries",
+    "blockers",
+    "truncated",
+    "snapshot",
+    "verification_depth",
+    "checks_not_performed",
+    "capabilities",
+    "operations",
+    "lifecycle",
+    "migration_guide"
+  ],
+  "properties": {
+    "assessment": {
+      "enum": [
+        "blocked",
+        "no_local_blockers"
+      ]
+    },
+    "manifest_lock_agreement": {
+      "enum": [
+        "match",
+        "mismatch",
+        "unknown"
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "required": [
+        "selected",
+        "manifest",
+        "members",
+        "linking"
+      ],
+      "properties": {
+        "selected": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "linking": {
+          "const": "not_verified"
+        }
+      }
+    },
+    "installation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "state"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "absent",
+              "managed",
+              "unmanaged_or_invalid"
+            ]
+          }
+        }
+      }
+    },
+    "recovery": {
+      "enum": [
+        "unknown",
+        "pending",
+        "none_detected"
+      ]
+    },
+    "recovery_guidance": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "registries": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "origins",
+            "routes",
+            "default_origin",
+            "jsr_origin",
+            "credential_environment_names",
+            "credentials"
+          ],
+          "properties": {
+            "origins": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "routes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "scope",
+                  "origin",
+                  "credential_environment_name"
+                ],
+                "properties": {
+                  "scope": {
+                    "type": "string"
+                  },
+                  "origin": {
+                    "type": "string"
+                  },
+                  "credential_environment_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "default_origin": {
+              "type": "string"
+            },
+            "jsr_origin": {
+              "type": "string"
+            },
+            "credential_environment_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "credentials": {
+              "const": "not_read"
+            }
+          }
+        }
+      ]
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "location",
+          "operations",
+          "action"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "location": {
+            "type": "string"
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "npm_import",
+                "imported_replay",
+                "native_resolution",
+                "dependency_mutation"
+              ]
+            }
+          },
+          "action": {
+            "type": "object",
+            "required": [
+              "id",
+              "description",
+              "parameters"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "field"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "field": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "consistency",
+        "changes_detected",
+        "files"
+      ],
+      "properties": {
+        "consistency": {
+          "const": "not_atomic"
+        },
+        "changes_detected": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "identity",
+              "changed_on_recheck"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "changed_on_recheck": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "verification_depth": {
+      "const": "local_metadata_and_ownership_only"
+    },
+    "checks_not_performed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "experimental",
+        "lock_schemas",
+        "spec_forms",
+        "package_manager",
+        "runner",
+        "workspace_selection",
+        "workspace_linking",
+        "registry_routing"
+      ],
+      "properties": {
+        "experimental": {
+          "const": true
+        },
+        "lock_schemas": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "spec_forms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "package_manager": {
+          "const": "local_preflight_only"
+        },
+        "runner": {
+          "const": "not_assessed"
+        },
+        "workspace_selection": {
+          "const": "exact_member_name"
+        },
+        "workspace_linking": {
+          "const": "supported_not_verified"
+        },
+        "registry_routing": {
+          "const": "experimental"
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "required": [
+        "npm_import",
+        "imported_replay",
+        "native_resolution",
+        "dependency_mutation"
+      ],
+      "properties": {
+        "npm_import": {
+          "type": "object",
+          "required": [
+            "support",
+            "scope",
+            "evidence",
+            "maturity"
+          ],
+          "properties": {
+            "support": {
+              "enum": [
+                "supported",
+                "unsupported",
+                "unchecked"
+              ]
+            },
+            "scope": {
+              "const": "npm_graph_and_root_manifest_only"
+            },
+            "evidence": {
+              "enum": [
+                "local_observation",
+                "deferred_check"
+              ]
+            },
+            "maturity": {
+              "const": "experimental"
+            }
+          }
+        },
+        "imported_replay": {
+          "type": "object",
+          "required": [
+            "support",
+            "scope",
+            "evidence",
+            "maturity"
+          ],
+          "properties": {
+            "support": {
+              "enum": [
+                "supported",
+                "unsupported",
+                "unchecked"
+              ]
+            },
+            "scope": {
+              "const": "manifest_receipts_only"
+            },
+            "evidence": {
+              "enum": [
+                "local_observation",
+                "deferred_check"
+              ]
+            },
+            "maturity": {
+              "const": "experimental"
+            }
+          }
+        },
+        "native_resolution": {
+          "type": "object",
+          "required": [
+            "support",
+            "scope",
+            "evidence",
+            "maturity"
+          ],
+          "properties": {
+            "support": {
+              "enum": [
+                "unsupported",
+                "unchecked"
+              ]
+            },
+            "scope": {
+              "const": "local_manifest_rules"
+            },
+            "evidence": {
+              "enum": [
+                "local_observation",
+                "deferred_check"
+              ]
+            },
+            "maturity": {
+              "const": "experimental"
+            }
+          }
+        },
+        "dependency_mutation": {
+          "type": "object",
+          "required": [
+            "support",
+            "scope",
+            "evidence",
+            "maturity"
+          ],
+          "properties": {
+            "support": {
+              "enum": [
+                "unsupported",
+                "unchecked"
+              ]
+            },
+            "scope": {
+              "const": "local_manifest_rules"
+            },
+            "evidence": {
+              "enum": [
+                "local_observation",
+                "deferred_check"
+              ]
+            },
+            "maturity": {
+              "const": "experimental"
+            }
+          }
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": [
+        "manifest_declarations",
+        "recorded_derived_hooks",
+        "completeness",
+        "dependency_source_discovery",
+        "backend_and_toolchain_prerequisites",
+        "approvals_and_derived_outputs",
+        "enforcement"
+      ],
+      "properties": {
+        "manifest_declarations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "hooks",
+              "scope",
+              "source",
+              "evidence"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "hooks": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "scope": {
+                "const": "declared_scripts_only"
+              },
+              "source": {
+                "const": "project_manifest"
+              },
+              "evidence": {
+                "const": "local_observation"
+              }
+            }
+          }
+        },
+        "recorded_derived_hooks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "package",
+              "hook",
+              "source",
+              "evidence",
+              "verification"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "package": {
+                "type": "string"
+              },
+              "hook": {
+                "type": "string"
+              },
+              "source": {
+                "const": "lockfile_metadata"
+              },
+              "evidence": {
+                "const": "local_observation"
+              },
+              "verification": {
+                "const": "unchecked"
+              }
+            }
+          }
+        },
+        "completeness": {
+          "enum": [
+            "incomplete",
+            "truncated"
+          ]
+        },
+        "dependency_source_discovery": {
+          "const": "unchecked"
+        },
+        "backend_and_toolchain_prerequisites": {
+          "const": "unchecked"
+        },
+        "approvals_and_derived_outputs": {
+          "const": "unchecked"
+        },
+        "enforcement": {
+          "const": "not_established"
+        }
+      }
+    },
+    "migration_guide": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "assessment": {
+            "const": "no_local_blockers"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blockers": {
+            "maxItems": 0
+          },
+          "truncated": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

@@ -12,12 +12,17 @@ use tapid_runner::{ExecutionError, ExecutionOutcome, ExecutionRequest, RunConfig
 #[derive(Debug)]
 pub struct PreparedExecution {
     request: ExecutionRequest,
+    node_runtime: PathBuf,
     // Retained for boundary tests; the runner intentionally keeps these paths private.
     #[allow(dead_code)]
     executable_search_directories: Vec<PathBuf>,
 }
 
 impl PreparedExecution {
+    pub(crate) fn node_runtime(&self) -> &Path {
+        &self.node_runtime
+    }
+
     pub fn request(&self) -> &ExecutionRequest {
         &self.request
     }
@@ -253,6 +258,7 @@ pub fn prepare_execution_request_with_policy(
 
     Ok(PreparedExecution {
         request,
+        node_runtime,
         executable_search_directories: search_directories,
     })
 }

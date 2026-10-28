@@ -21,6 +21,21 @@ fn invoke(project: &Path, arguments: &[&str]) -> std::process::Output {
     command.output().unwrap()
 }
 
+fn validate_run_result(result: &serde_json::Value) {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../schemas/cli/run-result.v1.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(result),
+        "{}",
+        validator
+            .iter_errors(result)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 fn project() -> tapid_test_support::TempProject {
     let project = tapid_test_support::TempProject::new("run-permissions").unwrap();
     project
@@ -384,6 +399,7 @@ fn run_result_file_reports_prelaunch_failure_without_mixing_streams() {
     assert_eq!(output.status.code(), Some(1));
     let result: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).expect("prelaunch result file")).unwrap();
+    validate_run_result(&result);
     assert_eq!(result["schema_version"], 1);
     assert_eq!(result["operation"], "run");
     assert_eq!(result["outcome"], "prelaunch_failure");
@@ -491,6 +507,7 @@ process.exitCode=37;
     let bytes = fs::read(&path).unwrap();
     assert_eq!(bytes.last(), Some(&b'\n'));
     let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    validate_run_result(&result);
     assert_eq!(result["outcome"], "completed");
     assert_eq!(result["receipt"]["termination"], "Exited(37)");
     assert_eq!(result["receipt"]["assurance"], "Restricted");
@@ -535,6 +552,7 @@ fn run_result_file_covers_configuration_preparation_and_containment_failures() {
         let output = invoke(project.path(), &arguments);
         assert_eq!(output.status.code(), Some(1));
         let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        validate_run_result(&result);
         assert_eq!(result["outcome"], outcome);
         assert_eq!(result["error"]["code"], code);
         assert!(result["receipt"].is_null());
@@ -574,6 +592,7 @@ fn run_result_file_reports_unsupported_containment_without_fallback() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!project.path().join("spawned").exists());
     let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    validate_run_result(&result);
     assert_eq!(result["outcome"], "execution_failure");
     assert_eq!(result["error"]["code"], "unsupported-containment");
     assert_eq!(
@@ -609,6 +628,7 @@ fn run_result_file_covers_project_manifest_and_workspace_failures() {
         let output = invoke(project.path(), &arguments);
         assert_eq!(output.status.code(), Some(1));
         let result: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        validate_run_result(&result);
         assert_eq!(result["outcome"], "prelaunch_failure");
         assert_eq!(result["error"]["code"], code);
         assert!(result["error"]["completion"].is_null());
@@ -704,4 +724,513 @@ fn network_fixture_response_rejects_invalid_framing() {
             .kind(),
         std::io::ErrorKind::InvalidData
     );
+}
+
+#[test]
+fn run_preflight_is_read_only_and_never_collects_environment_values() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project.write("tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=['.']\nenvironment=['TAPID_FLAG_VISIBLE']\nsubprocess=true\n").unwrap();
+    project
+        .write(
+            "probe.js",
+            b"require('node:fs').writeFileSync('child-marker','ran')",
+        )
+        .unwrap();
+    project
+        .write(".tapid-lifecycle-journal.json", b"pending journal sentinel")
+        .unwrap();
+    let command = isolated_command(project.path(), &[], true);
+    let home = PathBuf::from(
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "HOME")
+            .unwrap()
+            .1
+            .unwrap(),
+    );
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    let before = fs::read(project.path().join("tapid.toml")).unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            "probe",
+            "--preflight",
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["operation"], "run-preflight");
+    assert_eq!(value["data"]["contract"], "tapid.run-preflight");
+    assert_eq!(value["data"]["schema_version"], 1);
+    assert_eq!(value["data"]["assessment"], "no_local_blockers");
+    assert_eq!(value["data"]["enforcement_established"], false);
+    assert_eq!(
+        value["data"]["policy_inputs"]["effective"]["environment"],
+        serde_json::json!(["TAPID_FLAG_VISIBLE"])
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("visible-value"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("visible-value"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("writeFileSync"));
+    assert!(!project.path().join("child-marker").exists());
+    assert!(!project.path().join("node_modules").exists());
+    assert_eq!(fs::read(project.path().join("tapid.toml")).unwrap(), before);
+    assert_eq!(
+        fs::read(project.path().join(".tapid-lifecycle-journal.json")).unwrap(),
+        b"pending journal sentinel"
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 4);
+    assert_eq!(fs::read_dir(home).unwrap().count(), 0);
+}
+
+#[test]
+fn run_preflight_rejects_launch_inputs_without_repair_or_secret_diagnostics() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    for (config, flags, code) in [
+        ("malformed = [secret-value", vec![], "CONFIG_INVALID"),
+        (
+            "[registries.default]\nurl='https://registry.example'\ntoken-env='NPM_TOKEN'\n[run.scripts.probe]\nenvironment=['NPM_TOKEN']\n",
+            vec![],
+            "ENVIRONMENT_INVALID",
+        ),
+        (
+            "",
+            vec!["--allow-env", "CI=secret-value"],
+            "PERMISSIONS_INVALID",
+        ),
+    ] {
+        project.write("tapid.toml", config.as_bytes()).unwrap();
+        let mut arguments = vec![
+            "--json",
+            "run",
+            "probe",
+            "--preflight",
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ];
+        arguments.extend(flags.iter().copied());
+        let output = invoke(project.path(), &arguments);
+        assert!(!output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["blockers"][0]["code"], code);
+        assert_eq!(value["changes"]["state"], "unchanged");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-value"));
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            fs::read(project.path().join("tapid.toml")).unwrap(),
+            config.as_bytes()
+        );
+        assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
+        let mut launch = vec!["run", "probe", "--node-runtime", node.to_str().unwrap()];
+        launch.extend(flags);
+        assert!(!invoke(project.path(), &launch).status.success());
+    }
+}
+
+#[test]
+fn run_preflight_conflicts_never_create_result_files_and_ordinary_json_stays_unsupported() {
+    let project = project();
+    let results = tapid_test_support::TempProject::new("preflight-results").unwrap();
+    let destination = results.path().join("result.json");
+    for flags in [
+        vec!["--result-file", destination.to_str().unwrap()],
+        vec!["--receipt-json"],
+    ] {
+        let mut args = vec!["--json", "run", "probe", "--preflight"];
+        args.extend(flags);
+        let output = invoke(project.path(), &args);
+        assert!(!output.status.success());
+        assert!(!destination.exists());
+    }
+    let output = invoke(project.path(), &["--json", "run", "probe"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
+}
+
+#[test]
+fn run_preflight_reports_selected_member_runtime_and_policy_ceiling_failures() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    project.write("package.json", br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"],"scripts":{"probe":"root-secret-body"}}"#).unwrap();
+    project
+        .write(
+            "packages/web/package.json",
+            br#"{"name":"web","version":"1.0.0","scripts":{"probe":"member-secret-body"}}"#,
+        )
+        .unwrap();
+    project.write("tapid.toml", b"[run.scripts.probe]\nassurance='restricted'\nread=['.']\nwrite=[]\nsubprocess=false\n").unwrap();
+    let args = [
+        "--json",
+        "run",
+        "probe",
+        "--preflight",
+        "--workspace",
+        "web",
+        "--node-runtime",
+        node.to_str().unwrap(),
+    ];
+    let output = invoke(project.path(), &args);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["script"]["workspace"], "web");
+    assert_eq!(
+        value["data"]["script"]["working_directory"],
+        fs::canonicalize(project.path().join("packages/web"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        value["data"]["runtime"]["path"],
+        fs::canonicalize(&node).unwrap().to_str().unwrap()
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("secret-body"));
+    let mut escalation = args.to_vec();
+    escalation.extend(["--allow-subprocess"]);
+    let output = invoke(project.path(), &escalation);
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["blockers"][0]["code"], "PREPARATION_FAILED");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preflight_defers_environment_value_limits_instead_of_collecting_values() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    let args = [
+        "--json",
+        "run",
+        "probe",
+        "--preflight",
+        "--allow-env",
+        "TAPID_PREFLIGHT_LARGE",
+        "--node-runtime",
+        node.to_str().unwrap(),
+    ];
+    let output = isolated_command(project.path(), &args, true)
+        .env(
+            "TAPID_PREFLIGHT_LARGE",
+            "x".repeat(tapid_runner::MAX_ENVIRONMENT_VALUE_UNITS + 1),
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["data"]["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(
+                "environment_values_and_value_dependent_limits"
+            ))
+    );
+    assert!(output.stdout.len() < 16 * 1024);
+    assert!(!project.path().join("tapid.toml").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn run_preflight_reports_static_platform_blockers() {
+    let project = project();
+    let (_runtime, node) = private_node_runtime();
+    for (configuration, reason) in [
+        (
+            "[run.scripts.probe]\nassurance='restricted'\nread=['.']\ntimeout_seconds=5\n",
+            "PLATFORM_LIMITS_UNSUPPORTED",
+        ),
+        (
+            "[run.scripts.probe]\nassurance='managed-tree'\nread=['.']\ntimeout_seconds=5\nmax_output_bytes=65536\nmax_processes=8\nmax_memory_bytes=536870912\n",
+            "PLATFORM_ASSURANCE_UNSUPPORTED",
+        ),
+    ] {
+        project
+            .write("tapid.toml", configuration.as_bytes())
+            .unwrap();
+        let output = invoke(
+            project.path(),
+            &[
+                "--json",
+                "run",
+                "probe",
+                "--preflight",
+                "--node-runtime",
+                node.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["data"]["blockers"][0]["code"], reason);
+        assert_eq!(value["data"]["enforcement_established"], false);
+        assert_eq!(value["data"]["platform"]["evidence"], "static_declaration");
+        let dimensions = value["data"]["dimensions"].as_array().unwrap();
+        let affected = if reason == "PLATFORM_LIMITS_UNSUPPORTED" {
+            "timeout"
+        } else {
+            "descendant_cleanup"
+        };
+        let dimension = dimensions
+            .iter()
+            .find(|item| item["dimension"] == affected)
+            .unwrap();
+        assert_eq!(dimension["support"], "unsupported");
+        assert_eq!(dimension["evidence"], "static_declaration");
+        assert_eq!(dimension["reason"], reason);
+        assert!(
+            dimensions
+                .iter()
+                .filter(|item| item["dimension"] == "filesystem")
+                .all(|item| item["support"] == "unchecked")
+        );
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../schemas/cli/run-preflight.v1.schema.json"
+        ))
+        .unwrap();
+        assert!(
+            jsonschema::validator_for(&schema)
+                .unwrap()
+                .is_valid(&value["data"])
+        );
+
+        assert_eq!(
+            fs::read(project.path().join("tapid.toml")).unwrap(),
+            configuration.as_bytes()
+        );
+        assert_eq!(fs::read_dir(project.path()).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn run_preflight_missing_runtime_has_an_actionable_typed_reason() {
+    let project = project();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            "probe",
+            "--preflight",
+            "--allow-read",
+            ".",
+            "--node-runtime",
+            "missing-node",
+        ],
+    );
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["blockers"][0]["code"], "RUNTIME_INVALID");
+    assert_eq!(
+        value["data"]["blockers"][0]["action"]["id"],
+        "select_node_runtime"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn run_preflight_shortened_metadata_is_a_typed_failure() {
+    let project = project();
+    let name = "s".repeat(5000);
+    project.write("package.json", &serde_json::to_vec(&serde_json::json!({"name":"bounded", "version":"1.0.0", "scripts": {name.clone(): "never-executed"}})).unwrap()).unwrap();
+    let (_runtime, node) = private_node_runtime();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            &name,
+            "--preflight",
+            "--allow-read",
+            ".",
+            "--node-runtime",
+            node.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "INSPECTION_TRUNCATED")
+    );
+    assert_eq!(value["data"]["assessment"], "blocked");
+    assert!(
+        value["truncated_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("/data/script/name"))
+    );
+}
+
+#[test]
+fn run_preflight_reports_selected_member_manifest_for_missing_script() {
+    let project = tapid_test_support::TempProject::new("preflight-member-location").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "packages/app/package.json",
+            br#"{"name":"app","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "--json",
+            "run",
+            "missing",
+            "--workspace",
+            "app",
+            "--preflight",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let blocker = &value["data"]["blockers"][0];
+    assert_eq!(blocker["code"], "SCRIPT_MISSING");
+    assert_eq!(
+        blocker["location"]["selected_manifest"],
+        fs::canonicalize(project.path().join("packages/app/package.json"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(blocker["location"]["field"], "scripts");
+    assert_eq!(blocker["location"]["key"], "missing");
+    assert!(!project.path().join("node_modules").exists());
+    assert!(!project.path().join("tapid.toml").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_preflight_handles_non_utf8_paths_without_launching() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let owner = project();
+    let path = owner
+        .path()
+        .join(OsString::from_vec(b"project-\xff".to_vec()));
+    fs::create_dir(&path).unwrap();
+    let path = fs::canonicalize(path).unwrap();
+    let manifest = br#"{"name":"probe","version":"1.0.0","scripts":{"probe":"node probe.js"}}"#;
+    fs::write(path.join("package.json"), manifest).unwrap();
+    fs::write(
+        path.join("tapid.toml"),
+        b"[run.scripts.probe]\nassurance='restricted'\n",
+    )
+    .unwrap();
+    let (_runtime, node) = private_node_runtime();
+    let runtime_dir = owner
+        .path()
+        .join(OsString::from_vec(b"runtime-\xff".to_vec()));
+    fs::create_dir(&runtime_dir).unwrap();
+    let runtime = runtime_dir.join("node");
+    fs::copy(node, &runtime).unwrap();
+    let runtime = fs::canonicalize(runtime).unwrap();
+    for script in ["probe", "missing"] {
+        for machine in [false, true] {
+            let mut command = isolated_command(&path, &[], true);
+            if machine {
+                command.arg("--json");
+            }
+            let output = command
+                .args(["run", script, "--preflight", "--node-runtime"])
+                .arg(&runtime)
+                .output()
+                .unwrap();
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+                "{output:?}"
+            );
+            if machine {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).expect("JSON report");
+                assert_eq!(value["data"]["enforcement_established"], false);
+                let schema: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../schemas/cli/run-preflight.v1.schema.json"
+                ))
+                .unwrap();
+                assert!(
+                    jsonschema::validator_for(&schema)
+                        .unwrap()
+                        .is_valid(&value["data"]),
+                    "{value}"
+                );
+                if script == "missing" {
+                    assert_eq!(value["data"]["blockers"][0]["code"], "SCRIPT_MISSING");
+                    assert_eq!(
+                        value["data"]["blockers"][0]["location"]["selected_manifest"],
+                        path.join("package.json").display().to_string()
+                    );
+                } else {
+                    assert!(output.status.success(), "{value}");
+                    assert_eq!(value["data"]["assessment"], "no_local_blockers");
+                    assert_eq!(
+                        value["data"]["script"]["project"],
+                        path.display().to_string()
+                    );
+                    assert_eq!(
+                        value["data"]["script"]["working_directory"],
+                        path.display().to_string()
+                    );
+                    assert_eq!(
+                        value["data"]["runtime"]["path"],
+                        runtime.display().to_string()
+                    );
+                }
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("Script preflight:"),
+                    "{output:?}"
+                );
+            }
+            assert_eq!(fs::read(path.join("package.json")).unwrap(), manifest);
+            assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn run_preflight_reports_non_utf8_missing_project() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let owner = project();
+    let path = owner
+        .path()
+        .join(OsString::from_vec(b"missing-\xff".to_vec()));
+    for machine in [false, true] {
+        let mut command = isolated_command(owner.path(), &[], true);
+        if machine {
+            command.arg("--json");
+        }
+        let output = command
+            .args(["run", "missing", "--preflight", "--project-dir"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{output:?}"
+        );
+        if machine {
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["data"]["assessment"], "blocked");
+            assert_eq!(value["data"]["enforcement_established"], false);
+            assert!(value["data"]["blockers"][0]["location"]["selected_manifest"].is_null());
+            assert_eq!(value["project_path"]["encoding"], "unix_bytes_base64");
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Script preflight:"));
+        }
+    }
+    assert_eq!(fs::read_dir(owner.path()).unwrap().count(), 1);
 }

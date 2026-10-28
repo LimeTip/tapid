@@ -33,6 +33,7 @@ Automation clients can use the compact [agent guide v1](../../docs/agent-guide.m
 tapid init [PATH]
 tapid license
 tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
+tapid capabilities [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
@@ -53,8 +54,14 @@ tapid tool remove <PACKAGE> [--tools-dir <PATH>]
 tapid cache info [--store-dir <PATH>]
 tapid cache clean [--dry-run | --yes] [--store-dir <PATH>]
 tapid clean [--dry-run | --yes] [--store-dir <PATH>]
+tapid run <SCRIPT> --preflight [--json] [PERMISSION FLAGS] [--workspace <NAME>] [--node-runtime <PATH>]
 tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | --result-file <PATH>] [-- <ARGS>...]
 ```
+
+Capabilities distinguish read-only cache-clean previews from `--yes` removal,
+and advertise schema coverage per mode. See the [machine contract acceptance
+boundaries](../../docs/json-results.md) for maintained inspection fixtures and
+checks deferred until launch or external evaluation.
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
 
@@ -459,8 +466,20 @@ locations, registry origins and credential variable names, supported forms, and
 checks not performed. Override checks use only root declarations, matching install
 and replay; member dependency specs are checked independently. Credentials are
 never read. Missing or invalid files and pending transactions remain report data.
+Blockers carry typed next actions and affected operations. The report assesses npm
+import, imported replay receipts, native resolution, and dependency mutation
+separately, with explicit evidence and scope. A present `package-lock.json` is
+checked with the npm import parser without importing it; workspace receipts,
+routing, and layout remain unchecked. A valid imported receipt does not establish
+native resolution or add/update support. The report links to the
+[npm migration guide](../../docs/npm-lockfile-import.md).
 Status never installs, runs scripts,
 opens the shared store, acquires transaction locks, or attempts recovery.
+Lifecycle evidence lists local manifest hook names and unverified derived-hook
+records from native lock metadata, with bounded collections and no script bodies.
+Dependency-source discovery, lifecycle approvals, generated-output verification,
+and backend/toolchain prerequisites remain unchecked. These observations do not
+establish enforcement or absence of dependency hooks.
 
 Exit 0 means no local blockers were found. It does not establish complete
 compatibility or successful installation, replay, or script execution. Exit 1
@@ -493,3 +512,56 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+Read-only script planning uses `tapid --json run build --preflight`. It shares
+selection and policy/request preparation with launch, reports environment names
+without reading their values, and never starts a child, creates a run result file,
+or recovers a transaction. Runner-owned static exclusions reject macOS ManagedTree
+and resource-limit requests before native probes. Actual host support, enforcement,
+cleanup and value-dependent limits remain unchecked; exit 0 is not launch assurance.
+
+`tapid --json capabilities` discovers command structure, result channels and
+possible effects without reading a project or accessing the network. Schema
+coverage is partial: `tapid --json capabilities --schema tapid.run-preflight.v1`
+exports the embedded preflight payload schema by its advertised identifier.
+Use `--schema tapid.capabilities.v1` for the discovery payload schema and
+`--schema tapid.status.v1` for local compatibility reports. Discovery
+and schema export are separate modes; `tapid.schema-export.v1` covers the export wrapper.
+Other result families are explicitly unpublished. See [JSON results](../../docs/json-results.md)
+for contract/version compatibility and the remaining discovery limits.
+
+The embedded `tapid.schema-export.v1` schema describes schema-export responses
+(`data.id` and `data.schema`). Export it with
+`tapid --json capabilities --schema tapid.schema-export.v1`; exported schemas
+remain usable offline. Overall result/input schema coverage remains partial.
+
+The embedded `tapid.run-result.v1` schema covers the complete trusted run result
+file; `tapid.run-receipt.v1` covers the legacy receipt shape. Export either through
+`tapid --json capabilities --schema ID`. Catalog targets distinguish result files,
+stderr receipts, and envelope payloads. Validation cannot authenticate child stderr
+or turn a completed nonzero child exit into success.
+
+`tapid.envelope.v1` validates common JSON result framing. Discovery names it as
+`envelope_schema` on stdout-envelope modes. `envelope_only` coverage leaves
+command payloads and detailed diagnostic/lifecycle evidence unchecked; use the
+separate advertised payload schema where available. Export remains offline.
+
+`capabilities --schema tapid.manifest-validation.v1` exports the successful
+`manifest validate` payload schema offline. Failure data remains null and uses
+the common envelope; successful parsing does not establish project compatibility.
+
+`capabilities --schema tapid.package-manifest.v1` exports the structural
+`package.json` input schema. Discovery advertises it separately in `input_schemas`
+for `manifest validate`. Passing it does not establish semantic validity or
+project compatibility: use the maintained manifest parser and status checks.
+
+`capabilities --schema tapid.dependency-preview.v1` exports the successful
+dependency-preview payload schema. Discovery references it for `install`, `add`,
+`remove` and `update` dry runs. Metadata observations do not establish artifact
+availability or successful installation; failure data uses the common envelope.
+
+Install/CI discovery includes conditional effect reductions for offline and
+frozen replay. Apply every matching rule over the selected mode's base effects;
+frozen permits pinned retrieval, while offline forbids network access. Installs
+may still write project state. Application-level install argument restrictions
+supplement the conflicts derived from Clap. See [JSON results](../../docs/json-results.md).

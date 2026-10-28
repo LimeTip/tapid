@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:run-preflight:v1",
+  "title": "Tapid run preflight payload v1 (envelope data)",
+  "type": "object",
+  "required": ["contract", "schema_version", "tapid_version", "assessment", "enforcement_established", "script", "policy_inputs", "runtime", "blockers", "snapshot", "checks_not_performed", "dimensions", "truncated_fields"],
+  "properties": {
+    "contract": {"const": "tapid.run-preflight"},
+    "schema_version": {"const": 1},
+    "tapid_version": {"type": "string", "minLength": 1},
+    "assessment": {"enum": ["blocked", "no_local_blockers"]},
+    "enforcement_established": {"const": false},
+    "snapshot": {"const": "not_atomic"},
+    "script": {
+      "type": "object", "required": ["name", "workspace"],
+      "properties": {
+        "name": {"type": "string"}, "workspace": {"type": ["string", "null"]},
+        "project": {"type": "string"}, "working_directory": {"type": "string"}
+      }
+    },
+    "runtime": {"oneOf": [{"type": "null"}, {
+      "type": "object", "required": ["path", "selection", "identity"],
+      "properties": {"path": {"type": "string"}, "selection": {"const": "locally_validated_path"}, "identity": {"const": "deferred_until_launch"}}
+    }]},
+    "platform": {
+      "type": "object", "required": ["os", "evidence", "support"],
+      "properties": {"os": {"type": "string"}, "evidence": {"const": "static_declaration"}, "support": {"enum": ["unsupported", "unchecked"]}}
+    },
+    "policy_inputs": {"oneOf": [{"type": "null"}, {
+      "type": "object", "required": ["source", "configuration", "invocation", "effective"],
+      "properties": {
+        "source": {"type": "string"},
+        "configuration": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/policy"}]},
+        "invocation": {"$ref": "#/$defs/permissions"},
+        "effective": {"$ref": "#/$defs/policy"}
+      }
+    }]},
+    "blockers": {"type": "array", "maxItems": 1024, "items": {
+      "type": "object", "required": ["code", "action"],
+      "allOf": [{"if": {"properties": {"code": {"const": "INSPECTION_TRUNCATED"}}}, "else": {"required": ["location"]}}],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "location": {
+          "type": "object", "required": ["project", "manifest", "configuration"],
+          "properties": {"project": {"type": "string"}, "manifest": {"type": "string"}, "configuration": {"type": "string"}, "selected_manifest": {"type": ["string", "null"]}, "field": {"type": "string"}, "key": {"type": "string"}}
+        },
+        "action": {"type": "object", "required": ["id", "description"], "properties": {"id": {"type": "string"}, "description": {"type": "string"}}}
+      }
+    }},
+    "checks_not_performed": {"$ref": "#/$defs/strings"},
+    "truncated_fields": {"$ref": "#/$defs/strings"},
+    "dimensions": {"type": "array", "minItems": 9, "maxItems": 9, "items": {
+      "type": "object", "required": ["dimension", "support", "evidence"],
+      "allOf": [{"if": {"properties": {"support": {"const": "unsupported"}}}, "then": {"required": ["reason"], "properties": {"evidence": {"const": "static_declaration"}}}, "else": {"properties": {"evidence": {"const": "deferred_until_launch"}}, "not": {"required": ["reason"]}}}],
+      "properties": {
+        "dimension": {"enum": ["filesystem", "network", "environment", "subprocess", "timeout", "output", "process_count", "memory", "descendant_cleanup"]},
+        "support": {"enum": ["unchecked", "unsupported"]},
+        "evidence": {"enum": ["deferred_until_launch", "static_declaration"]},
+        "reason": {"enum": ["PLATFORM_UNSUPPORTED", "PLATFORM_ASSURANCE_UNSUPPORTED", "PLATFORM_LIMITS_UNSUPPORTED"]}
+      }
+    }}
+  },
+  "allOf": [{
+    "if": {"properties": {"assessment": {"const": "no_local_blockers"}}},
+    "then": {"properties": {"blockers": {"maxItems": 0}, "truncated_fields": {"maxItems": 0}, "dimensions": {"items": {"properties": {"support": {"const": "unchecked"}}}}, "runtime": {"type": "object"}, "policy_inputs": {"type": "object"}}},
+    "else": {"properties": {"blockers": {"minItems": 1}}}
+  }],
+  "$defs": {
+    "strings": {"type": "array", "maxItems": 1024, "items": {"type": "string"}},
+    "permissions": {
+      "type": "object", "required": ["read", "write", "environment", "network", "subprocess"],
+      "properties": {
+        "read": {"$ref": "#/$defs/strings"}, "write": {"$ref": "#/$defs/strings"}, "environment": {"$ref": "#/$defs/strings"},
+        "network": {"type": "boolean"}, "subprocess": {"type": "boolean"}
+      }
+    },
+    "policy": {
+      "allOf": [{"$ref": "#/$defs/permissions"}],
+      "type": "object", "required": ["assurance", "limits"],
+      "properties": {
+        "assurance": {"enum": ["Restricted", "ManagedTree"]},
+        "limits": {
+          "type": "object", "required": ["timeout_seconds", "max_output_bytes", "max_processes", "max_memory_bytes"],
+          "properties": {
+            "timeout_seconds": {"type": ["integer", "null"], "minimum": 1}, "max_output_bytes": {"type": ["integer", "null"], "minimum": 1},
+            "max_processes": {"type": ["integer", "null"], "minimum": 1}, "max_memory_bytes": {"type": ["integer", "null"], "minimum": 1}
+          }
+        }
+      }
+    }
+  }
+}

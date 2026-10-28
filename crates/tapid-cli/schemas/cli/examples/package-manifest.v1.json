@@ -1,0 +1,14 @@
+{
+  "name": "@example/app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "kleur": "^4.1.5"
+  },
+  "bin": {
+    "example-app": "./cli.js"
+  }
+}
