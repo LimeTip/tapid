@@ -513,6 +513,14 @@ pub struct LockedWorkspacePackage {
 }
 
 impl LockedWorkspacePackage {
+    fn has_copied_dependencies(&self) -> bool {
+        self.dependencies.values().any(|target| {
+            target
+                .parse::<LockfilePackageKey>()
+                .is_ok_and(|key| key.source.copied().is_some())
+        })
+    }
+
     pub fn new(source: LocalWorkspaceSource, manifest_digest: &str) -> Result<Self, LockfileError> {
         let manifest_digest = manifest_digest
             .parse::<ArtifactDigest>()
@@ -784,7 +792,10 @@ impl Lockfile {
             package
                 .source()
                 .is_some_and(|source| source.directory_parts().is_some())
-        }) {
+        }) || workspace_packages
+            .iter()
+            .any(LockedWorkspacePackage::has_copied_dependencies)
+        {
             self.lockfile_version = self.lockfile_version.max(DIRECTORY_SOURCE_LOCKFILE_VERSION);
         }
         self.packages.extend(
@@ -932,11 +943,14 @@ impl Lockfile {
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
         if self.lockfile_version < DIRECTORY_SOURCE_LOCKFILE_VERSION
-            && self.packages.values().any(|package| {
+            && (self.packages.values().any(|package| {
                 package
                     .source()
                     .is_some_and(|source| source.directory_parts().is_some())
-            })
+            }) || self
+                .workspace_packages
+                .values()
+                .any(LockedWorkspacePackage::has_copied_dependencies))
         {
             return Err(LockfileError::UnsupportedVersion(self.lockfile_version));
         }

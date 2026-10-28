@@ -369,9 +369,17 @@ fn perform_install(
         ));
     }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
+    let store = Store::new(match store_root {
+        Some(path) => path.to_owned(),
+        None => {
+            default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
+        }
+    });
     online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
+    online::validate_directory_store(&project_dir, &preflight_manifest, store.root())?;
     if let Some(updated) = manifest_override {
         online::validate_manifest_roots(&project_dir, updated.updated)?;
+        online::validate_directory_store(&project_dir, updated.updated, store.root())?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
@@ -389,6 +397,7 @@ fn perform_install(
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
         online::validate_manifest_roots(&project_dir, &candidate)?;
+        online::validate_directory_store(&project_dir, &candidate, store.root())?;
     }
     let lock_path = project_dir.join("tapid.lock");
     // Preserve preflight rejection without activating anything. Pending recovery
@@ -501,12 +510,7 @@ fn perform_install(
     } else {
         read_manifest(&root_manifest_path)?
     };
-    let store = Store::new(match store_root {
-        Some(path) => path.to_owned(),
-        None => {
-            default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
-        }
-    });
+    online::validate_directory_store(&project_dir, &root_manifest, store.root())?;
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {

@@ -8342,6 +8342,263 @@ fn copied_dependency_rejections_preserve_project_and_store_and_redact_credential
 }
 
 #[test]
+fn copied_directory_materializes_imports_bins_and_checks_warm_replay() {
+    let project = tapid_test_support::TempProject::new("directory-import-bin").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"file:vendor/tool"}}"#,
+        )
+        .unwrap();
+    project.write("vendor/tool/package.json", br#"{"name":"tool","version":"1.0.0","main":"index.js","bin":{"local-tool":"bin.js"},"scripts":{"prepare":"exit 99","install":"exit 99"}}"#).unwrap();
+    project
+        .write("vendor/tool/index.js", b"module.exports = 42;\n")
+        .unwrap();
+    project
+        .write(
+            "vendor/tool/bin.js",
+            b"#!/usr/bin/env node\nconsole.log('directory-bin');\n",
+        )
+        .unwrap();
+    let dir = project.path();
+    let store = dir.join("store");
+    let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let lock = fs::read(dir.join("tapid.lock")).unwrap();
+    assert!(String::from_utf8_lossy(&lock).contains("directory-v1:vendor/tool#"));
+    let node = node_assertion_output(Command::new("node").args(["-e", "if(require('local') !== 42) process.exit(1); const cp = require('child_process'); process.stdout.write(cp.execSync(process.platform === 'win32' ? 'node_modules\\\\.bin\\\\local-tool.cmd' : './node_modules/.bin/local-tool')); "]).current_dir(dir), true, "directory-import-bin").unwrap();
+    assert!(
+        node.status.success(),
+        "{}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    assert!(String::from_utf8_lossy(&node.stdout).contains("directory-bin"));
+    fs::remove_dir_all(dir.join("node_modules")).unwrap();
+    fs::remove_dir_all(&store).unwrap();
+    let replay = run(
+        dir,
+        &[
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    project
+        .write("vendor/tool/index.js", b"module.exports = 43;\n")
+        .unwrap();
+    let changed = run(
+        dir,
+        &[
+            "install",
+            "--offline",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert!(!changed.status.success());
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(dir.join("node_modules/local/index.js")).unwrap(),
+        b"module.exports = 42;\n"
+    );
+}
+
+#[test]
+fn copied_directory_targeted_update_preserves_unselected_snapshot() {
+    let project = tapid_test_support::TempProject::new("directory-update").unwrap();
+    project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"first":"file:vendor/first","second":"file:vendor/second"}}"#).unwrap();
+    for name in ["first", "second"] {
+        project
+            .write(
+                format!("vendor/{name}/package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+            )
+            .unwrap();
+        project
+            .write(format!("vendor/{name}/index.js"), b"module.exports = 1;")
+            .unwrap();
+    }
+    let dir = project.path();
+    let store = dir.join("store");
+    let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    project
+        .write("vendor/first/index.js", b"module.exports = 2;")
+        .unwrap();
+    let update = run(
+        dir,
+        &["update", "first", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    assert_eq!(
+        fs::read(dir.join("node_modules/first/index.js")).unwrap(),
+        b"module.exports = 2;"
+    );
+    let accepted = fs::read(dir.join("tapid.lock")).unwrap();
+    project
+        .write("vendor/second/index.js", b"module.exports = 2;")
+        .unwrap();
+    let unselected = run(
+        dir,
+        &["update", "first", "--store-dir", store.to_str().unwrap()],
+    );
+    assert!(!unselected.status.success());
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), accepted);
+    assert_eq!(
+        fs::read(dir.join("node_modules/second/index.js")).unwrap(),
+        b"module.exports = 1;"
+    );
+}
+
+#[test]
+fn copied_directory_overlapping_sources_fail_before_mutation() {
+    let project = tapid_test_support::TempProject::new("directory-overlap").unwrap();
+    let manifest = br#"{"name":"demo","version":"1.0.0","dependencies":{"outer":"file:vendor/outer","inner":"file:vendor/outer/inner"}}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "vendor/outer/package.json",
+            br#"{"name":"outer","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project
+        .write(
+            "vendor/outer/inner/package.json",
+            br#"{"name":"inner","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let dir = project.path();
+    let store = dir.join("store");
+    let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(!install.status.success());
+    assert!(String::from_utf8_lossy(&install.stderr).contains("overlap"));
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+}
+
+#[test]
+fn copied_directory_cannot_contain_the_configured_store() {
+    let project = tapid_test_support::TempProject::new("directory-store-boundary").unwrap();
+    let manifest =
+        br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"file:vendor/tool"}}"#;
+    project.write("package.json", manifest).unwrap();
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    let dir = project.path();
+    let store = dir.join("vendor/tool/cache");
+    let install = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+    assert!(!install.status.success());
+    assert!(String::from_utf8_lossy(&install.stderr).contains("managed"));
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+    assert!(!dir.join("tapid.lock").exists());
+    assert!(!dir.join("node_modules").exists());
+    assert!(!store.exists());
+}
+
+#[test]
+fn copied_directory_update_rolls_back_publication_and_recovers_interruption() {
+    for (variable, point) in [
+        ("TAPID_TEST_FAIL_ACTIVATION", "1"),
+        ("TAPID_TEST_CRASH_POINT", "store_published"),
+        ("TAPID_TEST_CRASH_POINT", "activation_complete"),
+    ] {
+        let project = tapid_test_support::TempProject::new("directory-rollback").unwrap();
+        let manifest =
+            br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"file:vendor/tool"}}"#;
+        project.write("package.json", manifest).unwrap();
+        project
+            .write(
+                "vendor/tool/package.json",
+                br#"{"name":"tool","version":"1.0.0"}"#,
+            )
+            .unwrap();
+        project
+            .write("vendor/tool/index.js", b"module.exports = 1;")
+            .unwrap();
+        let dir = project.path();
+        let store = dir.join("store");
+        let initial = run(dir, &["install", "--store-dir", store.to_str().unwrap()]);
+        assert!(
+            initial.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initial.stderr)
+        );
+        let lock = fs::read(dir.join("tapid.lock")).unwrap();
+        let trees = fs::read_dir(store.join("trees"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        project
+            .write("vendor/tool/index.js", b"module.exports = 2;")
+            .unwrap();
+        let failed = run_with_env(
+            dir,
+            &["update", "local", "--store-dir", store.to_str().unwrap()],
+            variable,
+            point,
+        );
+        assert!(!failed.status.success(), "{point}");
+        if variable == "TAPID_TEST_CRASH_POINT" {
+            for _ in 0..2 {
+                let recovery = run_with_env(
+                    dir,
+                    &[
+                        "install",
+                        "--offline",
+                        "--store-dir",
+                        store.to_str().unwrap(),
+                    ],
+                    "TAPID_TEST_RECOVER_ONLY",
+                    "1",
+                );
+                assert!(
+                    recovery.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&recovery.stderr)
+                );
+            }
+        }
+        assert_eq!(fs::read(dir.join("package.json")).unwrap(), manifest);
+        assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(dir.join("node_modules/local/index.js")).unwrap(),
+            b"module.exports = 1;"
+        );
+        let after = fs::read_dir(store.join("trees"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(after, trees, "{point}");
+        assert!(!dir.join(".tapid-lifecycle-journal.json").exists());
+    }
+}
+
+#[test]
 fn copied_file_tarballs_materialize_bins_and_cold_replay() {
     let project = tapid_test_support::TempProject::new("file-bins").unwrap();
     let dir = project.path();

@@ -19,11 +19,8 @@ pub(crate) fn declaration(raw: &str) -> Result<Option<CopiedDeclaration>, String
             || path
                 .split('/')
                 .any(|part| part.is_empty() || part == "." || part == "..")
-            || ![".tgz", ".tar.gz", ".tar"]
-                .iter()
-                .any(|extension| path.ends_with(extension))
         {
-            return Err("file dependency must name a project-relative .tgz, .tar.gz, or .tar regular file; directory links and traversal are unsupported".into());
+            return Err("file dependency must name a contained project-relative directory or tarball; traversal is unsupported".into());
         }
         return Ok(Some(CopiedDeclaration::File(path.into())));
     }
@@ -55,6 +52,7 @@ pub(super) fn validate_declarations(
     manifest: &PackageManifest,
 ) -> Result<(), String> {
     let mut identities = BTreeMap::new();
+    let mut directories = BTreeMap::<PathBuf, String>::new();
     for (name, raw) in declarations(manifest) {
         let parsed = declaration(raw).map_err(|reason| format!("dependency '{name}': {reason}"))?;
         let copied = parsed.is_some();
@@ -65,8 +63,24 @@ pub(super) fn validate_declarations(
             })?;
             identity = match parsed {
                 CopiedDeclaration::File(path) => {
-                    file_bytes(project, &path)
+                    let (source, _) = local_artifact(project, &path)
                         .map_err(|reason| format!("dependency '{name}': {reason}"))?;
+                    if source.directory_parts().is_some() {
+                        let resolved = fs::canonicalize(project.join(&path)).map_err(
+                            |_| "cannot resolve directory dependency for overlap validation",
+                        )?;
+                        for (other_root, other) in &directories {
+                            if other_root != &resolved
+                                && (other_root.starts_with(&resolved)
+                                    || resolved.starts_with(other_root))
+                            {
+                                return Err(format!(
+                                    "directory dependencies '{other}' and '{path}' overlap"
+                                ));
+                            }
+                        }
+                        directories.insert(resolved, path.clone());
+                    }
                     format!("file:{path}")
                 }
                 CopiedDeclaration::Git(spec) => {
@@ -87,6 +101,12 @@ pub(super) fn validate_declarations(
 }
 
 pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    if ![".tgz", ".tar.gz", ".tar"]
+        .iter()
+        .any(|extension| relative.ends_with(extension))
+    {
+        return Err("file dependency must name a .tgz, .tar.gz, or .tar regular file".into());
+    }
     let root =
         fs::canonicalize(project).map_err(|_| "cannot resolve project for file dependency")?;
     let mut path = root.clone();
@@ -107,6 +127,83 @@ pub(super) fn file_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, Stri
         crate::filesystem::atomic::MAX_ARTIFACT_BYTES,
     )
     .map_err(|_| "file dependency must be a regular file no larger than 512 MiB".into())
+}
+
+fn directory_bytes(project: &Path, relative: &str) -> Result<Vec<u8>, String> {
+    tapid_archive::capture_directory(
+        project,
+        relative,
+        &["node_modules", ".git", ".tapid"],
+        ArchiveLimits::default(),
+    )
+    .map_err(|error| format!("directory dependency capture failed: {error}"))
+}
+
+/// Check the configured store even when it does not exist yet. This comparison
+/// supplies no filesystem authority; source traversal remains capture's job.
+pub(crate) fn validate_directory_store(
+    project: &Path,
+    manifest: &PackageManifest,
+    store: &Path,
+) -> Result<(), OperationalError> {
+    let mut resolved = PathBuf::new();
+    let absolute = std::path::absolute(store)
+        .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => {
+                resolved.push(other);
+                match fs::canonicalize(&resolved) {
+                    Ok(path) => resolved = path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(OperationalError::from_source(ErrorKind::Store, error));
+                    }
+                }
+            }
+        }
+    }
+    for (_, raw) in declarations(manifest) {
+        if let Some(CopiedDeclaration::File(path)) = declaration(raw)? {
+            let source = project.join(path);
+            if !fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir()) {
+                continue;
+            }
+            let source = fs::canonicalize(&source)
+                .map_err(|error| OperationalError::from_source(ErrorKind::Project, error))?;
+            if resolved.starts_with(&source) || source.starts_with(&resolved) {
+                return Err(OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "directory dependency overlaps the managed store",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_artifact(project: &Path, relative: &str) -> Result<(PackageSource, Vec<u8>), String> {
+    // Classification grants no authority: capture reopens every component with
+    // no-follow semantics and verifies the held objects before returning bytes.
+    let directory = fs::symlink_metadata(project.join(relative))
+        .map_err(|_| "file dependency is missing or inaccessible")?
+        .is_dir();
+    let bytes = if directory {
+        directory_bytes(project, relative)?
+    } else {
+        file_bytes(project, relative)?
+    };
+    let source = if directory {
+        PackageSource::directory(relative, digest(&bytes))
+    } else {
+        PackageSource::file(relative, digest(&bytes))
+    }
+    .map_err(|error| error.to_string())?;
+    Ok((source, bytes))
 }
 
 fn scratch() -> Result<TemporaryTree, String> {
@@ -262,9 +359,13 @@ pub(super) fn prepare_roots(
             .and_then(|key| key.source.package_source());
         let package = match spec {
             CopiedDeclaration::File(path) => {
-                let bytes = file_bytes(project, &path)?;
-                let source = PackageSource::file(&path, digest(&bytes))
-                    .map_err(|error| error.to_string())?;
+                let (source, bytes) = local_artifact(project, &path)?;
+                if pinned.as_ref().is_some_and(|pin| pin != &source) {
+                    return Err(OperationalError::new(
+                        ErrorKind::Integrity,
+                        "local dependency digest mismatch; use an explicit update to accept changes",
+                    ));
+                }
                 record(source, bytes)?
             }
             CopiedDeclaration::Git(spec) => {
@@ -342,6 +443,7 @@ pub(super) fn matches_source(raw: &str, source: &PackageSource) -> Result<bool, 
     Ok(match declaration(raw)? {
         Some(CopiedDeclaration::File(path)) => source
             .file_parts()
+            .or_else(|| source.directory_parts())
             .is_some_and(|(locked, _)| locked == path),
         Some(CopiedDeclaration::Git(spec)) => {
             source.git_parts().is_some_and(|(repository, commit, _)| {
@@ -360,9 +462,13 @@ pub(crate) fn validate_locked_files(
 ) -> Result<(), OperationalError> {
     for (key, _) in lock.packages_typed()? {
         if let Some(source) = key.source.copied()
-            && let Some((path, expected)) = source.file_parts()
+            && let Some((path, expected)) = source.file_parts().or_else(|| source.directory_parts())
         {
-            let bytes = file_bytes(project, path)?;
+            let bytes = if source.directory_parts().is_some() {
+                directory_bytes(project, path)?
+            } else {
+                file_bytes(project, path)?
+            };
             if digest(&bytes).as_str() != expected {
                 return Err(OperationalError::new(
                     ErrorKind::Integrity,
@@ -386,7 +492,9 @@ pub(super) fn fetch_pinned(
     source: &PackageSource,
     fixture_path: Option<&Path>,
 ) -> Result<Vec<u8>, OperationalError> {
-    let bytes = if let Some((path, _)) = source.file_parts() {
+    let bytes = if let Some((path, _)) = source.directory_parts() {
+        directory_bytes(project, path)?
+    } else if let Some((path, _)) = source.file_parts() {
         file_bytes(project, path)?
     } else if let Some((repository, commit, _)) = source.git_parts() {
         if let Some(path) = fixture_path {

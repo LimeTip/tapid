@@ -36,8 +36,9 @@ those bodies.
 The complete logical validation pass bounds all remaining parser metadata and
 honors PAX size overrides when checking entry and aggregate sizes.
 
-`capture_directory` is a directory snapshot capability on Unix and Windows; the
-CLI does not yet consume it. It accepts an explicit project root, a normalized
+`capture_directory` is a directory snapshot capability on Unix and Windows. The
+CLI's incomplete root snapshot integration consumes it through ordinary archive
+verification. It accepts an explicit project root, a normalized
 relative source path, relative forbidden managed roots, and archive limits.
 Unix uses descriptor-relative no-follow opens. Windows opens no-follow native
 handles and retains the full ancestor chain without write or delete sharing,

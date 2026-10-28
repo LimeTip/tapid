@@ -4,7 +4,7 @@ mod graph;
 mod preview;
 pub(crate) use copied::{
     copied_root_names, declaration as copied_declaration, validate_copied_root_binding,
-    validate_locked_files,
+    validate_directory_store, validate_locked_files,
 };
 pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview_graph};
 mod locked;
