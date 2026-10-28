@@ -289,6 +289,31 @@ impl ExecutionRequest {
         // Check secondary tools even when macOS uses a reserved Node binding.
         for executable in &self.verified_executables {
             executable.validate_identity()?;
+            #[cfg(unix)]
+            if let Some(index) = self
+                .executable_search_paths
+                .iter()
+                .position(|directory| Some(directory.as_path()) == executable.path.parent())
+            {
+                // Absolute-only tools need no PATH contract. For tools exposed
+                // through PATH, reject newly introduced earlier candidates. Do
+                // not open them: a hostile candidate may be a FIFO or device.
+                for directory in &self.executable_search_paths[..index] {
+                    let candidate = directory.join(executable.path.file_name().unwrap());
+                    match fs::symlink_metadata(&candidate) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Ok(_)
+                            if fs::canonicalize(&candidate).ok().as_ref()
+                                == Some(&executable.path) => {}
+                        _ => {
+                            return Err(ExecutionError::new(
+                                ExecutionErrorCategory::PolicyViolation,
+                                "declared executable is shadowed or its earlier PATH candidate cannot be inspected",
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]

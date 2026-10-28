@@ -176,6 +176,16 @@ attempts while a request clone survives. These changes do not bind ordered loade
 resolution, registry inputs, DLLs or the complete executable search directories.
 Native Windows pin controls still require the existing Windows CI lane.
 
+Unix request validation now rejects earlier same-named PATH candidates for a
+declared tool whose canonical parent appears in the explicit search list, unless
+the candidate resolves to that same canonical file. Inspection failures and
+dangling links fail closed without opening candidate files. The regression adds
+a shadow after construction while keeping approved bytes unchanged, requires
+rejection before capture files open, and requires execution to work again after
+removal. This is a preflight precedence check, not retained directory authority:
+later writes, shell resolution rules, secondary libraries and Windows loader
+search remain outside it. It does not enable authenticated Windows builds.
+
 Common contained preflight also rejects resolved write grants covering a declared
 executable path, including backend write additions, before backend preparation.
 Portable controls cover exact-file and ancestor-directory grants, plus a disjoint

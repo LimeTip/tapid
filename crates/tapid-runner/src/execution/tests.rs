@@ -3285,3 +3285,40 @@ fn declared_executable_retains_windows_pins_until_last_request_clone_drops() {
     fs::OpenOptions::new().write(true).open(&tool).unwrap();
     fs::rename(&tool, project.path().join("moved.exe")).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn declared_executable_rejects_new_earlier_path_candidate_before_execution() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tapid_test_support::TempProject::new("declared-tool-search-order").unwrap();
+    project.write("approved/tool", b"abc").unwrap();
+    fs::create_dir(project.path().join("earlier")).unwrap();
+    let tool = fs::canonicalize(project.path().join("approved/tool")).unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+    let earlier = fs::canonicalize(project.path().join("earlier")).unwrap();
+    let request = ExecutionRequest::builder("/bin/sh")
+        .args(["-c", "exit 0"])
+        .executable_search_paths([earlier.clone(), tool.parent().unwrap().to_owned()])
+        .verified_executable(
+            &tool,
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .build()
+        .unwrap();
+    // The approved image is unchanged. Only resolution precedence has changed.
+    fs::copy(&tool, earlier.join("tool")).unwrap();
+    let capture = project.path().join("capture");
+    fs::create_dir(&capture).unwrap();
+    let error = execute_uncontained(&request, &capture).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::PolicyViolation);
+    assert_eq!(
+        fs::read_dir(&capture).unwrap().count(),
+        0,
+        "shadowing must fail before opening capture files"
+    );
+    fs::remove_file(earlier.join("tool")).unwrap();
+    assert_eq!(
+        execute_uncontained(&request, &capture).unwrap(),
+        Termination::Exited(0)
+    );
+}

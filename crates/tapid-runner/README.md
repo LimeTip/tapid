@@ -90,3 +90,11 @@ identity checks cover secondary executables as well as Node. Windows retains
 read-only handles across request clones; Unix rechecks bytes before execution.
 This does not close loader, registry, search-order or host mutation races and
 does not enable authenticated Windows dependency builds.
+
+On Unix, a declared tool whose canonical parent is in the explicit PATH is
+also checked for earlier same-named candidates at construction and prelaunch.
+Existing candidates must resolve to that exact canonical tool; uninspectable or
+dangling candidates fail closed without opening them. Absolute-only tools retain
+their existing byte binding. This checks PATH precedence at validation time;
+it does not reserve names against later writes, cover shell aliases/functions,
+or identify dynamic libraries and Windows loader resolution.
