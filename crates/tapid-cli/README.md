@@ -64,11 +64,22 @@ journal without resolving again. A redirected project root is rejected before
 locking its replacement. The command writer remains disabled until command,
 import, copied-source, and result integration are complete.
 
-An internal native-install entrypoint now captures current inputs, validates any
-previous native selection, resolves once with locked preferences, and publishes
-that candidate. It settles metadata recovery before capture and refuses activation
-recovery. The candidate retains request counts and exclusions for later shared
-reporting. Imported-lock orchestration and command routing remain unavailable.
+Internal native selection entrypoints capture current inputs, validate previous
+native selections, and resolve once with locked preferences. Dependency edits and
+named updates use the existing workspace planner, targeting, and save policies;
+selected manifest bytes and the same candidate lock publish together. Unchanged
+declarations preserve original manifest bytes and their exact digest. Metadata
+recovery settles before capture; activation recovery is refused. Candidates retain
+request counts and exclusions for later shared reporting.
+
+An internal imported-selection path validates matching root/member evidence and
+registry routing, then preserves the imported lock and receipts byte for byte
+without hydration. It accepts unowned member installations because it performs no
+layout activation. Imported replay retains its separate ownership restrictions.
+Explicit dependency edits validate imported input through the existing install
+reader, then deliberately resolve a new native graph with pending receipts; failed
+resolution preserves the imported lock and manifests. Command routing and shared
+results remain unavailable.
 
 ## Commands
 

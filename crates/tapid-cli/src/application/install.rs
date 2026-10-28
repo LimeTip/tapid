@@ -999,12 +999,12 @@ fn perform_install(
     Ok((lock.packages().len(), true))
 }
 
-enum InstallLock {
+pub(super) enum InstallLock {
     Native(Lockfile),
     Imported(tapid_lockfile::ImportedNpmLockfile),
 }
 
-fn parse_install_lock(
+pub(super) fn parse_install_lock(
     bytes: &[u8],
     path: &Path,
     ci: bool,

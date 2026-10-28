@@ -136,6 +136,33 @@ impl Inputs {
     pub fn manifest(&self, path: &Path) -> &PackageManifest {
         &self.manifests[path]
     }
+    /// Import validation needs declarations and exact captured digests, without
+    /// replay's installed-layout ownership checks or another filesystem read.
+    pub fn imported_workspace_manifests(
+        &self,
+    ) -> Result<BTreeMap<String, (String, String)>, OperationalError> {
+        self.workspace
+            .members()
+            .iter()
+            .map(|member| {
+                let relative = member
+                    .path()
+                    .parent()
+                    .and_then(|p| p.strip_prefix(&self.root).ok())
+                    .and_then(|p| p.to_str())
+                    .ok_or_else(changed)?;
+                let digest = self
+                    .files
+                    .get(member.path())
+                    .and_then(|d| d.clone())
+                    .ok_or_else(changed)?;
+                Ok((
+                    relative.replace('\\', "/"),
+                    (member.manifest().to_json(), digest),
+                ))
+            })
+            .collect()
+    }
     pub fn root_digest(&self) -> &str {
         self.files[&self.root.join("package.json")]
             .as_deref()

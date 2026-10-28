@@ -10,9 +10,11 @@ pub(crate) fn prepare_selection(
     fixture: Option<&Path>,
     config: &crate::registry::RegistryConfig,
     previous: Option<&Lockfile>,
+    original_root: &PackageManifest,
     root_digest: &str,
+    update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
 ) -> Result<SelectionCandidate, OperationalError> {
-    graph::resolve_package_graph(
+    let resolved = graph::resolve_package_graph(
         project,
         manifest,
         workspace,
@@ -20,10 +22,21 @@ pub(crate) fn prepare_selection(
         false,
         config,
         previous,
-        None,
+        update,
         |_| {},
-    )?
-    .into_selection(root_digest, previous)
+    )?;
+    let selected_root =
+        if update.is_some_and(|request| request.target == project.join("package.json")) {
+            resolved.updated_manifest.as_ref().unwrap_or(manifest)
+        } else {
+            manifest
+        };
+    let saved_root_digest = (selected_root != original_root)
+        .then(|| crate::filesystem::atomic::digest_bytes(selected_root.to_json().as_bytes()));
+    resolved.into_selection(
+        saved_root_digest.as_deref().unwrap_or(root_digest),
+        previous,
+    )
 }
 
 impl graph::ResolvedGraph {

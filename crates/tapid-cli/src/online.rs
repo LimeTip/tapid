@@ -16,7 +16,9 @@ pub(crate) use locked::{
     validate_locked_artifact_sources, validate_locked_routes,
 };
 mod npm_import;
-pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
+pub(crate) use npm_import::{
+    fetch_imported, imported_workspace_manifests, validate_imported_registry,
+};
 mod resolution;
 mod update;
 #[cfg(test)]
