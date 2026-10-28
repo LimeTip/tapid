@@ -15,6 +15,7 @@ pub use lifecycle::{
     dependency_lifecycle_plan,
 };
 pub use model::{BinTarget, DependencyKind, OverrideDeclaration, PackageBin, PackageManifest};
+pub use overrides::parse_override_selector;
 pub use workspace::{Workspace, WorkspaceMember};
 
 /// Maximum bytes read from each root or member manifest during workspace discovery.
@@ -27,6 +28,17 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn bounded_override_selectors_preserve_scoped_names_and_ranges() {
+        let (name, range) = parse_override_selector("@scope/parent@^1", true).unwrap();
+        assert_eq!(name.as_str(), "@scope/parent");
+        assert_eq!(range, Some("^1"));
+        assert_eq!(parse_override_selector("npm:child", false).unwrap().1, None);
+        for selector in ["child@1", ".", "$child", "file:child"] {
+            assert!(parse_override_selector(selector, false).is_err());
+        }
+    }
 
     #[test]
     fn parses_nested_overrides_and_preserves_dependency_edits() {

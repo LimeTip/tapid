@@ -17,6 +17,7 @@ mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
 mod update;
+pub(crate) use resolution::compile_override_rules;
 #[cfg(test)]
 use resolution::{
     RESOLVER_METADATA_BUILD_COUNT, RESOLVER_METADATA_VERSION_VISITS, metadata_progress_checkpoint,

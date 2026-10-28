@@ -45,6 +45,14 @@ pub(crate) struct WhyStep {
     pub(crate) via: Option<String>,
     pub(crate) edge_kind: Option<String>,
     pub(crate) source_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_policy: Option<CurrentPolicy>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CurrentPolicy {
+    pub(crate) requirement: String,
+    pub(crate) rules: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -123,6 +131,7 @@ pub(crate) fn explain(
             via: Some(root.name.clone()),
             edge_kind: Some(root.kind.clone()),
             source_kind,
+            current_policy: None,
         };
         let mut path = vec![first];
         let mut visited = BTreeSet::from([root.key.clone()]);
@@ -140,7 +149,7 @@ pub(crate) fn explain(
         }
     }
 
-    let warnings = if state.paths.iter().any(|path| {
+    let mut warnings = if state.paths.iter().any(|path| {
         path.steps
             .iter()
             .skip(1)
@@ -150,6 +159,20 @@ pub(crate) fn explain(
     } else {
         Vec::new()
     };
+    let root_manifest = PackageManifest::parse(
+        std::str::from_utf8(&root_manifest_bytes)
+            .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))?,
+    )
+    .map_err(|error| OperationalError::from_source(ErrorKind::Manifest, error))?;
+    annotate_current_policy(&root_manifest, &graph, &mut state.paths)?;
+    if state
+        .paths
+        .iter()
+        .flat_map(|path| &path.steps)
+        .any(|step| step.current_policy.is_some())
+    {
+        warnings.push("current policy matches describe the present root declarations; historical override matches and original requirements are not recorded in the lockfile".to_owned());
+    }
     let outcome = if state.truncated {
         "partial"
     } else if state.paths.is_empty() {
@@ -168,6 +191,80 @@ pub(crate) fn explain(
         paths: state.paths,
         truncated: state.truncated,
     })
+}
+
+fn annotate_current_policy(
+    manifest: &PackageManifest,
+    graph: &WhyGraph,
+    paths: &mut [WhyPath],
+) -> Result<(), OperationalError> {
+    let policy = tapid_resolver::OverridePolicy::new_for_registry(
+        crate::online::compile_override_rules(manifest)?,
+        "https://registry.npmjs.org"
+            .parse()
+            .expect("static registry origin"),
+    )?;
+    // Only inspect already bounded paths. Unknown original ranges are deliberately
+    // absent from the report; '*' is an evaluation input, never historical evidence.
+    let original: tapid_resolver::Requirement = "*".parse().expect("static range");
+    let mut inputs = Vec::new();
+    let mut positions = Vec::new();
+    for (path_index, path) in paths.iter().enumerate() {
+        for (index, pair) in path.steps.windows(2).enumerate() {
+            let parent = &pair[0];
+            let child = &pair[1];
+            if child.edge_kind.as_deref() == Some("peer") || child.source_kind != "registry" {
+                continue;
+            }
+            let key = &graph.nodes[&parent.key];
+            let LockfilePackageSource::Registry(origin) = &key.source else {
+                continue;
+            };
+            let (Some(binding), Some(dependency)) = (&parent.via, &child.via) else {
+                continue;
+            };
+            inputs.push((
+                tapid_registry_client::RegistryPackageId::new(
+                    origin.clone(),
+                    key.name.clone(),
+                    key.version.clone(),
+                ),
+                binding
+                    .parse::<tapid_core::PackageName>()
+                    .map_err(|error| {
+                        OperationalError::new(ErrorKind::Lockfile, error.to_string())
+                    })?,
+                dependency
+                    .parse::<tapid_core::PackageName>()
+                    .map_err(|error| {
+                        OperationalError::new(ErrorKind::Lockfile, error.to_string())
+                    })?,
+            ));
+            positions.push((path_index, index + 1));
+        }
+    }
+    let matches = policy.inspect_edges(
+        inputs
+            .iter()
+            .map(|(parent, binding, dependency)| (parent, binding, dependency, &original)),
+    )?;
+    let matches = matches
+        .into_iter()
+        .map(|evidence| {
+            (
+                (evidence.parent, evidence.binding, evidence.dependency),
+                CurrentPolicy {
+                    requirement: evidence.effective.raw,
+                    rules: evidence.rules,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (input, (path_index, step_index)) in inputs.iter().zip(positions) {
+        paths[path_index].steps[step_index].current_policy = matches.get(input).cloned();
+    }
+
+    Ok(())
 }
 
 fn direct_roots(
@@ -461,6 +558,7 @@ fn search_paths(
             via: Some(edge.name.clone()),
             edge_kind: Some(edge.kind.to_owned()),
             source_kind,
+            current_policy: None,
         });
         search_paths(
             &edge.target,
@@ -597,6 +695,7 @@ mod tests {
             via: Some("root".into()),
             edge_kind: Some("dependencies".into()),
             source_kind: "registry",
+            current_policy: None,
         }];
         search_paths(
             &root,
@@ -657,6 +756,7 @@ mod tests {
                 via: Some("root".into()),
                 edge_kind: Some("dependencies".into()),
                 source_kind: "registry",
+                current_policy: None,
             }],
             &mut state,
             0,

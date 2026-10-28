@@ -1138,6 +1138,57 @@ fn targeted_override_install_and_frozen_workspace_replay_keep_alias_identity() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let why = scenario
+        .command(&["--json", "why", "h3", "--workspace", "member"])
+        .output()
+        .unwrap();
+    assert!(
+        why.status.success(),
+        "{}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+    let why: serde_json::Value = serde_json::from_slice(&why.stdout).unwrap();
+    let step = &why["data"]["paths"][0]["steps"][1];
+    assert_eq!(
+        step["currentPolicy"]["rules"],
+        serde_json::json!(["/overrides/selected@^1/h3-v2"])
+    );
+    assert_eq!(step["currentPolicy"]["requirement"], "2.0.0");
+    assert!(
+        why["data"]["graph_warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("historical"))
+    );
+    let unchanged = scenario
+        .command(&["--json", "why", "@actual/scoped", "--workspace", "member"])
+        .output()
+        .unwrap();
+    assert!(unchanged.status.success());
+    let unchanged: serde_json::Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert!(
+        unchanged["data"]["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|path| path["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|step| step.get("currentPolicy").is_none()))
+    );
+    let human = scenario
+        .command(&["why", "h3", "--workspace", "member"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        human.contains("current policy: 2.0.0 via /overrides/selected@^1/h3-v2"),
+        "{human}"
+    );
+    assert!(human.contains("historical"));
     let lock_bytes = fs::read(scenario.project.path().join("tapid.lock")).unwrap();
     let lock: serde_json::Value = serde_json::from_slice(&lock_bytes).unwrap();
     let packages = lock["packages"].as_object().unwrap();
@@ -1206,6 +1257,131 @@ fn targeted_override_install_and_frozen_workspace_replay_keep_alias_identity() {
             .unwrap(),
             b"prior member layout"
         );
+    }
+}
+
+#[test]
+fn targeted_override_crash_recovery_settles_manifest_lock_and_layout() {
+    for point in [
+        "store_published",
+        "lockfile_replaced",
+        "activation_complete",
+        "commit_decision",
+    ] {
+        let scenario = CliFixture::new("targeted-edit-recovery");
+        let original =
+            br#"{"name":"app","version":"1.0.0","overrides":{"selected@^1":{"h3-v2":"2.0.0"}}}"#;
+        scenario.project.write("package.json", original).unwrap();
+        scenario
+            .project
+            .write(
+                "registry.json",
+                include_bytes!("../fixtures/npm-aliases.json"),
+            )
+            .unwrap();
+        let store_path = scenario.project.path().join("store");
+        let store = store_path.to_str().unwrap();
+        let install = [
+            "install",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store,
+        ];
+        let initial = scenario.command(&install).output().unwrap();
+        assert!(
+            initial.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initial.stderr)
+        );
+        let original_lock = fs::read(scenario.project.path().join("tapid.lock")).unwrap();
+        scenario
+            .project
+            .write("node_modules/KEEP", b"prior layout")
+            .unwrap();
+        let crashed = scenario
+            .command(&[
+                "add",
+                "selected@npm:alias-parent@1",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store,
+            ])
+            .env("TAPID_TEST_CRASH_POINT", point)
+            .output()
+            .unwrap();
+        assert!(!crashed.status.success(), "{point}");
+        let recovered = scenario
+            .command(&["install", "--offline", "--store-dir", store])
+            .env("TAPID_TEST_RECOVER_ONLY", "1")
+            .output()
+            .unwrap();
+        assert!(
+            recovered.status.success(),
+            "{point}: {}",
+            String::from_utf8_lossy(&recovered.stderr)
+        );
+        if point == "commit_decision" {
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(scenario.project.path().join("package.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest["dependencies"]["selected"], "npm:alias-parent@1");
+            let lock: serde_json::Value = serde_json::from_slice(
+                &fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+            )
+            .unwrap();
+            let parent = lock["packages"]
+                .as_object()
+                .unwrap()
+                .values()
+                .find(|package| package["name"] == "alias-parent")
+                .unwrap();
+            assert!(
+                parent["dependencies"]["h3-v2"]
+                    .as_str()
+                    .unwrap()
+                    .contains("h3@2.0.0")
+            );
+            assert!(
+                scenario
+                    .project
+                    .path()
+                    .join("node_modules/selected/package.json")
+                    .is_file()
+            );
+            assert!(!scenario.project.path().join("node_modules/KEEP").exists());
+            let replay = scenario
+                .command(&["install", "--offline", "--frozen", "--store-dir", store])
+                .output()
+                .unwrap();
+            assert!(
+                replay.status.success(),
+                "{}",
+                String::from_utf8_lossy(&replay.stderr)
+            );
+        } else {
+            assert_eq!(
+                fs::read(scenario.project.path().join("package.json")).unwrap(),
+                original
+            );
+            assert_eq!(
+                fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+                original_lock
+            );
+            assert_eq!(
+                fs::read(scenario.project.path().join("node_modules/KEEP")).unwrap(),
+                b"prior layout"
+            );
+            assert!(
+                !scenario
+                    .project
+                    .path()
+                    .join("node_modules/selected")
+                    .exists()
+            );
+        }
     }
 }
 

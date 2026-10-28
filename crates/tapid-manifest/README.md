@@ -17,8 +17,9 @@ The crate validates required `name` and `version`, optional `private`, `descript
 `OverrideDeclaration` values, including passive declarations from fetched package
 manifests. Dependency edits preserve these declarations. Parsing rejects duplicate
 keys throughout the override subtree and duplicate top-level `overrides` fields.
-Preservation does not activate policy: the CLI separately validates active root
-overrides and the bounded one-parent nested subset.
+Preservation does not activate policy. `parse_override_selector` validates local
+binding syntax and separates an optional parent range, retaining scoped names.
+The CLI compiles range semantics and validates active root declaration shape.
 
 `ManifestError::diagnostic` accepts the same input and returns the failed field,
 map key, expected constraint, and observed JSON type. It does not copy arbitrary

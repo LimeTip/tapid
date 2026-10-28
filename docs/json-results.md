@@ -123,6 +123,16 @@ effective ranges, but omit unavailable original ranges. Persisted-lock
 inspection, including `why`, cannot recover historical rule matches or original
 ranges from lock edges and does not infer attribution from selected versions.
 
+On bounded native-lock `why` paths, an additive `currentPolicy` step field contains
+`requirement` and sorted declaration-pointer `rules` when the present root policy
+matches that incoming parent binding and child name. Peer edges and copied or
+workspace parent edges are excluded. This evaluates current policy only; it does
+not establish historical selection, original ranges, or optional-edge eligibility.
+`graph_warnings` states this limitation, and human output labels the same evidence
+as `current policy`. Unmatched steps omit the field. Existing path/depth/visit
+limits and truncation semantics remain in force; policy evaluation also enforces
+the resolver's work and retained-evidence bounds.
+
 `effects` contains `network_allowed`, `metadata_source`, `metadata_lookups`, `artifact_requests`, `cache_reads`, `cache_writes`, `project_writes`, `recovery`, and `scripts`. `network_allowed` describes permission to fetch registry metadata, not proof that a request occurred. `metadata_source` is `registry`, `fixture`, or `lockfile`; `metadata_lookups` counts package metadata retrievals, not individual HTTP requests. Successful metadata is reused by source and actual package name within one graph operation; reuse by another consumer does not increment the count. A matching online lock can produce zero lookups even when network access is allowed. Fixtures and offline/frozen inspection forbid registry access. `artifact_requests` is always 0, and the remaining effect flags are always false. Cache fields refer to the package store, not reading the project's lockfile.
 
 Previews do not create an activation lock, recover transactions, access the package store, fetch artifacts, or run scripts. Pending recovery fails without attempting recovery. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without establishing that its artifacts are cached. Previews requiring copied file/Git resolution or imported npm locks fail explicitly. Artifact availability, archive validity, lifecycle outputs, and later installation success remain unverified. A later command reads current inputs and may resolve different metadata.

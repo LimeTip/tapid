@@ -9,7 +9,7 @@ use crate::application::outcome::{
 mod exclusions;
 mod policy;
 use exclusions::{candidate_exclusions, with_exclusions};
-pub(super) use policy::compile_override_rules;
+pub(crate) use policy::compile_override_rules;
 
 fn resolution_error(
     error: ResolveError,

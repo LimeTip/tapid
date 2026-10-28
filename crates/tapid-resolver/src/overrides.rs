@@ -32,6 +32,53 @@ pub struct OverrideMatch {
 }
 
 impl OverridePolicy {
+    /// Evaluate current policy for a bounded batch of observed edges. This is
+    /// policy evaluation, not evidence of how a persisted graph was resolved.
+    pub fn inspect_edges<'a>(
+        &self,
+        edges: impl IntoIterator<
+            Item = (
+                &'a RegistryPackageId,
+                &'a PackageName,
+                &'a PackageName,
+                &'a Requirement,
+            ),
+        >,
+    ) -> Result<Vec<OverrideMatch>, ResolveError> {
+        let mut work = 0;
+        let mut bytes = self.bytes;
+        let mut matches = Vec::new();
+        for (parent, binding, dependency, original) in edges {
+            work += 1;
+            if work > 1_000_000 {
+                return Err(ResolveError::MetadataLimitExceeded);
+            }
+            let (effective, rules) =
+                self.apply(parent, binding, dependency, original, &mut work, &mut bytes)?;
+            if !rules.is_empty() {
+                bytes = bytes
+                    .saturating_add(std::mem::size_of::<OverrideMatch>())
+                    .saturating_add(parent.registry.as_str().len())
+                    .saturating_add(parent.name.as_str().len())
+                    .saturating_add(parent.version.to_string().len())
+                    .saturating_add(binding.as_str().len())
+                    .saturating_add(dependency.as_str().len());
+                if bytes > 64 * 1024 * 1024 {
+                    return Err(ResolveError::MetadataLimitExceeded);
+                }
+                matches.push(OverrideMatch {
+                    parent: parent.clone(),
+                    binding: binding.clone(),
+                    dependency: dependency.clone(),
+                    original: original.clone(),
+                    effective,
+                    rules,
+                });
+            }
+        }
+        Ok(matches)
+    }
+
     /// Restrict policy to declaring parents from one exact registry origin.
     pub fn new_for_registry(
         rules: Vec<OverrideRule>,

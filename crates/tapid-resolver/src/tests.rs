@@ -5,6 +5,25 @@ fn req(s: &str) -> Requirement {
 }
 
 #[test]
+fn current_policy_inspection_bounds_even_unmatched_edges() {
+    let parent = RegistryPackageId::new(
+        "https://registry.npmjs.org".parse().unwrap(),
+        "parent".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+    );
+    let binding = "parent".parse().unwrap();
+    let child = "child".parse().unwrap();
+    let original = req("*");
+    let error = OverridePolicy::default()
+        .inspect_edges(std::iter::repeat_n(
+            (&parent, &binding, &child, &original),
+            1_000_001,
+        ))
+        .unwrap_err();
+    assert!(matches!(error, ResolveError::MetadataLimitExceeded));
+}
+
+#[test]
 fn targeted_override_changes_only_matching_parent() {
     let source = "https://registry.npmjs.org";
     let metadata = vec![registry(

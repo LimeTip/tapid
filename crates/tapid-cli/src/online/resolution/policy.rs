@@ -5,20 +5,7 @@ use tapid_manifest::OverrideDeclaration;
 use tapid_resolver::OverrideRule;
 
 fn selector(value: &str, qualified: bool) -> Result<(PackageName, Option<Requirement>), String> {
-    let value = value.strip_prefix("npm:").unwrap_or(value);
-    let split = value.rfind('@').filter(|index| *index > 0);
-    let (name, range) = match split {
-        Some(index) if qualified => (&value[..index], Some(&value[index + 1..])),
-        Some(_) => {
-            return Err(format!(
-                "unsupported override selector '{value}': child version selectors are not supported"
-            ));
-        }
-        None => (value, None),
-    };
-    let name = name
-        .parse::<PackageName>()
-        .map_err(|error| format!("invalid override selector '{value}': {error}"))?;
+    let (name, range) = tapid_manifest::parse_override_selector(value, qualified)?;
     let range = range.map(|range| replacement(value, range)).transpose()?;
     Ok((name, range))
 }

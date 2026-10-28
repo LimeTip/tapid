@@ -45,6 +45,16 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                         let kind = step.edge_kind.as_deref().unwrap_or("dependency");
                         let via = step.via.as_deref().unwrap_or("?");
                         line.push_str(&format!(" --{kind} ({via})--> {}", display_key(&step.key)));
+                        if let Some(policy) = &step.current_policy {
+                            line.push_str(
+                                &crate::output::json::text(format!(
+                                    " [current policy: {} via {}]",
+                                    policy.requirement,
+                                    policy.rules.join(", ")
+                                ))
+                                .0,
+                            );
+                        }
                     }
                     println!("[{}] {line}", index + 1);
                 }

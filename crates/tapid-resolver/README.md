@@ -1,5 +1,10 @@
 # tapid-resolver
 
+`OverridePolicy::inspect_edges` evaluates a bounded batch through the same policy
+matcher as resolution and returns current matches. It does not establish how a
+persisted graph was selected; callers must distinguish current policy from
+historical provenance and must not invent missing original requirements.
+
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/tapid-resolver)](https://crates.io/crates/tapid-resolver)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-resolver)](https://crates.io/crates/tapid-resolver)
