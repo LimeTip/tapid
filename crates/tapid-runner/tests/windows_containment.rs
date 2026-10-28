@@ -370,9 +370,20 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
     fs::copy(&executable, &undeclared_executable).unwrap();
     // Reuse the native addon fixture: it resolves Node exports only when called,
     // so ordinary LoadLibrary/GetProcAddress can validate it without Node.
-    let undeclared_library = outside.path().join("undeclared.dll");
+    let undeclared_library = outside.path().join("tapid-search-order.dll");
     windows_node::compile_launcher(&undeclared_library);
     fs::copy(&undeclared_library, project.path().join("approved.dll")).unwrap();
+    for directory in ["search-first", "search-second"] {
+        fs::create_dir(project.path().join(directory)).unwrap();
+        fs::copy(
+            &undeclared_library,
+            project
+                .path()
+                .join(directory)
+                .join("tapid-search-order.dll"),
+        )
+        .unwrap();
+    }
     windows_acl::initialize_inheritance(project.path());
     windows_acl::initialize_inheritance(outside.path());
     let system32 =
@@ -406,6 +417,28 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
     assert!(host_control.status.success(), "{host_control:?}");
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("undeclared-target-executed"));
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("host-dynamic-library-valid"));
+    // Use an executable outside the undeclared DLL directory: Windows searches
+    // the application directory before SetDllDirectoryW. Otherwise this host
+    // control would select the ambient fixture for reasons unrelated to the
+    // search-directory switch under test.
+    let host_order_executable = project.path().join("host-order.exe");
+    fs::copy(&executable, &host_order_executable).unwrap();
+    let host_order = Command::new(&host_order_executable)
+        .args([
+            "--exact",
+            "windows_ambient_execution_target_helper",
+            "--nocapture",
+        ])
+        .env("TAPID_TEST_MARKER", "ambient-target")
+        .env("TAPID_TEST_SEARCH_ROOT", project.path())
+        .env_remove("TAPID_TEST_LIBRARY")
+        .output()
+        .unwrap();
+    assert!(host_order.status.success(), "{host_order:?}");
+    assert!(
+        String::from_utf8_lossy(&host_order.stdout)
+            .contains("dynamic-library-search-order:verified")
+    );
     let baseline = project_dacl(outside.path());
     let root = fs::canonicalize(project.path()).unwrap();
     let child = root.join("probe.exe");
@@ -461,6 +494,12 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
         stdout.contains("approved-child"),
         "descendant positive control missing: {stdout}"
     );
+    assert_eq!(
+        stdout
+            .matches("dynamic-library-search-order:verified")
+            .count(),
+        2
+    );
     for mode in ["ambient-root", "ambient-child"] {
         for operation in [
             "read",
@@ -495,6 +534,7 @@ fn windows_ambient_read_probe_helper() {
     if mode != "ambient-root" && mode != "ambient-child" {
         return;
     }
+    probe_library_search_order(&std::env::current_dir().unwrap());
     assert_eq!(fs::read("approved.txt").unwrap(), b"approved-input");
     let trustee = fs::read_to_string("ambient-trustee.txt").unwrap();
     assert!(matches!(trustee.as_str(), "AAP" | "ARAP"));
@@ -574,7 +614,7 @@ fn windows_ambient_read_probe_helper() {
         )
     })) {
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 assert_ne!(trustee, "AAP", "undeclared AAP DLL must be denied");
                 println!("{trustee}:{mode}:{operation}:allowed");
             }
@@ -604,7 +644,7 @@ fn windows_ambient_read_probe_helper() {
     }
 }
 
-fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Result<()> {
+fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Result<PathBuf> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -627,7 +667,20 @@ fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Res
     );
     // SAFETY: null restores the default search path before returning the observation.
     assert_ne!(unsafe { SetDllDirectoryW(std::ptr::null()) }, 0);
-    result
+    let loaded = result?;
+    assert_eq!(loaded, fs::canonicalize(path)?);
+    Ok(loaded)
+}
+
+// Each load releases its module before changing the search directory. Identical
+// basenames and exports ensure the assertion detects resolution, not PE validity.
+fn probe_library_search_order(root: &std::path::Path) {
+    for directory in ["search-first", "search-second", "search-first"] {
+        let expected = root.join(directory).join("tapid-search-order.dll");
+        load_searched_authority_probe_library(&expected)
+            .expect("DLL search order must select input");
+    }
+    println!("dynamic-library-search-order:verified");
 }
 
 #[derive(Clone, Copy)]
@@ -647,7 +700,7 @@ const EXTENDED_LOADERS: [(&str, u32); 2] = [
 fn load_authority_probe_library(
     path: &std::path::Path,
     loader: ProbeLoader,
-) -> std::io::Result<()> {
+) -> std::io::Result<PathBuf> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -656,7 +709,9 @@ fn load_authority_probe_library(
         fn GetModuleHandleW(name: *const u16) -> isize;
         fn GetProcAddress(module: isize, name: *const u8) -> *const std::ffi::c_void;
         fn FreeLibrary(module: isize) -> i32;
+        fn GetModuleFileNameW(module: isize, path: *mut u16, size: u32) -> u32;
     }
+    let expected = path.is_absolute().then(|| path.to_path_buf());
     let path: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let direct_loader: unsafe extern "system" fn(*const u16) -> isize =
         if matches!(loader, ProbeLoader::Resolved) {
@@ -690,16 +745,39 @@ fn load_authority_probe_library(
     }
     // SAFETY: module remains loaded through symbol lookup; no N-API code is called.
     let export = unsafe { GetProcAddress(module, c"napi_register_module_v1".as_ptr().cast()) };
+    let mut loaded_path = vec![0_u16; 32_768];
+    // SAFETY: module is live and the owned buffer has the advertised capacity.
+    let length =
+        unsafe { GetModuleFileNameW(module, loaded_path.as_mut_ptr(), loaded_path.len() as u32) };
+    // Capture errors before FreeLibrary can change the thread's last error.
+    let path_error = std::io::Error::last_os_error();
     // SAFETY: release exactly the reference returned by LoadLibraryW.
     let released = unsafe { FreeLibrary(module) };
     assert_ne!(released, 0, "release dynamic fixture");
     assert!(!export.is_null(), "loaded the expected native fixture");
-    Ok(())
+    if length == 0 {
+        return Err(path_error);
+    }
+    assert!(
+        (length as usize) < loaded_path.len(),
+        "loaded path truncated"
+    );
+    use std::os::windows::ffi::OsStringExt;
+    let loaded = fs::canonicalize(PathBuf::from(OsString::from_wide(
+        &loaded_path[..length as usize],
+    )))?;
+    if let Some(expected) = expected {
+        assert_eq!(loaded, fs::canonicalize(expected)?);
+    }
+    Ok(loaded)
 }
 
 #[test]
 fn windows_ambient_execution_target_helper() {
     if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-target") {
+        if let Some(root) = std::env::var_os("TAPID_TEST_SEARCH_ROOT") {
+            probe_library_search_order(std::path::Path::new(&root));
+        }
         if let Some(library) = std::env::var_os("TAPID_TEST_LIBRARY") {
             let library = PathBuf::from(library);
             load_authority_probe_library(&library, ProbeLoader::Direct)

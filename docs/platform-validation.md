@@ -213,8 +213,21 @@ export before releasing the module. They retain strict AAP denial assertions and
 ARAP characterization, with separate `altered-search-library` and
 `restricted-search-library` observations. Native execution remains pending; these
 flags do not establish closure of secondary dependencies or loader search order.
-These sampled controls do not cover secondary DLL dependencies, precedence
-mutations, manual mapping, side-by-side assemblies or arbitrary broker inputs.
+These sampled controls do not cover secondary DLL dependencies, manual mapping,
+side-by-side assemblies or arbitrary broker inputs.
+
+The ambient DLL controls also check `GetModuleFileNameW` against the expected
+canonical fixture path before accepting a successful load. An export name alone
+cannot distinguish two valid fixtures with the same export. Host, LPAC root and
+direct descendant controls switch `SetDllDirectoryW` between two approved
+subdirectories containing the same DLL basename, then switch back. Each load
+must select the expected path and release its module before the next switch;
+the parent requires both contained search-order observations. The undeclared DLL
+shares that basename, so the subsequent AAP denial controls also reject reuse of
+a previously approved module when loading the undeclared path. These checks reuse
+the existing Rust DLL fixture and explicit project grant. They characterize
+resolution changes, without claiming held-object identity, complete loader closure
+or recipe binding. Native Windows execution remains pending.
 
 `windows_profile_storage_is_fresh_and_not_readable_by_the_next_execution` uses
 two executions of a private Rust fixture through the existing runner interface.
