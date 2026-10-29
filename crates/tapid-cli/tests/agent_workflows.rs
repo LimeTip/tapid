@@ -185,6 +185,34 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
                 .graph()
                 .unwrap();
                 assert_eq!(after.packages, before.packages);
+                project.write("observed-before.lock", expected).unwrap();
+                project.write("observed-after.lock", &current).unwrap();
+                let comparison = metrics.call(
+                    &project,
+                    &home,
+                    &[
+                        "--json",
+                        "lock",
+                        "compare",
+                        "observed-before.lock",
+                        "observed-after.lock",
+                        "--limit",
+                        "1",
+                    ],
+                );
+                success(&comparison);
+                assert_eq!(comparison["data"]["summary"]["changed_selections"], 0);
+                assert_eq!(comparison["data"]["summary"]["added_instances"], 0);
+                assert_eq!(
+                    comparison["data"]["before_coverage"]["analysis_complete"],
+                    true
+                );
+                assert!(
+                    comparison["data"]["summary"]["evidence_changes"]
+                        .as_u64()
+                        .unwrap()
+                        > 0
+                );
             } else {
                 assert_eq!(&current, expected);
             }
@@ -203,7 +231,7 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
         );
     }
     assert_eq!(examples, 10);
-    metrics.finish(10);
+    metrics.finish(12);
 }
 
 /// Compare complete package records so unrelated version, source, and edge changes fail the test.
@@ -239,7 +267,17 @@ fn agent_dependency_edits_and_repeated_install_preserve_unselected_graph() {
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
     .unwrap();
+    fs::copy(
+        project.path().join("tapid.lock"),
+        project.path().join("observed-before.lock"),
+    )
+    .unwrap();
     invoke(&["add", "@actual/scoped@1.2.0"]);
+    fs::copy(
+        project.path().join("tapid.lock"),
+        project.path().join("observed-after.lock"),
+    )
+    .unwrap();
     let added = tapid_lockfile::Lockfile::from_json(
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
@@ -255,7 +293,37 @@ fn agent_dependency_edits_and_repeated_install_preserve_unselected_graph() {
     )
     .unwrap();
     assert_eq!(after.packages(), before.packages());
-    metrics.finish(4);
+    let comparison = metrics.call(
+        &project,
+        &home,
+        &[
+            "--json",
+            "lock",
+            "compare",
+            "observed-before.lock",
+            "observed-after.lock",
+            "--limit",
+            "1",
+        ],
+    );
+    success(&comparison);
+    assert_eq!(comparison["data"]["scope"]["kind"], "all");
+    assert_eq!(
+        comparison["data"]["before_coverage"]["analysis_complete"],
+        true
+    );
+    assert_eq!(
+        comparison["data"]["before_coverage"]["excluded_instances"],
+        0
+    );
+    assert_eq!(comparison["data"]["summary"]["added_instances"], 1);
+    assert_eq!(comparison["data"]["summary"]["removed_instances"], 0);
+    assert_eq!(
+        comparison["data"]["records"][0]["value"]["name"],
+        "@actual/scoped"
+    );
+    assert_eq!(comparison["data"]["summary"]["evidence_changes"], 1); // declaration digest only
+    metrics.finish(5);
 }
 
 /// Treat precise refusal with preserved project outputs as successful completion of unsupported tasks.

@@ -1,3 +1,5 @@
+mod graph;
+
 use crate::application::outcome::{
     ErrorKind, OperationFailure, OperationOutcome, OperationalError,
 };
@@ -13,6 +15,10 @@ pub(crate) struct Args {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Inspect an explicit persisted dependency graph without project or store access.
+    Inspect(graph::InspectArgs),
+    /// Compare two explicit persisted lock snapshots, separating selections and evidence.
+    Compare(graph::CompareArgs),
     /// Check the format and internal consistency of tapid.lock in the current directory.
     #[command(
         long_about = "Read tapid.lock from the current directory and validate its schema and internal consistency. Does not verify package files in the store or compare the lockfile with package.json.",
@@ -25,6 +31,8 @@ pub(crate) enum Command {
 /// Validate lockfile schema and consistency without recovering or changing project outputs.
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match args.command {
+        Command::Inspect(args) => graph::inspect(args, json),
+        Command::Compare(args) => graph::compare(args, json),
         Command::Verify => {
             let path = PathBuf::from("tapid.lock");
             match fs::read_to_string(&path)

@@ -646,11 +646,11 @@ test('stable consumer context contract rejects renamed checks and fail-open aggr
   }
 });
 
-test('stable consumer shell gate rejects failure cancellation skipped and absent results', async () => {
+test('stable consumer shell gate rejects failure cancellation skipped abandoned and absent results', async () => {
   const gate = step(job(await workflow('ci'), 'consumer-validation'), 'Require all native consumer legs to succeed');
   const command = gate.match(/        run: (.+)\n/)![1];
   await execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: 'success' } });
-  for (const result of ['failure', 'cancelled', 'skipped', '']) {
+  for (const result of ['failure', 'cancelled', 'skipped', 'abandoned', '']) {
     await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
   }
 });
