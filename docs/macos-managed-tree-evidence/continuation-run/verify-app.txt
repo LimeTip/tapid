@@ -1,0 +1,8 @@
+--prepared:/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/continuation-bundle/Probe.app/Contents/MacOS/libprobe.dylib
+--validated:/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/continuation-bundle/Probe.app/Contents/MacOS/libprobe.dylib
+--prepared:/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/continuation-bundle/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc
+--prepared:/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/continuation-bundle/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib
+--validated:/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/continuation-bundle/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib
+--validated:/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/continuation-bundle/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc
+target/continuation-bundle/Probe.app: valid on disk
+target/continuation-bundle/Probe.app: satisfies its Designated Requirement

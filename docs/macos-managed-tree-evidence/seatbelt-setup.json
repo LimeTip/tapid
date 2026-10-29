@@ -1,0 +1,11 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    "(version 1)(allow default)",
+    "/usr/bin/true"
+  ],
+  "status": 71,
+  "stdout": "",
+  "stderr": "sandbox-exec: sandbox_apply: Operation not permitted\n"
+}

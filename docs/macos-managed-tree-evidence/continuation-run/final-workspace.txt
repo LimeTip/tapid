@@ -1,0 +1,737 @@
+warning: crates/tapid-resolver/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-resolver` (manifest) generated 1 warning
+warning: crates/tapid-archive/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-archive` (manifest) generated 1 warning
+warning: crates/tapid-test-support/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-test-support` (manifest) generated 1 warning
+warning: crates/tapid-manifest/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-manifest` (manifest) generated 1 warning
+warning: crates/tapid-lockfile/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-lockfile` (manifest) generated 1 warning
+warning: crates/tapid-policy/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-policy` (manifest) generated 1 warning
+warning: crates/tapid-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-core` (manifest) generated 1 warning
+warning: crates/tapid-signatures/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-signatures` (manifest) generated 1 warning
+warning: crates/tapid-linker/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-linker` (manifest) generated 1 warning
+warning: crates/tapid-publish/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-publish` (manifest) generated 1 warning
+warning: crates/tapid-transparency/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-transparency` (manifest) generated 1 warning
+warning: crates/tapid-registry-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-registry-client` (manifest) generated 1 warning
+warning: crates/tapid-attestations/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-attestations` (manifest) generated 1 warning
+warning: crates/tapid-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid` (manifest) generated 1 warning
+warning: crates/tapid-release-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-release-client` (manifest) generated 1 warning
+warning: crates/tapid-store/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-store` (manifest) generated 1 warning
+warning: crates/tapid-runner/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-runner` (manifest) generated 1 warning
+warning: crates/tapid-protocol/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-protocol` (manifest) generated 1 warning
+   Compiling tapid-runner v0.0.7 (/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-runner)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.42s
+     Running unittests src/lib.rs (target/debug/deps/tapid-68241a60d26461e3)
+
+running 282 tests
+test application::dependency_scripts::tests::lifecycle_discovery_accepts_a_leading_bom_without_changing_script_bytes ... ok
+test application::dependency_scripts::node_gyp::tests::node_gyp_bundle_rejects_unhashed_store_metadata ... ok
+test application::dependency_scripts::tests::lifecycle_output_rejects_portable_case_collisions ... ok
+test application::dependency_scripts::node_gyp::tests::node_gyp_bundle_rejects_links_outside_its_closure ... ok
+test application::dependency_scripts::tests::readonly_removable_mount_does_not_qualify_as_an_immutable_system_tool ... ok
+test application::dependency_scripts::node_gyp::tests::node_gyp_modules_changed_after_digest_fail_closed ... ok
+test application::dependency_scripts::node_gyp::tests::node_gyp_bundle_rejects_wrong_package_identity ... ok
+test application::dependency_scripts::tests::macos_system_tool_source_must_be_on_a_readonly_volume ... ok
+test application::dependency_scripts::node_gyp::tests::private_node_gyp_modules_survive_host_replacement ... ok
+test application::dependency_scripts::node_gyp::tests::node_gyp_bundle_omits_generated_bin_symlinks ... ok
+test application::dependency_scripts::tests::uncontained_search_reserves_node_before_the_shell_directory ... ok
+test application::install::outcome_tests::competing_activation_returns_typed_contention_without_changes ... ok
+test application::dependency_scripts::tests::uncontained_tools_execute_verified_bytes_after_source_replacement ... ok
+test application::dependency_scripts::tests::lifecycle_mapping_requires_the_exact_peer_and_platform_context ... ok
+test application::install::outcome_tests::failed_previous_recovery_reports_project_outputs_for_install_and_outdated ... ok
+test application::install::outcome_tests::failed_resolution_reports_rollback_and_preserves_its_category ... ok
+test application::install::outcome_tests::committed_cleanup_failure_preserves_the_decision_and_requires_no_repeat ... ok
+test application::install::outcome_tests::failure_after_commit_keeps_the_committed_manifest_lock_and_packages ... ok
+test application::install::outcome_tests::adding_a_root_does_not_require_metadata_for_unchanged_locked_packages ... ok
+test application::install::outcome_tests::frozen_hydration_rejects_missing_private_credentials_before_network ... ok
+test application::install::outcome_tests::fetching_another_version_preserves_locked_dependency_edges ... ok
+test application::install::outcome_tests::compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_artifact ... ok
+test application::install::outcome_tests::changed_roots_keep_compatible_locked_versions ... ok
+test application::install::outcome_tests::install_reads_lifecycle_policy_after_acquiring_the_project_lock ... ok
+test application::install::outcome_tests::frozen_hydration_rolls_back_publication_when_activation_fails ... ok
+test application::install::outcome_tests::frozen_refuses_corrupt_warm_content_without_redownloading ... ok
+test application::install::outcome_tests::frozen_rejects_invalid_root_bindings_before_downloading ... ok
+test application::install::outcome_tests::changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins ... ok
+test application::install::outcome_tests::integrity_failure_is_typed_and_rolls_back_the_manifest ... ok
+test application::install::outcome_tests::invalid_archive_is_typed_without_activating_any_packages ... ok
+test application::install::outcome_tests::missing_replay_lock_has_a_typed_unchanged_outcome ... ok
+test application::install::outcome_tests::invalid_fixture_artifact_preserves_metadata_and_transport_categories ... ok
+test application::install::outcome_tests::obstructed_rollback_is_recovery_required_instead_of_rolled_back ... ok
+test application::install::outcome_tests::frozen_install_hydrates_exact_artifact_from_cold_store ... ok
+test application::install::outcome_tests::invalid_fixture_package_fields_preserve_the_registry_metadata_category ... ok
+test application::install::outcome_tests::materialization_failure_preserves_previous_project_and_store_state ... ok
+test application::install::outcome_tests::peer_failure_preserves_the_resolver_source ... ok
+test application::install::outcome_tests::missing_replay_tree_preserves_the_store_error_category ... ok
+test application::install::outcome_tests::offline_cold_store_never_uses_supplied_artifacts ... ok
+test application::install::outcome_tests::install_reclassifies_the_lock_after_recovery ... ok
+test application::install::outcome_tests::replay_preserves_the_lock_mismatch_category ... ok
+test application::install::tests::default_store_is_outside_a_macos_consumer_project ... ok
+test application::install::tests::linux_default_store_prefers_absolute_xdg_cache_home ... ok
+test application::install::tests::relative_cache_environment_is_rejected ... ok
+test application::install::tests::windows_default_store_uses_local_application_data ... ok
+test application::install::outcome_tests::dependency_discovery_failure_warns_without_package_approval_and_preserves_replay ... ok
+test application::install::outcome_tests::repeated_online_install_preserves_locked_selection ... ok
+test application::install::outcome_tests::successful_install_and_replay_report_effective_project_changes_and_warnings ... ok
+test application::installer::tests::installer_accepts_identical_reinstall_and_rejects_invalid_state ... ok
+test application::installer::tests::installer_rejects_changed_bytes_at_same_installed_version ... ok
+test application::installer::tests::installer_fresh_install_enforces_bootstrap_floor_and_persists_recovery ... ok
+test application::lifecycle::tests::add_planner_preserves_workspace_protocol_for_workspace_preflight ... ok
+test application::installer::tests::installer_refuses_unmarked_destination_and_symlinked_state ... ok
+test application::lifecycle::tests::outdated_impact_compares_versions_and_reuses_declared_range_semantics ... ok
+test application::installer::tests::installer_honors_durable_floor_and_digest ... ok
+test application::lifecycle::tests::plans_add_into_each_dependency_kind_and_preserves_source_identity ... ok
+test application::lifecycle::tests::plans_remove_without_touching_other_dependency_kinds ... ok
+test application::lifecycle::tests::update_plans_each_section_once_and_preserves_its_alias_target ... ok
+test application::lifecycle::tests::update_preserves_declared_ranges_unless_latest_is_explicit ... ok
+test application::lifecycle::tests::update_rejects_undeclared_names_and_invalid_overlapping_ranges ... ok
+test application::lifecycle::tests::outdated_missing_lock_reports_typed_unchanged_context ... ok
+test application::outcome::tests::credential_bearing_urls_are_redacted_in_display_and_debug ... ok
+test application::outcome::tests::canonical_package_keys_survive_sanitizing_but_credential_bearing_imitations_do_not ... ok
+test application::outcome::tests::diagnostics_are_bounded_at_utf8_character_boundaries ... ok
+test application::release_record::tests::old_immutable_record_sidecar_remains_valid ... ok
+test application::release_record::tests::record_is_independent_of_download_provider ... ok
+test application::release_record::tests::rejects_ambiguous_or_unsafe_records ... ok
+test application::release_record::tests::rejects_future_record_sidecar ... ok
+test application::release_record::tests::rejects_time_limited_schema_and_expiry_claims ... ok
+test application::release_record::tests::rejects_unknown_keys_and_modified_creation_time ... ok
+test application::release_record::tests::verifies_record_bound_sidecar_and_rejects_tampering ... ok
+test application::replay::replay_tests::explicit_registry_root_matches_only_its_registry_identity ... ok
+test application::replay::replay_tests::legacy_root_reconstruction_rejects_a_missing_direct_candidate ... ok
+test application::replay::replay_tests::legacy_root_reconstruction_rejects_ambiguous_highest_contexts ... ok
+test application::replay::replay_tests::legacy_root_reconstruction_selects_highest_candidate_matching_all_manifest_maps ... ok
+test application::installer::tests::installer_rejects_rollback_without_prior_state ... ok
+test application::replay::replay_tests::optional_overlap_does_not_relax_a_required_root ... ok
+test application::replay::replay_tests::replay_allows_a_platform_omitted_optional_root ... ok
+test application::replay::replay_tests::replay_progress_is_emitted_at_bounded_checkpoints ... ok
+test application::replay::replay_tests::replay_progress_is_reported_after_snapshot_completion ... ok
+test application::tools::launchers::tests::foreign_node_commands_do_not_shadow_the_unix_runtime ... ok
+test application::status::tests::status_blocks_member_replacement_after_discovery_even_when_lock_matches_replacement ... ok
+test application::tools::launchers::tests::unix_tool_commands_cannot_shadow_the_node_runtime ... ok
+test application::tools::launchers::tests::large_native_tool_bin_is_planned_without_a_state_file_size_limit ... ok
+test application::tools::state::tests::catalog_lock_rejects_non_regular_files ... ok
+test application::tools::state::tests::catalog_lock_releases_even_with_a_duplicated_handle ... ok
+test application::tools::state::tests::catalog_lock_contention_is_bounded_and_retryable ... ok
+test application::tools::state::tests::xdg_data_home_uses_fallback_for_empty_values_but_rejects_relative_paths ... ok
+test application::tools::state::tests::write_stage_recovery_handles_empty_partial_and_completed_payloads ... ok
+test application::status::tests::status_blocks_persistent_marker_changes_after_ownership_validation ... ok
+test application::tools::transaction::tests::catalog_publication_preserves_a_preexisting_staging_path ... ok
+test application::install::outcome_tests::unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package ... ok
+test application::tools::transaction::tests::catalog_recovery_accepts_a_stage_from_before_platform_identity_was_recorded ... ok
+test application::tools::transaction::tests::catalog_recovery_preserves_a_staging_symlink ... ok
+test application::tools::transaction::tests::generation_creation_preserves_an_existing_unowned_directory ... ok
+test application::install::outcome_tests::frozen_hydration_failures_preserve_lock_and_installed_tree ... ok
+test application::upgrade::upgrade_tests::activated_release_persistence_prunes_superseded_cache_files ... ok
+test application::upgrade::upgrade_tests::activated_release_persistence_rejects_mismatched_existing_cache ... ok
+test application::upgrade::upgrade_tests::activated_release_persistence_writes_cache_and_last_known_good_state ... ok
+test application::tools::transaction::tests::catalog_publication_includes_commit_digest_in_size_bound ... ok
+test application::upgrade::upgrade_tests::failed_activation_does_not_persist_pending_release_state ... ok
+test application::upgrade::upgrade_tests::cache_cleanup_failure_does_not_report_activation_failure ... ok
+test application::tools::transaction::tests::catalog_publication_rejects_oversized_encoding_before_changing_state ... ok
+test application::upgrade::upgrade_tests::invalid_signed_discovery_never_uses_checksum_or_cached_recovery ... ok
+test application::upgrade::upgrade_tests::signed_discovery_is_opt_in ... ok
+test application::upgrade::upgrade_tests::persistence_failure_rolls_back_the_activated_executable ... ok
+test application::upgrade::upgrade_tests::stable_endpoint_overrides_preserve_cli_then_environment_precedence ... ok
+test application::tools::transaction::tests::stage_recovery_preserves_invalid_ownership_records ... ok
+test application::upgrade::upgrade_tests::tar_artifact_rejects_traversal_members ... ok
+test application::upgrade::upgrade_tests::zip_artifact_is_rejected_without_unsafe_extraction ... ok
+test application::tools::transaction::tests::catalog_recovery_retires_only_expected_staging_bytes ... ok
+test application::why::tests::direct_manifest_edges_keep_optional_peer_and_normalize_prefixed_names ... ok
+test application::why::tests::peer_edges_retain_all_matching_provider_contexts ... ok
+test application::why::tests::traversal_is_cycle_safe_and_reports_duplicate_scoped_versions ... ok
+test application::why::tests::workspace_lock_identity_is_reported_as_workspace_source ... ok
+test application::why::tests::traversal_caps_path_results_and_marks_the_report_truncated ... ok
+test application::upgrade::upgrade_tests::tar_artifact_rejects_symlink_members ... ok
+test commands::documentation::all_cli_commands_have_help_descriptions ... ok
+test commands::documentation::documentation_check_reports_missing_and_blank_nested_descriptions ... ok
+test commands::documentation::documentation_check_skips_hidden_commands_and_their_children ... ok
+test application::upgrade::upgrade_tests::tar_artifact_rejects_duplicate_members ... ok
+test application::why::tests::workspace_roots_require_matching_member_path_and_manifest_digest ... ok
+test commands::lifecycle::tests::formats_all_outdated_fields_without_fabricating_missing_versions ... ok
+test commands::lifecycle::stale_tests::stale_lifecycle_request_preserves_intervening_manifest_edit ... ok
+test commands::lifecycle::stale_update_tests::stale_named_update_preserves_intervening_manifest_edit ... ok
+test commands::run::permissions::tests::explicit_defaults_are_a_ceiling_even_without_a_script_profile ... ok
+test application::upgrade::upgrade_tests::tar_artifact_rejects_extra_members_before_selecting_tapid ... ok
+test commands::run::permissions::tests::repeated_grants_and_aliases_use_one_portable_parser ... ok
+test commands::run::permissions::tests::flag_only_policy_grants_only_requested_permissions ... ok
+test commands::run::permissions::tests::scoped_values_are_required_and_network_has_no_host_scope ... ok
+test commands::run::tests::cancelled_termination_maps_to_sigint_exit_code ... ok
+test commands::run::tests::child_output_is_forwarded_to_its_matching_stream_without_text_conversion ... ok
+test commands::run::permissions::tests::selection_preserves_profile_assurance_limits_and_unspecified_permissions ... ok
+test commands::run::tests::cli_does_not_replay_output_already_streamed_by_native_backend ... ok
+test commands::run::tests::nonzero_and_limit_terminations_map_to_stable_cli_exits ... ok
+test commands::run::tests::result_file_delivery_errors_are_reported_without_a_complete_record ... ok
+test commands::run::tests::result_file_is_empty_and_close_on_exec_before_execution ... ok
+test filesystem::activation::activation_tests::existing_activation_lock_error_includes_the_lock_path ... ok
+test filesystem::activation::activation_tests::committed_coordinator_keeps_new_activation_and_discards_backups ... ok
+test application::preview::tests::preview_rejects_inputs_changed_before_final_recheck_without_writes ... ok
+test commands::npm_import::tests::final_workspace_validation_preserves_mismatch_kind ... ok
+test filesystem::activation::activation_tests::malformed_stale_lock_cannot_claim_a_stage ... ok
+test filesystem::activation::activation_tests::oversized_stale_lock_is_rejected_before_recovery ... ok
+test filesystem::activation::activation_tests::live_file_lock_preserves_its_stage_and_rejects_a_second_owner ... ok
+test filesystem::activation::activation_tests::failed_activation_preflight_restores_previous_layout_and_marker ... ok
+test filesystem::activation::activation_tests::stage_owner_marker_creation_does_not_follow_a_symlink ... ok
+test filesystem::activation::activation_tests::ownerless_pre_marker_stage_is_recovered_from_its_lock_owner_name ... ok
+test filesystem::activation::activation_tests::non_directory_staging_failure_restores_node_modules_and_marker ... ok
+test filesystem::activation::activation_tests::stale_activation_backups_restore_the_previous_layout ... ok
+test filesystem::activation::activation_tests::prepared_coordinator_rolls_back_a_partially_activated_layout ... ok
+test filesystem::activation::activation_tests::stale_file_lock_reclaims_only_its_owned_stage ... ok
+test filesystem::activation::activation_tests::stale_activation_backups_roll_forward_an_activated_layout ... ok
+test filesystem::atomic::tests::synced_file_write_persists_the_complete_payload ... ok
+test filesystem::atomic::tests::synced_file_write_preserves_a_preexisting_file ... ok
+test filesystem::atomic::tests::executable_replacement_adds_execute_bits_to_a_non_executable_destination ... ok
+test commands::lifecycle::tests::peer_add_records_peer_without_installing_it_as_a_regular_root ... ok
+test filesystem::activation::activation_tests::symlinked_marker_is_rejected_without_touching_target ... ok
+test filesystem::lifecycle_journal::tests::drop_follows_durable_commit_decision_after_publish_error ... ok
+test filesystem::lifecycle_journal::tests::fallback_replaces_existing_journal_without_losing_durable_contents ... ok
+test application::install::outcome_tests::online_platform_fallback_discards_only_incompatible_locked_selections ... ok
+test filesystem::atomic::tests::temporary_nonces_are_unique_under_concurrent_calls ... ok
+test filesystem::lifecycle_journal::tests::recovery_prefers_replaced_commit_decision_over_previous_backup ... ok
+test filesystem::lifecycle_journal::tests::interrupted_selected_member_transaction_restores_only_that_manifest ... ok
+test filesystem::read::tests::regular_file_reads_enforce_exact_limits_and_reject_directories ... ok
+test filesystem::lifecycle_journal::tests::member_recovery_rejects_redirected_directory_before_mutation ... ok
+test filesystem::lifecycle_journal::tests::invalid_member_recovery_paths_fail_before_mutation ... ok
+test filesystem::read::tests::regular_file_reads_reject_symlinks ... ok
+test filesystem::lifecycle_journal::tests::recovery_restores_interrupted_existing_journal_replacement ... ok
+test filesystem::tree::copy_tests::copy_tree_rejects_a_store_tree_without_a_package_manifest ... ok
+test filesystem::tree::copy_tests::copy_tree_rejects_ambiguous_named_npm_wrappers ... ok
+test filesystem::tree::copy_tests::copy_tree_normalizes_a_single_named_npm_wrapper ... ok
+test filesystem::tree::copy_tests::copy_tree_rejects_package_files_outside_a_single_wrapper ... ok
+test filesystem::tree::copy_tests::materialization_progress_is_truthful_and_bounded ... ok
+test filesystem::tree::copy_tests::copy_tree_handles_nested_directories_and_preserves_executable_mode ... ok
+test filesystem::tree::copy_tests::regular_file_clone_einval_falls_back_to_byte_copy ... ok
+test filesystem::tree::copy_tests::copy_tree_uses_copy_on_write_clones_on_macos ... ok
+test online::copied::tests::copied_and_registry_declarations_cannot_share_a_local_name ... ok
+test online::graph::tests::named_update_keeps_metadata_from_distinct_sources_separate ... ok
+test filesystem::tree::workspace_link_security_tests::rejects_workspace_link_retargeted_outside_project_before_activation ... ok
+test filesystem::tree::copy_tests::materialize_stage_does_not_copy_instances_through_an_intermediate_tree ... ok
+test online::graph::tests::peer_only_save_reuses_metadata_retrieved_for_a_transitive_dependency ... ok
+test online::locked::tests::changed_graph_seeding_rejects_multiple_contexts_for_one_exact_version ... ok
+test online::resolution::exclusions::exclusion_display_tests::exclusion_identity_display_redacts_before_utf8_truncation ... ok
+test online::tests::all_excluded_long_versions_have_bounded_human_summary ... ok
+test online::tests::all_unsupported_versions_remain_unavailable_to_the_resolver ... ok
+test online::tests::artifact_progress_is_emitted_at_bounded_completion_checkpoints ... ok
+test online::graph::tests::named_update_retrieves_tagged_workspace_peer_metadata_once ... ok
+test online::tests::candidate_exclusions_keep_primary_reason_and_dependency_category ... ok
+test filesystem::tree::copy_tests::unix_package_bin_target_becomes_executable ... ok
+test online::tests::candidate_exclusions_count_without_retaining_unbounded_history ... ok
+test online::tests::dist_tag_peers_fetch_metadata_for_locked_root_providers ... ok
+test online::tests::dist_tags_resolve_transitive_alias_and_optional_edges ... ok
+test online::tests::deep_required_frontier_normalizes_each_version_once ... ok
+test online::tests::explicit_registry_prefixes_are_mapped_safely ... ok
+test online::tests::empty_dependency_ranges_exclude_only_affected_versions ... ok
+test online::tests::fetched_locked_versions_refresh_only_peer_metadata ... ok
+test online::tests::fetched_locked_versions_fill_missing_registry_urls_without_changing_pins ... ok
+test online::tests::fixture_metadata_preserves_peer_dependencies_separately ... ok
+test filesystem::tree::copy_tests::generated_unix_package_bin_executes_from_an_initially_non_executable_target ... ok
+test online::tests::incompatible_package_versions_are_not_usable ... ok
+test online::tests::incremental_resolution_fetches_metadata_before_reporting_constraint_conflicts ... ok
+test online::tests::incremental_resolution_fetches_and_selects_compatible_optional_dependencies ... ok
+test online::tests::incremental_resolution_fetches_one_packument_for_multiple_selected_versions ... ok
+test online::tests::incremental_resolution_fetches_only_the_selected_versions_dependencies ... ok
+test online::tests::jsr_alias_metadata_never_falls_back_to_a_jsr_package_of_the_same_name ... ok
+test online::tests::malformed_peer_name_fails_closed ... ok
+test online::tests::malformed_peer_requirement_fails_without_flattening ... ok
+test online::tests::manifest_overrides_rejects_version_qualified_selectors ... ok
+test online::tests::manifest_roots_rejects_conflicting_direct_dependency_override ... ok
+test online::tests::metadata_progress_is_emitted_at_bounded_checkpoints ... ok
+test online::tests::normalization_preserves_optional_peer_markers ... ok
+test online::tests::normalization_rejects_optional_marker_for_undeclared_peer ... ok
+test online::tests::one_packument_updates_parent_metadata_once_per_version ... ok
+test online::tests::optional_dependency_uses_its_configured_registry_route ... ok
+test online::tests::optional_alias_fetches_the_actual_package_and_retains_the_local_edge ... ok
+test online::tests::override_diagnostics_preserve_non_npm_metadata_origins ... ok
+test online::tests::overriding_an_alias_range_preserves_its_actual_identity ... ok
+test online::tests::padded_and_unpadded_sha512_inputs_canonicalize_and_verify ... ok
+test online::tests::peer_metadata_is_preserved_separately_for_peer_context_resolution ... ok
+test online::tests::peer_provider_uses_the_configured_registry_route ... ok
+test online::tests::private_package_resolves_unscoped_transitive_dependency_from_public_npm ... ok
+test online::tests::production_normalization_rejects_empty_registry_dependency_ranges ... ok
+test online::tests::public_package_resolves_scoped_transitive_dependency_from_private_registry ... ok
+test online::tests::resolution_error_reports_safe_excluded_version_and_reason ... ok
+test online::tests::root_override_replaces_a_transitive_dependency_requirement ... ok
+test online::tests::same_origin_authenticated_and_public_routes_use_separate_transports ... ok
+test online::tests::selected_npm_or_and_prerelease_ranges_remain_usable ... ok
+test online::tests::selected_bare_major_dependency_range_remains_usable ... ok
+test online::tests::imported_workspace_manifest_failure_kinds ... ok
+test online::tests::terminal_candidate_exclusions_are_bounded_and_safe ... ok
+test online::tests::unavailable_optional_requirement_does_not_fail_resolution ... ok
+test online::tests::terminal_conflict_exclusions_ignore_unrelated_history_and_other_origins ... ok
+test online::tests::unsupported_historical_dependencies_do_not_hide_usable_versions ... ok
+test online::tests::unusable_optional_candidate_does_not_become_a_required_edge ... ok
+test output::install::tests::install_progress_is_silent_in_json_mode ... ok
+test output::install::tests::install_progress_throttles_bursts_but_keeps_phase_changes_and_completion ... ok
+test online::tests::wide_required_frontier_rebuilds_metadata_only_once_per_wave ... ok
+test online::locked::tests::hydration_fetches_a_shared_tree_once_across_locked_contexts ... ok
+test online::tests::workspace_materialization_compares_canonical_project_roots ... ok
+test output::json::lifecycle_tests::lifecycle_scalar_truncation_marks_details_incomplete_without_changing_coverage ... ok
+test output::json::lifecycle_tests::lifecycle_identity_preserves_origin_peers_and_platform_and_sorts_before_display ... ok
+test output::json::outdated::tests::shortened_scalars_are_marked_and_recovery_paths_remain_complete ... ok
+test output::json::paths::tests::capacity_is_explicit_and_never_returns_a_shortened_path ... ok
+test output::json::lifecycle_tests::lifecycle_hook_details_are_bounded_and_sanitized_with_pointer_tracking ... ok
+test output::json::paths::tests::non_utf8_unix_paths_round_trip_native_bytes ... ok
+test output::json::paths::tests::unicode_and_control_characters_are_preserved_without_raw_ansi_output ... ok
+test output::json::tests::diagnostic_native_manifest_paths_are_never_shortened ... ok
+test output::json::tests::manifest_pointer_does_not_hide_a_credential_url_from_redaction ... ok
+test output::json::outdated::tests::outdated_is_sorted_bounded_and_partial_even_when_error_is_beyond_limit ... ok
+test output::json::tests::recovery_instructions_come_only_from_typed_state ... ok
+test output::json::why::tests::truncated_empty_why_result_is_partial_and_successful ... ok
+test package_spec::tests::preserves_alias_target_and_range_as_one_declaration ... ok
+test package_spec::tests::preserves_scoped_names_and_registry_prefixes ... ok
+test output::json::tests::typed_failure_context_is_bounded_redacted_and_separate_per_phase ... ok
+test registry::tests::conflicting_tokens_for_one_origin_fail_without_disclosure ... ok
+test registry::tests::credential_source_reports_missing_and_empty_values_without_disclosing_them ... ok
+test registry::tests::credential_value_is_returned_only_for_its_selected_scope ... ok
+test registry::tests::credentials_for_reads_only_the_selected_package_routes ... ok
+test registry::tests::load_accepts_a_configuration_exactly_at_the_byte_limit ... ok
+test package_spec::tests::arbitrary_specs_without_at_are_trimmed_and_unconstrained ... ok
+test package_spec::tests::trims_and_defaults_requirement_for_generated_package_specs ... ok
+test registry::tests::load_rejects_configuration_over_the_byte_limit ... ok
+test registry::tests::registry_credentials_cannot_be_allowlisted_for_child_processes ... ok
+test registry::tests::rejects_noncanonical_origins_unknown_fields_and_bad_scope ... ok
+test registry::tests::missing_configuration_uses_public_registry_defaults ... ok
+test registry::tests::run_and_registry_policies_parse_from_the_same_configuration_snapshot ... ok
+test registry::tests::run_configuration_is_accepted_but_unknown_top_level_tables_are_rejected ... ok
+test registry::tests::scoped_credentials_do_not_inherit_the_default_entry ... ok
+test registry::tests::scoped_registry_overrides_default_and_unmapped_packages_keep_public_npm ... ok
+test transport::release::tests::artifact_fetches_use_the_declared_size_limit ... ok
+test transport::release::tests::bounded_response_reader_caps_initial_allocation ... ok
+test transport::release::tests::bounded_response_reader_rejects_streams_over_the_size_limit ... ok
+test transport::release::tests::curl_size_limit_exit_is_not_a_transport_outage ... ok
+test transport::release::tests::curl_unavailability_remains_retryable ... ok
+test transport::release::tests::oversized_response_read_is_not_a_transport_outage ... ok
+test transport::release::tests::partial_curl_response_is_not_a_transport_outage ... ok
+test transport::release::tests::release_fetches_have_bounded_connection_and_total_time ... ok
+test online::locked::ci_tests::cached_locked_trees_retain_snapshots_without_transaction_copies ... ok
+test output::json::lifecycle_tests::lifecycle_details_are_bounded_with_exact_omissions_without_stopping_checks ... ok
+test online::tests::custom_private_origins_use_the_npm_metadata_protocol ... ok
+test application::install::outcome_tests::online_compatibility_refetches_unverified_locks_and_preserves_verified_selections ... ok
+test filesystem::lifecycle_journal::tests::large_snapshot_journal_is_recoverable_after_begin ... ok
+
+test result: ok. 282 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.72s
+
+     Running unittests src/main.rs (target/debug/deps/tapid-17f2d67d4212a57e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/agent_workflows.rs (target/debug/deps/agent_workflows-c303a1f2ba8c18ee)
+
+running 8 tests
+test agent_same_project_contention_stops_before_dependency_edit ... ok
+test agent_run_example_reads_complete_typed_result_file ... ok
+test agent_stops_on_precise_failures_without_retry_or_file_mutation ... ok
+test agent_lost_commit_response_recovers_before_repeating_mutation ... ok
+test agent_named_update_refreshes_selection_and_preserves_unrelated_records ... ok
+test agent_dependency_edits_and_repeated_install_preserve_unselected_graph ... ok
+test agent_separate_checkouts_share_verified_cache_without_graph_changes ... ok
+test agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.79s
+
+     Running tests/architecture.rs (target/debug/deps/architecture-1678ed6f5481e97d)
+
+running 6 tests
+test commands_are_split_by_user_facing_capability ... ok
+test main_is_a_thin_entrypoint ... ok
+test sandboxed_run_path_cannot_spawn_directly ... ok
+test run_reads_only_allowlisted_host_environment_and_avoids_duplicate_child_output ... ok
+test application_modules_do_not_render_or_choose_process_status ... ok
+test rust_file_discovery_recurses_into_nested_modules ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/cli.rs (target/debug/deps/cli-2520ef6280d4b956)
+
+running 276 tests
+test cache_tests::cache_clean_rejects_conflicting_confirmation_and_preview_flags ... ok
+test cache_tests::cache_empty_explicit_root_remains_an_argument_error ... ok
+test cache_tests::cache_invalid_default_location_is_an_operational_path_error ... ok
+test cache_tests::cache_defaults_match_install_location_without_creating_files_or_loading_project ... ok
+test cache_tests::cache_clean_refuses_a_store_used_by_another_process ... ok
+test cache_tests::cache_cleanup_failure_stops_with_inspection_and_retry_advice ... ok
+test cache_tests::cache_json_failure_does_not_claim_changes_before_deletion ... ok
+test cache_tests::cache_inspection_and_clean_preview_preserve_bytes_until_yes ... ok
+test cache_tests::cache_json_operational_errors_have_a_phase_and_invalid_roots_have_path_codes ... ok
+test cache_tests::cache_json_uses_versioned_results_for_info_preview_and_clear ... ok
+test cache_tests::cache_json_pending_recovery_has_operation_phase ... ok
+test ci_tests::ci_rejects_package_mutation_and_unverified_options ... ok
+test add_peer_records_only_peer_requirement ... ok
+test ci_replaces_managed_modules_without_changing_project_files_or_running_scripts ... ok
+test aliased_root_cycle_keeps_locked_dependencies_during_install_and_replay ... ok
+test clap_rejects_unknown_commands_with_usage_error ... ok
+test command_fixture_tests::command_fixture_preserves_arguments_including_global_option_order ... ok
+test command_fixture_tests::owned_command_fixture_keeps_environment_stable_and_cleans_up ... ok
+test ci_tests::ci_downloads_missing_locked_artifacts_without_resolving_or_rewriting ... ok
+test copied_file_paths_cannot_follow_symlink_components ... ok
+test copied_dependency_rejections_preserve_project_and_store_and_redact_credentials ... ok
+test ci_tests::ci_fixture_exception_requires_every_url_less_transitive_identity ... ok
+test copied_file_tarballs_reject_hostile_entries_without_replacing_the_project ... ok
+test ci_tests::ci_validates_workspace_members_and_preserves_aliases_from_an_empty_store ... ok
+test ci_tests::ci_requires_complete_lockfiles_with_warm_and_cold_stores_including_offline ... ok
+test copied_file_tarballs_keep_source_identity_and_reject_changed_bytes_on_replay ... ok
+test cross_registry_aliases_install_distinct_artifacts_and_replay_offline ... ok
+test ci_tests::ci_recovers_store_and_project_after_precommit_and_postcommit_crashes ... ok
+test dependency_lifecycle_policy_rejects_prepare_before_mutating_project ... ok
+test copied_git_archives_use_the_same_safe_extraction_and_bin_lane ... ok
+test dependency_lifecycle_failed_unsafe_hook_preserves_previous_install ... ok
+test dependency_lifecycle_required_native_build_fails_without_approval ... ok
+test copied_file_tarballs_materialize_bins_and_cold_replay ... ok
+test dependency_override_warnings_preserve_json_and_human_output_contracts ... ok
+test dependency_lifecycle_hooks_are_reported_and_never_run_by_default ... ok
+test dependency_lifecycle_sandbox_only_override_skips_hooks_with_a_dependency_cycle ... ok
+test dependency_review_regression_workspace_selection_retains_json_override_warnings ... ok
+test dependency_lifecycle_overrides_are_explicit_and_do_not_create_attestations ... ok
+test explain_tests::explain_bounds_untrusted_metadata_without_echoing_signature_content ... ok
+test explain_tests::explain_distinguishes_reported_missing_and_verified_evidence_without_mutation ... ok
+test explain_tests::explain_json_retains_integrity_mismatch_and_returns_failure ... ok
+test explain_tests::explain_missing_evidence_is_unknown_in_json ... ok
+test dependency_review_regression_workspace_override_does_not_read_live_members ... ok
+test explain_tests::explain_observation_times_do_not_establish_evidence_freshness ... ok
+test explain_tests::explain_private_registry_missing_credential_fails_before_network ... ok
+test explain_tests::explain_rejects_ranges_missing_versions_and_malformed_evidence ... ok
+test init_creates_manifest_and_reports_stdout ... ok
+test injected_activation_failure_restores_marked_node_modules ... ok
+test dependency_lifecycle_sandbox_only_override_warns_on_discovery_failure ... ok
+test install_accepts_explicit_specs_for_ambiguous_package_names ... ok
+test install_accepts_a_relative_project_directory ... ok
+test install_alias_replays_project_and_provides_help ... ok
+test ci_tests::ci_rejects_invalid_locked_installs_without_replacing_previous_outputs ... ok
+test dist_tag_workspace_peers_validate_exact_targets_during_resolution_and_replay ... ok
+test install_output_explains_missing_lock_without_claiming_changes ... ok
+test install_output_reports_registry_failure_without_success_summary ... ok
+test install_allows_missing_integrity_only_with_explicit_warning ... ok
+test install_does_not_commit_verified_store_trees_when_materialization_fails ... ok
+test install_output_summarizes_changes_and_replay ... ok
+test ci_tests::ci_validates_fixture_exceptions_on_warm_and_offline_paths ... ok
+test install_refuses_to_replace_unmarked_node_modules ... ok
+test install_rejects_malformed_lockfile_before_creating_output ... ok
+test install_rejects_root_registry_identity_collision_before_mutation ... ok
+test install_rejects_unverified_artifacts_with_offline_or_frozen ... ok
+test install_rejects_workspace_member_registry_identity_collision_before_mutation ... ok
+test install_rejects_unsupported_workspace_manifest_before_mutating_project_or_store ... ok
+test install_preserves_project_and_store_on_integrity_and_archive_failures ... ok
+test install_rejects_ambiguous_package_arguments_before_accessing_project ... ok
+test install_requires_lockfile_in_offline_and_frozen_modes ... ok
+test install_rolls_back_when_a_required_peer_is_incompatible ... ok
+test install_replays_valid_lockfile_without_running_scripts ... ok
+test install_warns_about_unverified_artifacts_before_later_failure ... ok
+test invalid_fetched_dependency_range_does_not_create_store_state ... ok
+test install_rolls_back_when_a_required_peer_provider_is_missing ... ok
+test invalid_online_root_range_does_not_create_store_state ... ok
+test install_supports_an_explicit_dynamic_project_directory ... ok
+test invalid_npm_aliases_fail_before_project_or_store_mutation ... ok
+test invalid_private_registry_credentials_are_redacted_and_fail_transactionally ... ok
+test license_prints_complete_apache_text_without_accessing_a_project ... ok
+test legacy_registry_replay_rejects_without_mutation ... ok
+test install_output_counts_exact_lock_selections ... ok
+test lifecycle_commands_are_exposed_as_cli_commands ... ok
+test lifecycle_add_rejects_invalid_fetched_range_without_state_changes ... ok
+test lifecycle_add_rolls_back_manifest_when_resolution_fails ... ok
+test install_validates_peer_providers_and_persists_peer_context ... ok
+test legacy_replay_rejects_same_local_name_from_different_registries ... ok
+test lifecycle_finishes_committed_state_after_commit_decision_crash ... ok
+test dist_tags_pin_prereleases_and_replay_after_tags_move_or_disappear ... ok
+test lifecycle_recovers_previous_state_after_activation_completion_crash ... ok
+test lifecycle_recovers_previous_state_after_lockfile_replacement_crash ... ok
+test lifecycle_workspace_symlink_escape_preserves_external_project ... ok
+test lock_verify_reports_valid_and_missing_files ... ok
+test lifecycle_recovers_previous_state_after_node_modules_backup_crash ... ok
+test lifecycle_recovers_previous_state_after_store_publication_crash ... ok
+test missing_private_registry_credentials_fail_before_committing_manifest_changes ... ok
+test lifecycle_reporting_tests::lifecycle_reporting_distinguishes_unperformed_from_successful_empty_discovery ... ok
+test frozen_cold_cache_recovery_preserves_lock_bytes_and_publication_decision ... ok
+test npm_alias_cli_add_update_latest_and_outdated_keep_the_actual_target ... ok
+test npm_alias_routes_by_actual_scope_and_rejects_a_changed_route_on_replay ... ok
+test npm_and_jsr_registry_identities_remain_distinct_for_related_packages ... ok
+test named_workspace_update_saves_member_and_preserves_other_bindings ... ok
+test optional_node_assertion_probe_preserves_spawn_fallback ... ok
+test outdated_reports_versions_without_mutating_project_state ... ok
+test lifecycle_workspace_selector_mutates_only_selected_member ... ok
+test outdated_uses_configured_private_registry_identity ... ok
+test outdated_reports_local_workspace_versions_without_registry_lookup ... ok
+test preview_tests::dependency_dry_run_compatibility_install_resolves_unverified_pins_again ... ok
+test preview_tests::dependency_dry_run_does_not_present_locked_pins_as_declared_transitive_ranges ... ok
+test preview_tests::dependency_dry_run_install_package_and_latest_show_declaration_edits ... ok
+test preview_tests::dependency_dry_run_install_preserves_matching_lock_and_reports_no_metadata_lookups ... ok
+test padded_and_unpadded_fixture_integrity_produce_canonical_lockfile_values ... ok
+test preview_tests::dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy ... ok
+test preview_tests::dependency_dry_run_offline_install_uses_lock_without_inspecting_store ... ok
+test preview_tests::dependency_dry_run_receipt_covers_workspace_routing_policy_and_lock ... ok
+test preview_tests::dependency_dry_run_refuses_pending_recovery_without_changing_it ... ok
+test preview_tests::dependency_dry_run_rejects_copied_sources_before_replay_or_artifact_access ... ok
+test preview_tests::dependency_dry_run_reports_new_root_binding_for_an_existing_transitive_package ... ok
+test preview_tests::dependency_dry_run_reports_starting_state ... ok
+test preview_tests::dependency_dry_run_resolution_failure_preserves_existing_project_and_store ... ok
+test preview_tests::dependency_dry_run_resolves_transitives_without_writing_or_fetching_artifacts ... ok
+test npm_aliases_preserve_local_names_actual_identities_and_offline_replay ... ok
+test preview_tests::dependency_dry_run_truncation_pointers_are_sorted_and_unique ... ok
+test preview_tests::dependency_dry_run_workspace_edits_resolve_the_member_graph_in_memory ... ok
+test preview_tests::dependency_dry_run_update_and_remove_explain_transitive_changes ... ok
+test named_update_keeps_ranges_and_explains_required_transitive_changes ... ok
+test prune_preserves_tree_on_lockfile_manifest_mismatch ... ok
+test prune_preserves_unmarked_node_modules ... ok
+test read_only_lifecycle_commands_fail_closed_without_writing ... ok
+test offline_replay_uses_exact_roots_when_names_have_transitive_versions ... ok
+test prune_preserves_workspace_member_peer_provider_and_removes_orphan ... ok
+test registry_credential_environment_variables_are_denied_to_root_scripts ... ok
+test required_node_assertion_probe_preserves_spawned_output ... ok
+test required_node_assertion_probe_rejects_spawn_failure - should panic ... ok
+test prune_removes_only_unreachable_package_from_managed_node_modules ... ok
+test registry_and_workspace_bin_name_collisions_fail_before_project_activation ... ok
+test root_install_links_workspace_cycles_without_registry_resolution ... ok
+test root_workspace_activation_failure_restores_manifest_lock_and_managed_tree ... ok
+test remove_resolves_remaining_dependencies_and_cleans_stale_materialization ... ok
+test root_workspace_direct_dependency_override_must_match_the_declared_range ... ok
+test pinned_git_dependencies_replay_exact_commits_after_refs_move ... ok
+test root_workspace_rejects_member_inside_node_modules_without_mutation ... ok
+test run_accepts_process_memory_stats_opt_in_and_aliases ... ok
+test root_install_links_ordinary_workspace_dependencies_without_registry_resolution ... ok
+test root_workspace_member_peer_uses_a_direct_root_provider ... ok
+test run_help_lists_portable_invocation_permission_flags ... ok
+test run_permission_tests::network_fixture_response_completes_before_reset ... ok
+test run_permission_tests::network_fixture_response_rejects_early_reset ... ok
+test run_permission_tests::network_fixture_response_rejects_invalid_framing ... ok
+test run_permission_tests::network_fixture_response_rejects_truncated_body ... ok
+test root_install_resolves_registry_dependencies_declared_by_workspace_members ... ok
+test root_workspace_lifecycle_add_update_remove_prune_stays_local ... ok
+test preview_tests::dependency_dry_run_matches_real_operations_on_equivalent_projects ... ok
+test dependency_review_regression_implicit_node_gyp_uses_private_bundled_modules ... ok
+test run_permission_tests::run_permissions_preserve_malformed_configuration_and_reserved_environment_checks ... ok
+test run_permission_tests::run_permissions_validate_values_without_requiring_a_configuration_file ... ok
+test run_fails_closed_before_spawn_without_printing_secret_values ... ok
+test run_permission_tests::run_result_file_covers_configuration_preparation_and_containment_failures ... ok
+test run_permission_tests::run_result_file_covers_project_manifest_and_workspace_failures ... ok
+test run_permission_tests::run_result_file_rejects_existing_and_project_destinations_before_launch ... ok
+test run_permission_tests::run_result_file_reports_prelaunch_failure_without_mixing_streams ... ok
+test named_update_preserves_unselected_alias_pin_and_saves_explicit_policies ... ok
+test run_preserves_non_utf8_forwarded_argument_through_cli_boundary ... ok
+test run_rejects_a_missing_node_runtime_stably ... ok
+test run_rejects_a_non_regular_configuration_without_opening_it ... ok
+test run_rejects_malformed_configuration_stably ... ok
+test run_permission_tests::run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_grants ... FAILED
+test run_rejects_oversized_configuration_before_parsing ... ok
+test run_rejects_missing_script_stably_before_policy_loading ... ok
+test run_permission_tests::run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config ... FAILED
+test run_rejects_oversized_manifest_before_policy_loading ... ok
+test run_rejects_reserved_path_allowlisting_before_runner_execution ... ok
+test run_requires_an_exact_script_profile ... ok
+test run_requires_checked_in_configuration_before_execution ... ok
+test sandbox_help_exposes_one_time_guard_management ... ok
+test sandbox_json_rejects_install_before_privileged_management ... ok
+test run_permission_tests::run_permissions_narrow_a_profile_and_reject_additional_authority_before_execution ... FAILED
+test run_permission_tests::run_permissions_do_not_implicitly_grant_writes ... FAILED
+test selected_member_add_links_sibling_without_registry_fallback ... ok
+test status_tests::status_bounds_blockers_and_marks_partial_inspection ... ok
+test scoped_registry_routing_selects_private_and_default_origins_and_replays_offline ... ok
+test status_tests::status_blocks_oversized_members_before_workspace_parsing ... ok
+test status_tests::status_checks_all_workspace_manifests_and_never_reads_credentials ... ok
+test status_tests::status_human_output_sanitizes_untrusted_selection ... ok
+test status_tests::status_ignores_member_overrides_but_checks_root_overrides_and_member_specs ... ok
+test status_tests::status_points_recovery_blockers_at_backup_only_journals ... ok
+test status_tests::status_checks_imported_npm_manifest_and_workspace_receipts ... ok
+test status_tests::status_rejects_symlink_metadata_without_following_it ... ok
+test status_tests::status_rejects_symlinked_marker_without_following_or_replacing_it ... ok
+test run_permission_tests::run_result_file_cannot_be_forged_by_child_and_preserves_output_and_exit ... FAILED
+test status_tests::status_rejects_workspace_lock_edges_that_disagree_with_current_manifests ... ok
+test status_tests::status_reports_local_readiness_without_claiming_tree_or_runner_verification ... ok
+test selected_member_install_uses_root_lock_and_activates_the_workspace_graph ... ok
+test status_tests::status_rejects_invalid_markers_even_without_node_modules ... ok
+test status_tests::status_reports_missing_files_without_creating_anything ... ok
+test status_tests::status_bounds_workspace_discovery_before_parsing_members ... ok
+test run_permission_tests::run_result_file_reports_unsupported_containment_without_fallback ... ok
+test status_tests::status_reports_member_file_access_failures_at_the_member_path ... ok
+test status_tests::status_reports_the_malformed_workspace_member_path ... ok
+test status_tests::status_reports_pending_recovery_and_unmanaged_installation_without_recovering ... ok
+test status_tests::status_reports_root_bindings_without_requiring_workspace_discovery ... ok
+test status_tests::status_reports_root_mismatch_despite_invalid_registry_or_workspace ... ok
+test status_tests::status_reports_replay_blocker_despite_invalid_registry_or_workspace ... ok
+test status_tests::status_separates_matching_metadata_from_unsupported_lock_replay ... ok
+test status_tests::status_treats_root_peers_as_declarations_but_validates_member_peers ... ok
+test run_executes_root_or_explicitly_selected_workspace_member_script ... ok
+test tool_tests::tool_catalog_rejects_invalid_versions_and_requirements ... ok
+test tool_tests::tool_cleanup_defers_an_environment_with_a_live_invocation_lease ... ok
+test tool_tests::tool_can_remove_a_legacy_node_launcher ... ok
+test tool_tests::tool_child_keeps_environment_lease_after_wrapper_is_interrupted ... ok
+test tool_tests::tool_command_forwards_arguments_and_exit_status ... ok
+test tool_tests::tool_direct_unix_bin_from_a_non_executable_archive_runs ... ok
+test run_without_runtime_flag_discovers_node_then_reaches_sandbox_preflight ... ok
+test tool_tests::tool_cleanup_recovers_interrupted_retirement_marker_writes ... ok
+test tool_tests::tool_corrupt_catalog_and_unowned_command_are_preserved ... ok
+test tool_tests::tool_initialization_rejects_invalid_ownership_and_preserves_unknown_entries ... ok
+test tool_tests::tool_collisions_and_no_bin_fail_without_changing_existing_installation ... ok
+test tool_tests::tool_failed_integrity_verification_preserves_the_previous_installation ... ok
+test tool_tests::tool_failed_install_remains_retryable_with_earlier_cleanup_pending ... ok
+test tool_tests::tool_list_preserves_an_empty_unowned_root ... ok
+test tool_tests::tool_list_without_installations_does_not_create_state ... ok
+test tool_tests::tool_human_list_exposes_its_requirement_and_inspectable_lock_path ... ok
+test tool_tests::tool_catalog_recovery_retires_interrupted_replacement_files ... ok
+test tool_tests::tool_install_creates_locked_environment_without_touching_the_caller ... ok
+test tool_tests::tool_invocation_runs_while_a_mutation_holds_the_staging_lock ... ok
+test tool_tests::tool_invocation_waits_for_catalog_publication ... ok
+test tool_tests::tool_json_truncation_pointers_are_sorted ... ok
+test tool_tests::tool_mutations_fail_when_another_process_holds_the_staging_lock ... ok
+test tool_tests::tool_preserves_replaced_launcher_and_unknown_environment ... ok
+test tool_tests::tool_recovers_a_stop_inside_commit_decision_publication ... ok
+test tool_tests::tool_recovers_a_stop_inside_journal_publication ... ok
+test tool_tests::tool_recovers_a_stop_inside_launcher_publication ... ok
+test tool_tests::tool_platform_migration_can_replace_multiple_legacy_tools_one_at_a_time ... ok
+test tool_tests::tool_recovery_failure_reports_tool_paths_instead_of_project_outputs ... ok
+test tool_tests::tool_rejects_invalid_specs_before_creating_state ... ok
+test tool_tests::tool_requires_an_absolute_tools_directory_without_creating_it ... ok
+test tool_tests::tool_rejects_catalog_launcher_paths_that_are_not_single_normal_components ... ok
+test tool_tests::tool_root_can_resolve_a_platform_alias_in_its_parent_directory ... ok
+test tool_tests::tool_execution_rejects_foreign_or_unknown_installation_platforms ... ok
+test tool_tests::tool_reinstall_changes_requirement_and_keeps_one_active_environment ... ok
+test tool_tests::tool_scoped_package_exports_its_declared_command ... ok
+test tool_tests::tool_stage_recovery_never_follows_an_ownership_sidecar_link ... ok
+test tool_tests::tool_reclaims_interrupted_stages_without_claiming_unknown_generations ... ok
+test tool_tests::tool_symlink_root_is_rejected_and_cleanup_never_traverses_a_symlink ... ok
+test tool_tests::tool_rejects_integrity_valid_archives_with_a_different_locked_identity ... ok
+test tool_tests::tool_recovers_interrupted_activation_before_and_after_commit ... ok
+test update_rejects_conflicting_save_policies_before_mutation ... ok
+test upgrade_is_exposed_as_a_cli_command ... ok
+test validate_reports_success_and_malformed_input ... ok
+test update_preserves_ranges_unless_latest_is_requested ... ok
+test why_confirmed_absent_package_still_exits_one ... ok
+test why_reconstructs_only_manifest_matching_roots_and_reports_nested_instances ... ok
+test why_rejects_a_legacy_root_outside_the_manifest_version_range ... ok
+test update_latest_restores_overlapping_sections_after_install_failure ... ok
+test why_rejects_a_stale_recorded_root_binding ... ok
+test why_reports_a_deterministic_path_from_a_direct_root_without_mutation ... ok
+test why_reports_an_incomplete_empty_search_as_success ... ok
+test why_traverses_a_persisted_peer_edge_without_treating_manifest_peer_as_a_root ... ok
+test why_warns_when_generic_transitive_edge_kinds_are_unavailable ... ok
+test tool_tests::tool_retries_interrupted_ownership_publication_without_claiming_unowned_files ... ok
+test workspace_acceptance::root_run_rejects_symlinked_manifest_before_script_or_policy_loading ... ok
+test workspace_bin_target_cannot_escape_member_through_symlinked_directory ... ok
+test workspace_acceptance::unsupported_workspace_glob_preserves_manifests_lock_store_and_activation ... ok
+test tool_tests::tool_update_and_remove_preserve_other_tools_and_unowned_files ... ok
+test workspace_member_bin_is_materialized_as_a_node_modules_bin_shim ... ok
+test workspace_member_peer_dependencies_fail_before_project_mutation ... ok
+test workspace_member_jsr_dependency_uses_stripped_local_name_and_replays ... ok
+test workspace_member_npm_alias_uses_private_scope_and_replays ... ok
+test tool_tests::tool_write_recovery_preserves_unknown_contents_and_links ... ok
+test workspace_acceptance::symlinked_workspace_manifest_preserves_existing_installation ... ok
+test workspace_member_under_root_node_modules_is_rejected_before_mutation ... ok
+test workspace_member_private_registry_dependency_resolves_and_replays_offline ... ok
+test workspace_protocol_add_fails_closed_before_registry_or_project_mutation ... ok
+test tool_tests::tool_mutation_rejects_drifted_bins_without_changing_published_state ... ok
+test workspace_member_registry_dependencies_use_root_overrides_in_install_and_replay ... ok
+test workspace_acceptance::workspace_reference_install_replay_and_lifecycle_keep_node_imports ... ok
+test update_latest_preserves_overlapping_dependency_sections ... ok
+
+failures:
+
+---- run_permission_tests::run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_grants stdout ----
+
+thread 'run_permission_tests::run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_grants' (40045862) panicked at crates/tapid-cli/tests/cli_cases/run_permissions.rs:248:5:
+error: sandbox execution failed (unsupported-containment): sandbox containment is unavailable on macos: native probe profile installation failed; no enforcement receipt was issued
+
+
+---- run_permission_tests::run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config stdout ----
+
+thread 'run_permission_tests::run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config' (40045828) panicked at crates/tapid-cli/tests/cli_cases/run_permissions.rs:121:5:
+error: sandbox execution failed (unsupported-containment): sandbox containment is unavailable on macos: native probe profile installation failed; no enforcement receipt was issued
+
+
+---- run_permission_tests::run_permissions_narrow_a_profile_and_reject_additional_authority_before_execution stdout ----
+
+thread 'run_permission_tests::run_permissions_narrow_a_profile_and_reject_additional_authority_before_execution' (40046108) panicked at crates/tapid-cli/tests/cli_cases/run_permissions.rs:192:5:
+error: sandbox execution failed (unsupported-containment): sandbox containment is unavailable on macos: native probe profile installation failed; no enforcement receipt was issued
+
+
+---- run_permission_tests::run_permissions_do_not_implicitly_grant_writes stdout ----
+
+thread 'run_permission_tests::run_permissions_do_not_implicitly_grant_writes' (40045696) panicked at crates/tapid-cli/tests/cli_cases/run_permissions.rs:162:5:
+error: sandbox execution failed (unsupported-containment): sandbox containment is unavailable on macos: native probe profile installation failed; no enforcement receipt was issued
+
+
+---- run_permission_tests::run_result_file_cannot_be_forged_by_child_and_preserves_output_and_exit stdout ----
+
+thread 'run_permission_tests::run_result_file_cannot_be_forged_by_child_and_preserves_output_and_exit' (40046589) panicked at crates/tapid-cli/tests/cli_cases/run_permissions.rs:483:5:
+assertion `left == right` failed: error: sandbox execution failed (unsupported-containment): sandbox containment is unavailable on macos: native probe profile installation failed; no enforcement receipt was issued
+
+  left: Some(1)
+ right: Some(37)
+
+
+failures:
+    run_permission_tests::run_permissions_do_not_implicitly_grant_writes
+    run_permission_tests::run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config
+    run_permission_tests::run_permissions_flag_only_baseline_has_no_implicit_project_or_subprocess_grants
+    run_permission_tests::run_permissions_narrow_a_profile_and_reject_additional_authority_before_execution
+    run_permission_tests::run_result_file_cannot_be_forged_by_child_and_preserves_output_and_exit
+
+test result: FAILED. 271 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 89.47s
+
+error: test failed, to rerun pass `-p tapid --test cli`

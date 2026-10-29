@@ -1,0 +1,304 @@
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "time"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=1; elapsed_us=321212; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 50
+units = "milliseconds requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "time"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=1; elapsed_us=242556; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 50
+units = "milliseconds requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "time"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=3; elapsed_us=386982; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 50
+units = "milliseconds requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "time"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=3; elapsed_us=350824; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 50
+units = "milliseconds requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "output"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=1; elapsed_us=51442; captured_bytes=16384; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4096
+units = "combined bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "output"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=1; elapsed_us=27445; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4096
+units = "combined bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "output"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=3; elapsed_us=95929; captured_bytes=49152; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4096
+units = "combined bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "output"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=3; elapsed_us=70459; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4096
+units = "combined bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "processes"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=1; elapsed_us=265608; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 2
+units = "tree processes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "processes"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=1; elapsed_us=418423; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 2
+units = "tree processes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "processes"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=3; elapsed_us=429639; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 2
+units = "tree processes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "processes"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=3; elapsed_us=270842; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 2
+units = "tree processes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "memory"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=1; elapsed_us=233531; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4194304
+units = "tree memory bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "memory"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=1; elapsed_us=258058; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4194304
+units = "tree memory bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "memory"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=ordinary; leaf_count=3; elapsed_us=402210; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4194304
+units = "tree memory bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "memory"
+candidate = "unsandboxed-diagnostic"
+requested = "tree-wide limit enforcement"
+available = "process observations only; no authoritative boundary"
+observed = "transition=setsid; leaf_count=3; elapsed_us=440193; captured_bytes=0; touched_bytes_per_memory_leaf=2097152; resident_accounting=unavailable; admission=unavailable; overshoot=unmeasured"
+enforced = "none"
+threshold = 4194304
+units = "tree memory bytes requested; not configured"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "no candidate"
+rescue = "direct-child wait/kill guard; no detached-tree claim"
+

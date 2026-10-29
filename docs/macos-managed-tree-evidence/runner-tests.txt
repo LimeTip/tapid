@@ -1,0 +1,528 @@
+warning: crates/tapid-registry-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-registry-client` (manifest) generated 1 warning
+warning: crates/tapid-attestations/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-attestations` (manifest) generated 1 warning
+warning: crates/tapid-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid` (manifest) generated 1 warning
+warning: crates/tapid-release-client/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-release-client` (manifest) generated 1 warning
+warning: crates/tapid-store/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-store` (manifest) generated 1 warning
+warning: crates/tapid-runner/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-runner` (manifest) generated 1 warning
+warning: crates/tapid-protocol/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-protocol` (manifest) generated 1 warning
+warning: crates/tapid-resolver/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-resolver` (manifest) generated 1 warning
+warning: crates/tapid-archive/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-archive` (manifest) generated 1 warning
+warning: crates/tapid-test-support/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-test-support` (manifest) generated 1 warning
+warning: crates/tapid-manifest/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-manifest` (manifest) generated 1 warning
+warning: crates/tapid-lockfile/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-lockfile` (manifest) generated 1 warning
+warning: crates/tapid-policy/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-policy` (manifest) generated 1 warning
+warning: crates/tapid-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-core` (manifest) generated 1 warning
+warning: crates/tapid-signatures/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-signatures` (manifest) generated 1 warning
+warning: crates/tapid-linker/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-linker` (manifest) generated 1 warning
+warning: crates/tapid-publish/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-publish` (manifest) generated 1 warning
+warning: crates/tapid-transparency/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: `tapid-transparency` (manifest) generated 1 warning
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling stable_deref_trait v1.2.1
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling serde_core v1.0.229
+   Compiling icu_properties_data v2.3.0
+   Compiling version_check v0.9.5
+   Compiling icu_normalizer_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling smallvec v1.16.0
+   Compiling libc v0.2.189
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.151
+   Compiling percent-encoding v2.3.2
+   Compiling serde v1.0.229
+   Compiling form_urlencoded v1.2.2
+   Compiling winnow v1.0.4
+   Compiling memchr v2.8.3
+   Compiling syn v3.0.5
+   Compiling syn v2.0.119
+   Compiling itoa v1.0.18
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling semver v1.0.28
+   Compiling tapid-runner v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-runner)
+   Compiling base64 v0.22.1
+   Compiling cpufeatures v0.2.17
+   Compiling cfg-if v1.0.4
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling tapid-test-support v0.0.3 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-test-support)
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml v1.1.5+spec-1.1.0
+   Compiling synstructure v0.13.2
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling tapid-policy v0.0.4 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-policy)
+   Compiling icu_provider v2.3.1
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tapid-core v0.0.7 (/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/crates/tapid-core)
+    Finished `test` profile [unoptimized] target(s) in 12.30s
+     Running unittests src/lib.rs (target/debug/deps/tapid_runner-5a1fa140dd286144)
+
+running 177 tests
+test config::tests::accepts_portable_names_that_only_contain_reserved_name_substrings ... ok
+test config::configured_defaults_distinguish_an_explicit_ceiling_from_implicit_defaults ... ok
+test config::tests::empty_config_uses_required_project_only_defaults ... ok
+test config::tests::exact_profile_lookup_never_falls_back_to_defaults ... ok
+test config::tests::assurance_defaults_to_managed_tree_and_can_be_restricted_explicitly ... ok
+test config::tests::accepts_standard_toml_strings_comments_and_multiline_arrays ... ok
+test config::tests::defaults_are_fail_closed_and_profiles_override_individual_fields ... ok
+test config::tests::filesystem_policy_bounds_grant_string_bytes_at_the_published_limit ... ok
+test config::tests::accepts_registry_configuration_alongside_strict_run_policy ... ok
+test config::tests::public_policy_constructors_validate_untrusted_values ... ok
+test config::tests::filesystem_policy_bounds_total_grant_count_at_the_published_limit ... ok
+test config::tests::profile_lookup_is_exact_and_deterministic ... ok
+test config::tests::parsing_bounds_profile_name_bytes_at_the_published_limit ... ok
+test config::tests::rejects_absolute_traversing_and_backslash_grants_on_every_platform ... ok
+test config::tests::rejects_invalid_environment_names ... ok
+test config::tests::parsing_applies_environment_count_limit_to_every_profile ... ok
+test config::tests::rejects_nonportable_and_ambiguous_grant_components_on_every_platform ... ok
+test config::tests::sandbox_policy_bounds_environment_name_bytes_at_the_published_limit ... ok
+test config::tests::sandbox_policy_bounds_environment_count_at_the_published_limit ... ok
+test config::tests::rejects_zero_and_overflowing_limits ... ok
+test config::tests::rejects_unknown_keys_and_malformed_field_types ... ok
+test config::tests::parsing_bounds_script_profile_count_at_the_published_limit ... ok
+
+running 1 test
+test execution::platform_backend::tests::closed_live_sink_sets_the_supervisor_failure_signal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 176 filtered out; finished in 0.00s
+
+test execution::platform_backend::tests::closed_live_sink_sets_the_supervisor_failure_signal ... ok
+test config::tests::parsing_rejects_config_bytes_above_the_published_limit ... ok
+test execution::platform_backend::tests::child_gets_only_validated_environment_null_stdin_and_fidelity_preserved_arguments ... FAILED
+test execution::platform_backend::tests::held_output_pipe_is_bounded_and_does_not_hang_completion ... FAILED
+test execution::platform_backend::tests::inherited_authority_does_not_cross_fork_exec_setsid_or_double_fork ... FAILED
+test execution::platform_backend::tests::compiled_filesystem_rules_match_typed_effective_authority ... ok
+test execution::platform_backend::tests::group_signal_is_never_attempted_after_leader_is_reaped ... ok
+test execution::platform_backend::tests::inherited_regular_connected_and_listening_descriptors_are_closed ... FAILED
+test execution::platform_backend::tests::launch_confirmation_distinguishes_exec_failure_from_target_exit_71 ... FAILED
+sandbox-exec: unbound variable: this-operation-does-not-exist at <input string>, line 1, column 13
+
+Backtrace: 
+<input string>:1:13:
+	this-operation-does-not-exist
+
+test execution::platform_backend::tests::malformed_and_unavailable_sandbox_launchers_fail_before_target_marker ... ok
+test execution::platform_backend::tests::death_after_profile_application_without_exec_never_issues_a_receipt ... ok
+test execution::platform_backend::tests::managed_tree_and_every_resource_limit_fail_closed ... ok
+test execution::platform_backend::tests::missing_early_initializer_fails_before_spawn ... ok
+test execution::platform_backend::tests::native_execution_preserves_empty_path_and_non_utf8_arguments ... FAILED
+test execution::platform_backend::tests::network_false_denies_tcp_bind_and_connect_unix_sockets_dns_and_reserved_connect ... FAILED
+test execution::platform_backend::tests::output_reader_sets_overflow_without_growing_past_internal_ceiling ... ok
+test execution::platform_backend::tests::output_readers_accept_combined_output_at_or_below_internal_ceiling ... ok
+test execution::platform_backend::tests::malformed_native_profile_fails_before_target_marker ... ok
+test execution::platform_backend::tests::path_alias_symlink_rename_hardlink_and_hostile_parameter_inputs_do_not_escape ... FAILED
+test execution::platform_backend::tests::output_readers_enforce_one_combined_internal_ceiling ... ok
+test execution::platform_backend::tests::private_helper_closes_unexpected_descriptors_before_target_exec ... ok
+test execution::platform_backend::tests::private_protocol_rejects_version_nonce_kind_and_short_frames ... ok
+test execution::platform_backend::tests::bounded_live_sink_preserves_normal_output_exactly_once ... ok
+test execution::platform_backend::tests::first_support_probe_preserves_occupied_fd_100_during_concurrent_churn ... FAILED
+test execution::platform_backend::tests::project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime ... FAILED
+test execution::platform_backend::tests::reserved_node_cleans_after_subprocess_denied_root_exit ... FAILED
+test execution::platform_backend::tests::helper_dead_after_ready_before_go_cannot_confirm_exec ... ok
+test execution::platform_backend::tests::reserved_node_executes_snapshot_after_source_rename ... FAILED
+test execution::platform_backend::tests::prepared_launch_revalidates_identities_and_cleans_failed_attempts ... ok
+test execution::platform_backend::tests::live_sink_exec_closes_unrelated_inheritable_descriptors ... ok
+test execution::platform_backend::tests::reserved_node_preserves_native_bytes_and_exact_empty_caller_path ... FAILED
+test execution::platform_backend::tests::reserved_node_is_a_verified_snapshot_and_detects_tampering ... ok
+test execution::platform_backend::tests::reserved_node_rejects_a_runtime_under_project_write_authority ... FAILED
+test execution::platform_backend::tests::reserved_snapshot_creation_failure_removes_private_directory ... ok
+test execution::platform_backend::tests::securely_materializing_a_write_grant_rejects_a_symlink_component ... ok
+test execution::platform_backend::tests::snapshot_dependency_parser_fails_closed ... ok
+test execution::platform_backend::tests::subprocess_false_denies_fork_but_allows_exec_replacement ... FAILED
+test execution::platform_backend::tests::support_evidence_identifies_native_generated_policy_controls ... FAILED
+test execution::platform_backend::tests::reserved_node_rejects_relative_and_aliased_project_temp_write_authority ... ok
+test execution::platform_backend::tests::surviving_descendant_keeps_reserved_node_after_root_receipt ... FAILED
+test execution::tests::backend_devices_are_explicit_typed_and_identity_checked ... ok
+test execution::tests::backend_identity_is_checked_and_bounded ... ok
+test execution::tests::backend_memory_termination_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_output_over_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory ... FAILED
+test execution::tests::backend_output_termination_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_process_termination_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::backend_timeout_without_exact_preflight_limit_is_rejected_after_spawn ... ok
+test execution::tests::canonical_resolution_aliases_are_rejected_deterministically ... ok
+test execution::tests::captured_output_accounting_rejects_length_overflow ... ok
+test execution::tests::backend_terminations_coherent_with_exact_preflight_limits_are_accepted ... ok
+test execution::tests::checked_outcome_accepts_success_only_with_a_complete_receipt ... ok
+test execution::tests::checked_receipt_rejects_disabled_sandbox_policy ... ok
+test execution::tests::checked_receipt_rejects_every_extra_or_missing_dimension ... ok
+test execution::tests::checked_receipt_requires_declared_and_observed_evidence ... ok
+test execution::tests::complete_environment_block_limit_counts_mandatory_path ... ok
+test execution::tests::complete_environment_combined_bound_includes_joined_path_and_has_no_off_by_one ... ok
+test execution::tests::completion_keeps_backend_observation_evidence ... ok
+test execution::tests::completion_evidence_is_distinct_and_managed_tree_requires_complete_cleanup ... ok
+test execution::tests::disabled_mode_makes_zero_prepare_attempts ... ok
+test execution::tests::every_search_directory_is_bounded_and_joinable_before_duplicate_comparison ... ok
+test execution::tests::empty_search_list_produces_an_explicitly_empty_child_path ... ok
+test execution::tests::explicit_environment_must_be_named_and_allowlisted_by_policy ... ok
+test execution::tests::invalid_backend_identity_prevents_runtime_additions_and_spawn ... ok
+test execution::tests::executable_search_path_payload_bounds_and_duplicates_are_rejected ... ok
+test execution::tests::invalid_search_directories_fail_generic_preflight_before_spawn ... ok
+test execution::tests::invocation_policy_ceiling_checks_alias_destinations_inside_the_project ... ok
+test execution::tests::invocation_policy_ceiling_checks_canonical_scopes_and_component_boundaries ... ok
+test execution::tests::invocation_policy_ceiling_preserves_assurance_and_all_resource_limits ... ok
+test execution::tests::invocation_policy_ceiling_rejects_widening_before_backend_support_checks ... ok
+test execution::tests::invocation_policy_ceiling_preserves_network_environment_and_subprocess_denials ... ok
+test execution::tests::malformed_request_is_rejected_before_support_probing ... ok
+test execution::tests::malformed_supported_preflight_makes_zero_prepare_attempts ... ok
+test execution::tests::malformed_search_path_payload_is_rejected_before_support_probing ... ok
+test execution::tests::managed_tree_reports_lifecycle_ownership_as_an_independent_dimension ... ok
+test execution::tests::missing_dimension_metadata_fails_before_spawn ... ok
+test execution::tests::managed_completion_confirms_only_lifecycle_and_cleanup_dimensions ... ok
+test execution::tests::missing_read_grant_fails_before_backend_binding_or_spawn ... ok
+test execution::tests::missing_write_requires_adapter_materialization_and_never_prepares_by_default ... ok
+test execution::tests::native_object_binding_holds_identity_and_receipt_reports_it ... ok
+test execution::tests::native_restricted_backend_denies_an_outside_write ... FAILED
+test execution::tests::native_restricted_backend_executes_an_allowed_project_operation ... FAILED
+test execution::tests::noncanonical_runtime_additions_fail_before_spawn ... ok
+test execution::tests::native_write_grant_does_not_imply_read_authority ... FAILED
+test execution::tests::over_limit_complete_environment_is_rejected_before_support_probing ... ok
+test execution::tests::post_spawn_failure_returns_only_after_checked_cleanup ... ok
+test execution::tests::process_memory_stats_access_is_rejected_off_linux ... ok
+test execution::tests::process_creation_error_cannot_escape_owned_cleanup ... ok
+test execution::tests::project_policy_rejects_devices_and_special_files ... ok
+test execution::tests::project_root_limit_and_nul_are_rejected_before_support_probing ... ok
+test execution::tests::public_outcome_contract_distinguishes_termination_and_enforcement ... ok
+test execution::tests::receipt_grants_expose_declared_kind_source_access_and_binding ... ok
+test execution::tests::request_builder_preserves_an_explicit_validated_contract ... ok
+test execution::tests::request_builder_preserves_ordered_executable_search_paths ... ok
+test execution::tests::request_builder_preserves_windows_verbatim_boundary_contract ... ok
+test execution::tests::receipt_keeps_launch_establishment_evidence_distinct_from_support_observation ... ok
+test execution::tests::request_payload_limits_and_nul_are_enforced ... ok
+test execution::tests::request_keeps_policy_root_while_selecting_contained_working_directory ... ok
+test execution::tests::request_rejects_working_directory_outside_policy_root ... ok
+test execution::tests::requested_evidence_distinguishes_subprocess_denial_from_descendant_lifecycle ... ok
+test execution::tests::requested_resource_evidence_reports_each_configured_limit_independently ... ok
+test execution::tests::resolved_policy_rejects_omitted_or_extra_receipt_grants ... ok
+test execution::tests::required_mode_preflight_fails_before_a_child_can_create_a_marker ... ok
+
+thread 'execution::platform_backend::tests::descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full' (32021459) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:50:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test execution::tests::restricted_completion_does_not_reconfirm_launch_dimensions ... ok
+test execution::tests::resolved_preflight_is_the_only_source_of_receipt_filesystem_grants ... ok
+test execution::tests::restricted_separates_authority_containment_from_managed_tree_ownership ... ok
+test execution::tests::search_directories_are_ordered_backend_runtime_receipt_grants ... ok
+test execution::tests::support_models_declared_and_observed_evidence_separately ... ok
+test execution::tests::support_reports_each_dimension_with_scope_mechanism_and_limitations ... ok
+test execution::tests::trusted_node_runtime_identity_is_retained_and_revalidated ... ok
+test execution::tests::symlink_escape_in_project_grant_fails_before_spawn ... ok
+test execution::tests::unix_request_preserves_non_utf8_values_but_rejects_nul ... ok
+test execution::tests::unix_search_directory_must_match_native_join_paths_semantics ... ok
+test execution::tests::unsupported_backend_support_report_does_not_claim_execution ... ok
+test execution::tests::unsupported_preflight_makes_zero_prepare_attempts ... ok
+test execution::tests::windows_alias_helper_rejects_ascii_case_equivalent_paths ... ok
+test execution::tests::windows_child_path_strips_extended_prefixes_from_search_directories ... ok
+test execution::tests::windows_command_line_bound_counts_full_worst_case_serialization ... ok
+test execution::tests::windows_command_line_bound_accepts_at_limit_conservative_cases ... ok
+test execution::tests::windows_command_line_bound_rejects_the_prior_raw_unit_limit ... ok
+test execution::tests::windows_command_line_preserves_validated_verbatim_command_payload ... ok
+test execution::tests::windows_command_line_serializes_quoted_arguments_and_trailing_backslashes ... ok
+test execution::tests::windows_environment_block_rejects_case_insensitive_duplicate_names ... ok
+test execution::tests::windows_environment_block_pins_the_host_local_appdata_for_appcontainer_creation ... ok
+test execution::tests::windows_join_paths_helper_matches_quoted_separator_semantics ... ok
+test execution::tests::windows_environment_block_sorts_names_and_has_double_termination ... ok
+test execution::tests::windows_verbatim_boundary_rejects_non_cmd_shapes_and_line_injection ... ok
+test execution::platform_backend::tests::real_pipe_protocol_failures_have_no_receipt_and_reap_the_helper ... FAILED
+test execution::platform_backend::tests::descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full ... FAILED
+test execution::windows_cancellation::tests::cancellation_during_drain_or_cleanup_is_retained_at_finish ... ok
+test execution::windows_cancellation::tests::counter_overflow_does_not_activate_a_scope ... ok
+test execution::windows_cancellation::tests::finished_scope_does_not_swallow_ctrl_c ... ok
+test execution::platform_backend::tests::reserved_node_executes_standalone_macho ... FAILED
+test execution::windows_cancellation::tests::finishing_one_scope_preserves_other_active_scopes ... ok
+test execution::windows_cancellation::tests::later_execution_does_not_inherit_an_earlier_ctrl_c ... ok
+test execution::windows_evidence::tests::windows_launch_metadata_passes_checked_evidence_validation ... ok
+test lifecycle::tests::approval_requires_exact_version_archive_and_script ... ok
+test lifecycle::tests::approvals_reject_loader_controls_before_launch ... ok
+test lifecycle::tests::approvals_reject_tool_names_that_collide_as_windows_executables ... ok
+test execution::windows_cancellation::tests::racing_finish_and_ctrl_c_agree_on_event_ownership ... ok
+test lifecycle::tests::approvals_require_an_exact_pinned_shell_name ... ok
+test lifecycle::tests::approvals_require_limits_and_reject_unknown_or_unsafe_authority ... ok
+test tests::approval_binds_exact_artifact_and_normalized_script ... ok
+test tests::approval_cannot_override_policy_denial ... ok
+test lifecycle::tests::derived_identity_changes_with_policy_script_source_toolchain_and_graph ... ok
+test tests::changed_script_cannot_reuse_approval ... ok
+test tests::existing_public_api_remains_source_compatible ... ok
+test tests::unattended_promptable_evidence_fails_closed ... ok
+test tests::unsupported_os_is_explicit_and_not_containment ... ok
+test execution::platform_backend::tests::unread_parent_output_pipes_fail_bounded_and_clean_the_target ... FAILED
+test execution::uncontained::tests::uncontained_execution_clears_ambient_environment_and_uses_null_stdin ... ok
+test execution::uncontained::tests::uncontained_signal_termination_preserves_the_actual_signal ... ok
+test execution::platform_backend::tests::lowered_nofile_never_leaks_authority_through_helper_exec ... ok
+test execution::platform_backend::tests::reserved_node_rejects_nonrelocatable_macho ... ok
+test execution::uncontained::tests::uncontained_root_timeout_and_output_checks_produce_no_receipt ... ok
+
+failures:
+
+---- execution::platform_backend::tests::child_gets_only_validated_environment_null_stdin_and_fidelity_preserved_arguments stdout ----
+
+thread 'execution::platform_backend::tests::child_gets_only_validated_environment_null_stdin_and_fidelity_preserved_arguments' (32021328) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1962:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- execution::platform_backend::tests::held_output_pipe_is_bounded_and_does_not_hang_completion stdout ----
+
+thread 'execution::platform_backend::tests::held_output_pipe_is_bounded_and_does_not_hang_completion' (32021345) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:50:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::inherited_authority_does_not_cross_fork_exec_setsid_or_double_fork stdout ----
+
+thread 'execution::platform_backend::tests::inherited_authority_does_not_cross_fork_exec_setsid_or_double_fork' (32021366) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:50:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::inherited_regular_connected_and_listening_descriptors_are_closed stdout ----
+
+thread 'execution::platform_backend::tests::inherited_regular_connected_and_listening_descriptors_are_closed' (32021368) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:50:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::launch_confirmation_distinguishes_exec_failure_from_target_exit_71 stdout ----
+
+thread 'execution::platform_backend::tests::launch_confirmation_distinguishes_exec_failure_from_target_exit_71' (32021369) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1266:9:
+assertion `left == right` failed
+  left: UnsupportedContainment
+ right: Spawn
+
+---- execution::platform_backend::tests::native_execution_preserves_empty_path_and_non_utf8_arguments stdout ----
+
+thread 'execution::platform_backend::tests::native_execution_preserves_empty_path_and_non_utf8_arguments' (32021386) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1202:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::network_false_denies_tcp_bind_and_connect_unix_sockets_dns_and_reserved_connect stdout ----
+
+thread 'execution::platform_backend::tests::network_false_denies_tcp_bind_and_connect_unix_sockets_dns_and_reserved_connect' (32021387) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:50:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::path_alias_symlink_rename_hardlink_and_hostile_parameter_inputs_do_not_escape stdout ----
+
+thread 'execution::platform_backend::tests::path_alias_symlink_rename_hardlink_and_hostile_parameter_inputs_do_not_escape' (32021402) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:2090:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::first_support_probe_preserves_occupied_fd_100_during_concurrent_churn stdout ----
+
+thread 'execution::platform_backend::tests::first_support_probe_preserves_occupied_fd_100_during_concurrent_churn' (32021338) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1512:13:
+probe child failed with exit status: 1
+
+---- execution::platform_backend::tests::project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime stdout ----
+
+thread 'execution::platform_backend::tests::project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime' (32021412) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:578:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::reserved_node_cleans_after_subprocess_denied_root_exit stdout ----
+
+thread 'execution::platform_backend::tests::reserved_node_cleans_after_subprocess_denied_root_exit' (32021419) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:207:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::reserved_node_executes_snapshot_after_source_rename stdout ----
+
+thread 'execution::platform_backend::tests::reserved_node_executes_snapshot_after_source_rename' (32021433) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:447:82:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::reserved_node_preserves_native_bytes_and_exact_empty_caller_path stdout ----
+
+thread 'execution::platform_backend::tests::reserved_node_preserves_native_bytes_and_exact_empty_caller_path' (32021441) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:249:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::reserved_node_rejects_a_runtime_under_project_write_authority stdout ----
+
+thread 'execution::platform_backend::tests::reserved_node_rejects_a_runtime_under_project_write_authority' (32021444) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:518:5:
+assertion `left == right` failed
+  left: UnsupportedContainment
+ right: PolicyViolation
+
+---- execution::platform_backend::tests::subprocess_false_denies_fork_but_allows_exec_replacement stdout ----
+
+thread 'execution::platform_backend::tests::subprocess_false_denies_fork_but_allows_exec_replacement' (32021465) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:50:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::support_evidence_identifies_native_generated_policy_controls stdout ----
+
+thread 'execution::platform_backend::tests::support_evidence_identifies_native_generated_policy_controls' (32021466) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1111:5:
+ContainmentSupport { availability: Unsupported, backend: BackendIdentity { name: "tapid-runner/macos-seatbelt-restricted-experimental", version: "0.0.7; macOS 27.0.1 build 26A434", deprecation: Some("deprecated/private native Seatbelt backend; experimental and not a ManagedTree boundary") }, platform: Some("macos"), reason: Some("native probe profile installation failed"), requested: EnforcementDimensions { filesystem_read: true, filesystem_write: true, network: true, environment_sanitization: true, descriptor_hygiene: true, subprocess_restriction: true, descendant_authority_propagation: true, descendant_lifecycle: false, process_tree_membership: false, complete_cleanup: false, timeout: false, output: false, process_count: false, memory: false }, declared: EnforcementDimensions { filesystem_read: false, filesystem_write: false, network: false, environment_sanitization: false, descriptor_hygiene: false, subprocess_restriction: false, descendant_authority_propagation: false, descendant_lifecycle: false, process_tree_membership: false, complete_cleanup: false, timeout: false, output: false, process_count: false, memory: false }, observed: EnforcementDimensions { filesystem_read: false, filesystem_write: false, network: false, environment_sanitization: false, descriptor_hygiene: false, subprocess_restriction: false, descendant_authority_propagation: false, descendant_lifecycle: false, process_tree_membership: false, complete_cleanup: false, timeout: false, output: false, process_count: false, memory: false }, declared_evidence: [], observed_evidence: [] }
+
+---- execution::platform_backend::tests::surviving_descendant_keeps_reserved_node_after_root_receipt stdout ----
+
+thread 'execution::platform_backend::tests::surviving_descendant_keeps_reserved_node_after_root_receipt' (32021467) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:152:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory stdout ----
+
+thread 'execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory' (32021418) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:947:5:
+
+running 1 test
+test execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory ... FAILED
+
+failures:
+
+failures:
+    execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 176 filtered out; finished in 0.06s
+
+ 
+thread 'execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory' (32021422) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:924:26:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- execution::tests::native_restricted_backend_denies_an_outside_write stdout ----
+
+thread 'execution::tests::native_restricted_backend_denies_an_outside_write' (32021524) panicked at crates/tapid-runner/src/execution/tests.rs:2983:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::tests::native_restricted_backend_executes_an_allowed_project_operation stdout ----
+
+thread 'execution::tests::native_restricted_backend_executes_an_allowed_project_operation' (32021525) panicked at crates/tapid-runner/src/execution/tests.rs:2928:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::tests::native_write_grant_does_not_imply_read_authority stdout ----
+
+thread 'execution::tests::native_write_grant_does_not_imply_read_authority' (32021526) panicked at crates/tapid-runner/src/execution/tests.rs:3021:37:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::real_pipe_protocol_failures_have_no_receipt_and_reap_the_helper stdout ----
+
+thread 'execution::platform_backend::tests::real_pipe_protocol_failures_have_no_receipt_and_reap_the_helper' (32021413) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:862:13:
+valid real-pipe control failed: Err(ExecutionError { category: UnsupportedContainment, message: "cannot issue an enforcement receipt for unsupported containment", completion: None })
+
+---- execution::platform_backend::tests::descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full stdout ----
+
+thread 'execution::platform_backend::tests::descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full' (32021333) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1453:17:
+lowered child failed with exit status: 101
+
+---- execution::platform_backend::tests::reserved_node_executes_standalone_macho stdout ----
+
+thread 'execution::platform_backend::tests::reserved_node_executes_standalone_macho' (32021434) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:366:51:
+called `Result::unwrap()` on an `Err` value: ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None }
+
+---- execution::platform_backend::tests::unread_parent_output_pipes_fail_bounded_and_clean_the_target stdout ----
+
+thread 'execution::platform_backend::tests::unread_parent_output_pipes_fail_bounded_and_clean_the_target' (32021470) panicked at crates/tapid-runner/src/macos_restricted/tests.rs:1579:5:
+bounded sink path failed its assertions
+
+
+failures:
+    execution::platform_backend::tests::child_gets_only_validated_environment_null_stdin_and_fidelity_preserved_arguments
+    execution::platform_backend::tests::descriptor_sanitation_is_bounded_for_huge_limits_and_fails_closed_when_full
+    execution::platform_backend::tests::first_support_probe_preserves_occupied_fd_100_during_concurrent_churn
+    execution::platform_backend::tests::held_output_pipe_is_bounded_and_does_not_hang_completion
+    execution::platform_backend::tests::inherited_authority_does_not_cross_fork_exec_setsid_or_double_fork
+    execution::platform_backend::tests::inherited_regular_connected_and_listening_descriptors_are_closed
+    execution::platform_backend::tests::launch_confirmation_distinguishes_exec_failure_from_target_exit_71
+    execution::platform_backend::tests::native_execution_preserves_empty_path_and_non_utf8_arguments
+    execution::platform_backend::tests::network_false_denies_tcp_bind_and_connect_unix_sockets_dns_and_reserved_connect
+    execution::platform_backend::tests::path_alias_symlink_rename_hardlink_and_hostile_parameter_inputs_do_not_escape
+    execution::platform_backend::tests::project_hardlink_cannot_mutate_reserved_node_or_trusted_runtime
+    execution::platform_backend::tests::real_pipe_protocol_failures_have_no_receipt_and_reap_the_helper
+    execution::platform_backend::tests::reserved_execution_failures_leave_no_receipt_or_private_directory
+    execution::platform_backend::tests::reserved_node_cleans_after_subprocess_denied_root_exit
+    execution::platform_backend::tests::reserved_node_executes_snapshot_after_source_rename
+    execution::platform_backend::tests::reserved_node_executes_standalone_macho
+    execution::platform_backend::tests::reserved_node_preserves_native_bytes_and_exact_empty_caller_path
+    execution::platform_backend::tests::reserved_node_rejects_a_runtime_under_project_write_authority
+    execution::platform_backend::tests::subprocess_false_denies_fork_but_allows_exec_replacement
+    execution::platform_backend::tests::support_evidence_identifies_native_generated_policy_controls
+    execution::platform_backend::tests::surviving_descendant_keeps_reserved_node_after_root_receipt
+    execution::platform_backend::tests::unread_parent_output_pipes_fail_bounded_and_clean_the_target
+    execution::tests::native_restricted_backend_denies_an_outside_write
+    execution::tests::native_restricted_backend_executes_an_allowed_project_operation
+    execution::tests::native_write_grant_does_not_imply_read_authority
+
+test result: FAILED. 152 passed; 25 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+
+error: test failed, to rerun pass `-p tapid-runner --lib`

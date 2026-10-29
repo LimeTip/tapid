@@ -1,0 +1,33 @@
+Architecture review recommended:
+- crates/tapid-archive/src/lib.rs: 1700 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/application/dependency_scripts.rs: 1135 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/application/install.rs: 1241 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/application/install_outcome_tests.rs: 2050 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/application/lifecycle.rs: 1004 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/application/replay.rs: 841 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/application/upgrade.rs: 1026 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/filesystem/activation.rs: 1169 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/filesystem/lifecycle_journal.rs: 962 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/filesystem/tree.rs: 1523 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/online.rs: 1352 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-cli/src/online/resolution.rs: 949 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-linker/src/layout.rs: 1402 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-lockfile/src/model.rs: 1443 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-lockfile/src/npm_import/parse.rs: 847 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-manifest/src/workspace.rs: 960 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-registry-client/src/npm.rs: 1133 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-registry-client/src/transport.rs: 1033 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-resolver/src/lib.rs: 1190 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/config.rs: 968 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/execution.rs: 1843 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/execution/request.rs: 1101 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/linux_restricted.rs: 1345 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/macos_restricted.rs: 1927 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/windows_compat/dll.rs: 1022 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/windows_execution.rs: 958 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/windows_filesystem.rs: 1899 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/windows_job_tests.rs: 1240 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/windows_network.rs: 1010 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-runner/src/windows_write_validation.rs: 969 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+- crates/tapid-store/src/lib.rs: 1729 physical lines exceeds the 800-line review recommendation; review cohesion, module depth, and navigability before deciding whether to split it
+Architecture check passed: 186 production Rust files scanned

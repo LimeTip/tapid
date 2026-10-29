@@ -1,0 +1,10 @@
+{
+  "command": [
+    "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+    "lineage"
+  ],
+  "status": 0,
+  "signal": null,
+  "stdout": "candidate=unsandboxed-diagnostic requested=observed-lineage enforced=none authoritative_boundary=none candidate_cleanup=none\nworker acknowledged child=94060; exiting without candidate cleanup\ncase=ordinary worker_status=exit status: 0 acknowledgement=\"pid=94060 ppid=94058 pgid=93969 sid=93969\\n\" delayed_marker=true elapsed_us=513526 verdict=diagnostic-only harness_rescue=finite-child-self-expiry\nworker acknowledged child=94097; exiting without candidate cleanup\ncase=setsid worker_status=exit status: 0 acknowledgement=\"pid=94097 ppid=94096 pgid=94097 sid=94097\\n\" delayed_marker=true elapsed_us=377200 verdict=diagnostic-only harness_rescue=finite-child-self-expiry\nworker acknowledged child=94150; exiting without candidate cleanup\ncase=setpgid worker_status=exit status: 0 acknowledgement=\"pid=94150 ppid=94148 pgid=94150 sid=93969\\n\" delayed_marker=true elapsed_us=376549 verdict=diagnostic-only harness_rescue=finite-child-self-expiry\nworker acknowledged child=94216; exiting without candidate cleanup\ncase=double-fork worker_status=exit status: 0 acknowledgement=\"pid=94218 ppid=1 pgid=94218 sid=94218\\n\" delayed_marker=true elapsed_us=552943 verdict=diagnostic-only harness_rescue=finite-child-self-expiry\n",
+  "stderr": ""
+}

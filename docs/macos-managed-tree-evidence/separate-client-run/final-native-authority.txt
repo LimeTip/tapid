@@ -1,0 +1,50 @@
+authority_payload_begin depth=root pid=97791 session=97781
+authority_operation="outside read" observed=allowed expected=allowed
+authority_operation="outside write" observed=allowed expected=allowed
+authority_operation="symlink outside read" observed=allowed expected=allowed
+authority_operation="symlink outside write" observed=allowed expected=allowed
+authority_operation="parent traversal read" observed=allowed expected=allowed
+authority_operation="local TCP connect" observed=allowed expected=allowed
+authority_operation="local UDP bind" observed=allowed expected=allowed
+authority_operation="local Unix connect" observed=allowed expected=allowed
+authority depth=root paired_controls=completed expectation=positive inherited_descriptors=unverified system_brokers=unverified privileged_helpers=unverified
+authority_payload_begin depth=leaf pid=97792 session=97781
+authority_operation="outside read" observed=allowed expected=allowed
+authority_operation="outside write" observed=allowed expected=allowed
+authority_operation="symlink outside read" observed=allowed expected=allowed
+authority_operation="symlink outside write" observed=allowed expected=allowed
+authority_operation="parent traversal read" observed=allowed expected=allowed
+authority_operation="local TCP connect" observed=allowed expected=allowed
+authority_operation="local UDP bind" observed=allowed expected=allowed
+authority_operation="local Unix connect" observed=allowed expected=allowed
+authority depth=leaf paired_controls=completed expectation=positive inherited_descriptors=unverified system_brokers=unverified privileged_helpers=unverified
+authority_payload_begin depth=detached pid=97793 session=97793
+authority_operation="outside read" observed=allowed expected=allowed
+authority_operation="outside write" observed=allowed expected=allowed
+authority_operation="symlink outside read" observed=allowed expected=allowed
+authority_operation="symlink outside write" observed=allowed expected=allowed
+authority_operation="parent traversal read" observed=allowed expected=allowed
+authority_operation="local TCP connect" observed=allowed expected=allowed
+authority_operation="local UDP bind" observed=allowed expected=allowed
+authority_operation="local Unix connect" observed=allowed expected=allowed
+authority depth=detached paired_controls=completed expectation=positive inherited_descriptors=unverified system_brokers=unverified privileged_helpers=unverified
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "authority"
+candidate = "seatbelt-public-execute"
+requested = "Restricted filesystem/network propagation"
+available = "process observations only; no authoritative boundary"
+observed = 'positive=exit status: 0; candidate=Err(ExecutionError { category: UnsupportedContainment, message: "sandbox containment is unavailable on macos: native probe profile installation failed", completion: None })'
+enforced = "none"
+threshold = 0
+units = "no resource threshold requested"
+setup_ready = false
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+probe setup failure: candidate authority controls unavailable or failed

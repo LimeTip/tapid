@@ -1,0 +1,24 @@
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "cpu-off"
+candidate = "per-process-rlimit"
+requested = "tree-wide limit via scoped rlimit comparison"
+available = "process observations only; no authoritative boundary"
+observed = """
+status=exit status: 0; elapsed_ms=1612; signal=None; scoped_ready mode=cpu-off pid=89707 session=89707
+scoped_completed mode=cpu-off
+; no aggregate accounting; no process admission or combined pipe-output enforcement"""
+enforced = "none"
+threshold = 1
+units = "CPU seconds per process; 1600ms finite wall workload"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+probe setup failure: scoped control mismatch mode=cpu status=signal: 24 (SIGXCPU) output=scoped_ready mode=cpu pid=89714 session=89714
+

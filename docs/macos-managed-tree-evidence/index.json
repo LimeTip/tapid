@@ -1,0 +1,205 @@
+{
+  "schema": 1,
+  "status": "incomplete-development-investigation",
+  "recordedAt": "2026-10-27T09:42:43.333Z",
+  "baseRevision": "3d9461fbeef33ab66c35a63fa1cf4b2d06437677",
+  "dirty": true,
+  "sourceFingerprintScope": "final research executable and native fixtures only; production unchanged; report/evidence excluded to avoid self-reference",
+  "sourceFiles": [
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe.rs",
+      "sha256": "fd1f4b869a15a448fd3e66478110ca3ebdc0de6517e29f95cb2bd8f82b9c85ad"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/probe.rs",
+      "sha256": "ae162929ebfe1093fe5167da89262ac9ee90c6fa2515db84cf31749956c429e8"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/xpc.rs",
+      "sha256": "9e819750e51efc69d9653fbcd095187f79f0b1914517cdab5e6956b422bf9eec"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/app.plist",
+      "sha256": "78d5577f942643649df16ec626f2ba017e1d16bbe10b644540aeb4fe16977cfe"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/bridge.c",
+      "sha256": "141be8d2d4f5767895affe797a1eab95cfb3f459c33e8420530f0cdc87c7d86e"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/entitlements.plist",
+      "sha256": "baa050bc06d89900bed3bb4954acdf2f17c4f47e259b1870f889d4a301fbcaf4"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/worker.plist",
+      "sha256": "711bea6d7dffe773340b51364b5db46f902a1fb58d459dc878e3f683b16bf5cd"
+    }
+  ],
+  "sourceFingerprint": "dc5a43f2a9be733dd8a5f0651c694482e5f2ebc50c8c8dcc670ff78ef21ba7fd",
+  "binaries": [
+    {
+      "path": "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "sha256": "7dd6d39b2d7dc065698e7b09c465dd2ac9e6a02aefea80007f9c742873325a80"
+    },
+    {
+      "path": "target/macos-managed-tree-research/Probe.app/Contents/MacOS/Probe",
+      "sha256": "37d418276cc9c1e198d9c6d43b34e217efbc2ee6e65c7bd00f776e21d8e8b251"
+    },
+    {
+      "path": "target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib",
+      "sha256": "58a73be36a89f2807dddbbcf0bf2978cc070e09466755e752d2c93cce6b27292"
+    },
+    {
+      "path": "target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/Worker",
+      "sha256": "413669616898ff2d67a169c6de33b8a70696d25a4c1a836d94518f7171a0c239"
+    }
+  ],
+  "build": {
+    "command": "node --experimental-strip-types scripts/dev.ts build -p tapid-runner --example macos_managed_tree_probe --locked --message-format=json",
+    "node": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+    "env": {
+      "CARGO_TARGET_DIR": "target",
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0",
+      "PATH_prefix": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin"
+    },
+    "exitCode": 0,
+    "executableResolution": "compiler-artifact executable field"
+  },
+  "checks": [
+    {
+      "name": "focused-production-rejection",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0,
+      "source": "unchanged production source; before research implementation",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_tree_and_every_resource_limit_fail_closed"
+    },
+    {
+      "name": "example-tests",
+      "exitCode": 0,
+      "passed": 2,
+      "failed": 0,
+      "source": "final probe source",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts test -p tapid-runner --example macos_managed_tree_probe --locked"
+    },
+    {
+      "name": "workspace-clippy-all-targets-all-features",
+      "exitCode": 0,
+      "source": "final probe source",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts clippy --workspace --all-targets --all-features --locked -- -D warnings"
+    },
+    {
+      "name": "workspace-fmt-check",
+      "exitCode": 0,
+      "source": "final probe source",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts fmt --all --check"
+    },
+    {
+      "name": "architecture",
+      "exitCode": 0,
+      "source": "final probe source",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types tools/check_architecture.ts"
+    },
+    {
+      "name": "runner-all-targets",
+      "exitCode": 101,
+      "passed": 152,
+      "failed": 25,
+      "source": "before final double-fork fixture addition; production unchanged",
+      "limitation": "native support/profile installation and dependent assertions failed",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts test -p tapid-runner --all-targets --locked"
+    },
+    {
+      "name": "workspace-all-feature-tests",
+      "exitCode": 101,
+      "source": "before final double-fork fixture addition",
+      "limitation": "ENOSPC build/link failure; retried after cargo clean and disabled debug/incremental output",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked"
+    },
+    {
+      "name": "integration-workspace-tests",
+      "exitCode": 101,
+      "source": "before final double-fork fixture addition",
+      "limitation": "ENOSPC compilation failure",
+      "command": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node --experimental-strip-types scripts/dev.ts test --manifest-path tests/integration/Cargo.toml --locked"
+    }
+  ],
+  "nativeResults": {
+    "rejection": 2,
+    "lineage": 0,
+    "xpc": 2,
+    "seatbeltSetup": 71
+  },
+  "artifacts": [
+    {
+      "path": "rejection.json",
+      "sha256": "e2819950fbcfb20839d193e9f4d947328670c951d55b5f6f5e446bd9d52f174f",
+      "bytes": 4040
+    },
+    {
+      "path": "lineage.json",
+      "sha256": "c717d9a120a33a1940b41e2a347bbe63e2f086d037353280ef1ee009d316d2d4",
+      "bytes": 1517
+    },
+    {
+      "path": "packaging.json",
+      "sha256": "e5e7624afb5f21675ea7063bf499a284ebec3ac5983ba4bbedc98a7460a4876f",
+      "bytes": 3981
+    },
+    {
+      "path": "seatbelt-setup.json",
+      "sha256": "0531b21df3db2c3562a091645b68edaafec426af282f6146cc1b54cf96246c45",
+      "bytes": 217
+    },
+    {
+      "path": "example-tests.txt",
+      "sha256": "fc00c0bd92b36e5f40d51ee0907d75670da187b3a59bdb617e2e0be3c1b61b62",
+      "bytes": 8634
+    },
+    {
+      "path": "runner-tests.txt",
+      "sha256": "be6216fad49f96777b8c40152eb7654f2a3e4c7f7d7c329571d817dc87729723",
+      "bytes": 45198
+    },
+    {
+      "path": "clippy.txt",
+      "sha256": "16781a37514b751253204f13e9ab4939cff1f3ec3b496056d732c9a15e3dc7c2",
+      "bytes": 16262
+    },
+    {
+      "path": "workspace-tests.txt",
+      "sha256": "a76ca3ff25fbd22d089cbf9a8af2747c2797a5a6176ef05161c3a55a672745de",
+      "bytes": 34140
+    },
+    {
+      "path": "integration-tests.txt",
+      "sha256": "ebcc3912aeedbef944d33df07c0640fec2524ec1f12e465d3d57c8ad206f12a8",
+      "bytes": 12770
+    },
+    {
+      "path": "architecture.txt",
+      "sha256": "b614a6eb58c6893a9965871c8bd167d57d7772e1fc4711c7ad0e7b15238772b9",
+      "bytes": 6085
+    },
+    {
+      "path": "fmt.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  ],
+  "limitations": [
+    "No ManagedTree support claim",
+    "No macOS 26 execution",
+    "XPC connection invalid before worker acknowledgement; cause unresolved",
+    "Full adversarial cleanup/accounting/authority matrix still requires implementation",
+    "No clean-tree acceptance or complete full-local-lane receipt"
+  ],
+  "sdkEvidence": {
+    "eventHeader": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sys/event.h",
+    "eventHeaderSha256": "b09a4fdd9e88a5c1c9a29bded36a6f8b96b39a3054f0075a07c19da587f0e062",
+    "recursiveTrackingUnsupportedLine": 356,
+    "publicCoalitionHeaderPresent": false
+  }
+}

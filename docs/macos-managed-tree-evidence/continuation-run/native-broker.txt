@@ -1,0 +1,19 @@
+--- research case ---
+verdict = "unverified"
+
+[observation]
+case = "broker"
+candidate = "unsandboxed-diagnostic"
+requested = "authenticated broader-authority broker control"
+available = "process observations only; no authoritative boundary"
+observed = "kernel peer UID and per-run capability checked; wrong capability, ungranted operation and truncated request denied; authorized fixed write succeeded. Same-process synthetic clients only; sandboxed and detached clients unverified; system brokers and privileged helpers unverified"
+enforced = "none"
+threshold = 4
+units = "fixed 33-byte requests; 250ms per stream; 3s accept deadline"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+

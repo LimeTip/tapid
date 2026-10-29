@@ -1,0 +1,63 @@
+[
+  {
+    "command": [
+      "/usr/bin/sw_vers"
+    ],
+    "exitCode": 0,
+    "stdout": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/usr/bin/uname",
+      "-a"
+    ],
+    "exitCode": 0,
+    "stdout": "Darwin Dougs-MacBook-Air.local 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:27 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8103 arm64\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/usr/bin/id"
+    ],
+    "exitCode": 0,
+    "stdout": "uid=501(doug) gid=20(staff) groups=20(staff),12(everyone),61(localaccounts),79(_appserverusr),80(admin),81(_appserveradm),398(com.apple.access_screensharing),701(com.apple.sharepoint.group.1),33(_appstore),98(_lpadmin),100(_lpoperator),204(_developer),250(_analyticsusers),395(com.apple.access_ftp),399(com.apple.access_ssh),400(com.apple.access_remote_ae)\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/usr/bin/xcrun",
+      "--show-sdk-version"
+    ],
+    "exitCode": 0,
+    "stdout": "26.5\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/usr/bin/clang",
+      "--version"
+    ],
+    "exitCode": 0,
+    "stdout": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "rustc",
+      "--version"
+    ],
+    "exitCode": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "cargo",
+      "--version"
+    ],
+    "exitCode": 0,
+    "stdout": "cargo 1.99.0 (5f94df478 2026-08-27) (Homebrew)\n",
+    "stderr": ""
+  }
+]
