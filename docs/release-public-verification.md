@@ -86,6 +86,8 @@ commit-addressed release intent. Dispatch recovery inputs are not observable in
 the anonymous run API, so those runs cannot supply evidence; discovery continues
 for another qualifying run. Unknown workflow revisions fail closed. Workflow
 changes require review and an explicit update of the pinned source digests.
+Both the historical coordinator and its completion-ledger revision are pinned;
+reports identify the digest of the workflow actually observed.
 Unavailable historical smoke evidence can prevent verification of an otherwise
 valid historical release; use the normative manual checks in that case.
 

@@ -7,7 +7,7 @@ import { verifyPublicSmoke } from './public_smoke.ts';
 const commit = 'b'.repeat(40);
 const identity = { tag: 'v0.0.11', commit, releaseId: 42, publishedAt: '2026-10-19T00:00:00Z' };
 const names = ['resolve', 'Unix installer (ubuntu-latest)', 'Unix installer (macos-latest)', 'Windows installer'];
-async function fixture(options: { history?: boolean; path?: string; omitAttempt?: boolean; jobHead?: string; jobRun?: number; coordinator?: boolean; event?: string; head?: string; missing?: string; changedWorkflow?: boolean; jobAttempt?: number; jobConclusion?: string } = {}) {
+async function fixture(options: { historicalCoordinator?: boolean; history?: boolean; path?: string; omitAttempt?: boolean; jobHead?: string; jobRun?: number; coordinator?: boolean; event?: string; head?: string; missing?: string; changedWorkflow?: boolean; jobAttempt?: number; jobConclusion?: string } = {}) {
   const workflow = options.coordinator ? 'crates-publication.yml' : 'release-public-smoke.yml';
   const head = options.head ?? commit;
   const run = { id: 77, run_attempt: 2, event: options.event ?? (options.coordinator ? 'push' : 'release'), head_branch: options.coordinator ? 'main' : identity.tag, head_sha: head, path: options.path ?? `.github/workflows/${workflow}`, status: 'completed', conclusion: 'success' };
@@ -16,6 +16,7 @@ async function fixture(options: { history?: boolean; path?: string; omitAttempt?
     if (url.hostname === 'raw.githubusercontent.com') {
       const file = url.pathname.split('/').slice(4).join('/');
       if (file === 'docs/releases/intent.json') return Response.json({ schema: 'tapid-release-intent-v1', version: '0.0.11', baseline: 'v0.0.10', prepared_from: 'c'.repeat(40), notes: 'docs/releases/0.0.11.md', packages: [{ name: 'tapid', version: '0.0.11' }] });
+      if (options.historicalCoordinator && file === '.github/workflows/crates-publication.yml') return new Response(await readFile(new URL('./fixtures/crates-publication-before-ledger.yml', import.meta.url)));
       return new Response(options.changedWorkflow ? 'unreviewed workflow' : await readFile(new URL(`../../${file}`, import.meta.url)));
     }
     if (url.pathname.endsWith('/runs')) assert.equal(url.searchParams.get('head_sha'), commit);
@@ -44,7 +45,14 @@ test('proves push coordinator selection using reviewed wiring and commit-address
   const evidence = await verifyPublicSmoke(await fixture({ coordinator: true }), identity);
   assert.equal(evidence.contract, 'coordinator-push');
   assert.equal(evidence.workflowCommit, commit);
+  assert.equal(evidence.workflowSha256, '7edc6be49c0067e53e8f82e35748ac76acf9c2b51b2b0d9d44604ab14e808772');
   assert.deepEqual(evidence.jobs.map(job => job.name), names.map(name => `smoke / ${name}`));
+});
+
+test('retains the reviewed historical coordinator and reports its actual digest', async () => {
+  const evidence = await verifyPublicSmoke(await fixture({ coordinator: true, historicalCoordinator: true }), identity);
+  assert.equal(evidence.contract, 'coordinator-push');
+  assert.equal(evidence.workflowSha256, '4eb37a029e390ee4c86a5fd8d44c04036c99155f42ccdb473e497a558c8e8e8c');
 });
 
 test('rejects unobservable recovery inputs, wrong commit, schedules, changed wiring, and incomplete jobs', async () => {
@@ -52,7 +60,7 @@ test('rejects unobservable recovery inputs, wrong commit, schedules, changed wir
     { coordinator: true, event: 'workflow_dispatch', head: 'c'.repeat(40) },
     { coordinator: true, event: 'workflow_dispatch' },
     { head: 'c'.repeat(40) }, { event: 'schedule' },
-    { changedWorkflow: true }, { missing: 'resolve' }, { missing: 'Windows installer' },
+    { changedWorkflow: true }, { coordinator: true, changedWorkflow: true }, { missing: 'resolve' }, { missing: 'Windows installer' },
     { jobAttempt: 1 }, { jobConclusion: 'skipped' }, { jobConclusion: 'failure' },
   ]) await assert.rejects(verifyPublicSmoke(await fixture(options), identity), /no successful public smoke/);
 });
