@@ -2,7 +2,7 @@
 
 Consumer CI tests the latest release of every supported Node.js major (26, 24, and 22) on Linux, macOS, and Windows. The matrix specifies majors only with `check-latest: true`. Support follows Current, Active LTS, and Maintenance LTS status in the [official Node.js release lifecycle](https://nodejs.org/en/about/previous-releases), excluding end-of-life versions and prereleases. Update the matrix when release lifecycle status changes. This configuration does not establish execution evidence for the expanded matrix.
 
-ADR 0005 CLI wiring, experimental macOS Restricted containment, and a Linux Restricted Landlock/seccomp backend are integrated. Native behavioral controls gate support, and accepted executions produce checked enforcement receipts. Linux ManagedTree and resource limits are implemented with delegated cgroup v2 and private PID/mount namespaces; exact-commit acceptance remains pending. macOS ManagedTree and resource-limit profiles remain unsupported. Windows read-only AppContainer/Job Object execution and graceful Ctrl+C have pre-integration native Windows 11 and hosted validation; this branch adds existing declared-target writes with limited-account native CLI acceptance, and standard-user Node networking via a private socket broker. Missing/unsafe targets and networking without the selected Node component fail closed. Native Home development controls cover TCP, UDP, IPv6, controlled and native hostname DNS, real CLI HTTP readiness and the original news-site build/test/start; the no-network local-bind criterion remains pending administrator-installed guard acceptance on this physical device. Exact merged-revision Windows verification remains pending; legacy inheritance bookkeeping and non-atomic ACL mutation limitations are documented in windows-tapid-run-scope.md. Targeted Ubuntu 24.04.5 x86_64 local-VM Restricted consumer and runner tests passed on code commit `3dd67f75c8d6f4187f8f1145f4a615939472e1c4` (kernel `6.8.0-142-generic`, `/bin/sh` dash `0.5.12-6ubuntu5`, Node `v22.23.3`, Rust build toolchain `1.97.1`; Tapid artifact SHA-256 `20d77eff052cb589a2c0ad002d9d47a6263c12f05171519b2c3d8f72e30ddcaa`). The VM was local-only, not registered as a GitHub runner. Separate GitHub Actions run [37115198876, attempt 1](https://github.com/LimeTip/tapid/actions/runs/37115198876) at the same code commit passed all hosted jobs and did not target the VM. This targeted local evidence does not complete the full common Restricted probe matrix below. Local dirty-tree results are development evidence, not a clean-commit platform acceptance record.
+ADR 0005 CLI wiring, experimental macOS Restricted containment, and a Linux Restricted Landlock/seccomp backend are integrated. Native behavioral controls gate support, and accepted executions produce checked enforcement receipts. Linux ManagedTree and resource limits are implemented with delegated cgroup v2 and private PID/mount namespaces; Ubuntu 24.04 x86_64 / Node 22 native acceptance is recorded below. macOS ManagedTree and resource-limit profiles remain unsupported. Windows read-only AppContainer/Job Object execution and graceful Ctrl+C have pre-integration native Windows 11 and hosted validation; this branch adds existing declared-target writes with limited-account native CLI acceptance, and standard-user Node networking via a private socket broker. Missing/unsafe targets and networking without the selected Node component fail closed. Native Home development controls cover TCP, UDP, IPv6, controlled and native hostname DNS, real CLI HTTP readiness and the original news-site build/test/start; the no-network local-bind criterion remains pending administrator-installed guard acceptance on this physical device. Exact merged-revision Windows verification remains pending; legacy inheritance bookkeeping and non-atomic ACL mutation limitations are documented in windows-tapid-run-scope.md. Targeted Ubuntu 24.04.5 x86_64 local-VM Restricted consumer and runner tests passed on code commit `3dd67f75c8d6f4187f8f1145f4a615939472e1c4` (kernel `6.8.0-142-generic`, `/bin/sh` dash `0.5.12-6ubuntu5`, Node `v22.23.3`, Rust build toolchain `1.97.1`; Tapid artifact SHA-256 `20d77eff052cb589a2c0ad002d9d47a6263c12f05171519b2c3d8f72e30ddcaa`). The VM was local-only, not registered as a GitHub runner. Separate GitHub Actions run [37115198876, attempt 1](https://github.com/LimeTip/tapid/actions/runs/37115198876) at the same code commit passed all hosted jobs and did not target the VM. This targeted local evidence does not complete the full common Restricted probe matrix below. Local dirty-tree results are development evidence, not a clean-commit platform acceptance record.
 
 A platform may be marked Restricted only after the Restricted probe set passes through `tapid run <SCRIPT> -- <ARGS...>` at the exact integrated commit. ManagedTree requires the Restricted probes plus the ManagedTree-only probes. A unit test of policy declarations, backend availability, compilation, a generated native profile, or a successful allowed operation is insufficient.
 
@@ -111,7 +111,7 @@ ManagedTree additionally requires a non-breakaway Job Object assigned before unt
 | Platform/backend | Restricted status | ManagedTree status | Native evidence |
 |---|---|---|---|
 | macOS 26 native Seatbelt | Experimental Restricted support; profiles with resource limits fail closed | Native support unavailable | Native macOS 26 behavioral suite and exact CLI HTTP acceptance |
-| Linux Landlock/`no_new_privs`/seccomp | Implemented for Restricted; runtime capability-dependent; targeted Ubuntu 24.04.5 x86_64 local-VM tests pass on code commit `3dd67f75c8d6f4187f8f1145f4a615939472e1c4`; broader common probe matrix remains pending | Implemented with delegated cgroup v2 and private PID/mount namespaces; clean-commit acceptance remains pending | Exact-commit local VM: 99 runner tests and native Restricted consumer validation pass; hosted Linux checks pass; broader probe matrix not complete |
+| Linux Landlock/`no_new_privs`/seccomp | Implemented for Restricted; runtime capability-dependent; targeted Ubuntu 24.04.5 x86_64 local-VM tests pass on code commit `3dd67f75c8d6f4187f8f1145f4a615939472e1c4`; broader common probe matrix remains pending | Verified on Ubuntu 24.04 x86_64 / Node 22 with delegated cgroup v2 and private PID/mount namespaces; see the issue 156 evidence record | Exact-commit local VM: 99 runner tests and native Restricted consumer validation pass; hosted Linux checks pass; broader probe matrix not complete |
 | Windows AppContainer plus Job Object | Read-only Node execution implemented and checked on pre-integration Windows 11 VM126 and hosted windows-latest; existing ordinary declared-target writes are supported; missing/unsafe targets and network grants without the selected Node compatibility component fail closed; explicit Node grants use the socket/DNS broker; `network = false` requires the administrator-installed guard, with native acceptance pending | Job ownership, descendant timeout/output controls and graceful Ctrl+C cleanup have targeted native tests; the complete common assurance matrix remains pending | Windows 11 containment suite 19 passed, 1 intentionally ignored before main integration; full hosted CI passed at `2d7d0e2d18a564d495035984152dddd4eec9e9a0`. Exact merged-revision acceptance remains required; see windows-tapid-run-scope.md for limitations |
 | Strict Linux VM through macOS Virtualization.framework | Optional future backend with Linux VM semantics | Future investigation | No implementation or evidence recorded |
 
@@ -121,7 +121,7 @@ PR #220 handoff checks on an uncommitted Windows 11 Home x64 build 26200 worktre
 
 The reserved-Node lifecycle regression launches a detached descendant with redirected stdio, returns a root receipt, waits for private-directory removal with a bounded retention control, then invokes bare `node` with hostile project `.bin/node` present. The hostile marker must remain absent and the byte-verified private runtime snapshot must execute. A separate benign-marker regression proves project writes cannot hard-link or mutate the snapshot or selected runtime, and that the two use distinct inodes. Subprocess-enabled receipts must disclose the retained snapshot with `cleanup_observed = false`; failed pre-exec launches must remove it, and subprocess-disabled successful cleanup requires native fork denial and observed root exit. Retained snapshots are never reused or deleted on a timer. Temporary-storage retention lasts until OS cleanup or host removal; removal during descendant survival ends the binding guarantee, and host writes or races after final validation remain outside Restricted containment.
 
-## Linux ManagedTree development validation
+## Linux ManagedTree native validation
 
 ### Issue 156 acceptance coverage
 
@@ -145,8 +145,8 @@ actually attempts private PID/mount namespace creation. It does not remount the
 host cgroup filesystem or change host-wide namespace policy. The runner still
 performs its own request-specific checks before target execution. Logs retain
 the checkout SHA, kernel/architecture, runtime/toolchain versions, controller
-observations, and test results. This configured job is **not** native acceptance
-evidence until it executes successfully on the candidate source.
+observations, and test results. The successful native run and its exact synthetic merge source are recorded below;
+later candidates require their own applicable checks.
 
 An always-run evidence step copies only allowlisted acceptance files into a
 separate upload directory, using held descriptors and rejecting symlinks,
@@ -181,15 +181,19 @@ for `next --version` by command name and absolute shim path. Application output
 and unrelated environment values are not retained. Observations are limited to 16 KiB and
 diagnostic log prefixes to 4 KiB in `summary.json`; inaccessible observations
 remain explicit errors. The isolated manifest is restored afterward. Diagnostic
-success never accepts the failed build or replaces its primary error. Native
-execution of this diagnostic is required to attribute the reference-tool denial.
+success never accepts the failed build or replaces its primary error. The earlier
+reference-tool denial was traced to inaccessible absolute ancestors
+beneath the runner home; the private temporary workload placement below passed
+the ordinary build without changing containment authority.
 The fixture's separate candidate policy uses 180 seconds, 4 MiB combined output,
 256 kernel tasks and 2 GiB cgroup memory.
-These are provisional ceilings, not native measurements or support evidence.
+The recorded workload passed within these ceilings; they are not a guarantee
+for other projects or workload sizes.
 The fixture runs in a separate delegated parent so CI can retain memory.peak
 and pids.peak when exposed by the kernel. These inclusive measurements also
-charge orchestration and Tapid; absence of pids.peak leaves task headroom
-measurement pending. Command logs retain elapsed time and output bytes.
+charge orchestration and Tapid; when pids.peak is absent, the sampler described
+below records only a lower bound, not exact task headroom. Completed build/test
+command logs retain elapsed time and output bytes.
 The build explicitly opts into read-only private process memory statistics; the
 private-procfs denial probe remains required. No new dependency-hook permission
 or Windows claim follows from reference-application success.
@@ -197,26 +201,27 @@ or Windows claim follows from reference-application success.
 The current acceptance map is below. Runner names refer to
 `crates/tapid-runner/src/linux_restricted/tests.rs`; the CLI invocation probe is
 in `crates/tapid-cli/tests/cli_cases/run_permissions.rs`. Presence in this table
-does not imply a non-skipped native pass.
+alone does not imply a non-skipped native pass. The recorded run below executed
+all listed runner/CLI probes without skips; residual scope limits remain explicit.
 
-| Criterion | Existing or added probe | Remaining acceptance work |
+| Criterion | Existing or added probe | Recorded result and scope limits |
 | --- | --- | --- |
-| Positive execution, Node identity, local tool lookup, argument order, empty/quoted/Unicode/metacharacter arguments, exit codes | `linux_managed_tree_cli_preserves_invocation_environment_and_checked_results` | Execute required lane; extend local-tool collision controls if changing PATH precedence |
-| Working directory, allowlisted and absent values, synthetic secret non-inheritance, Node options/proxy/agent filtering, descendant writes and denied symlink reads | Same CLI probe; existing Restricted permission tests remain separate | Execute required lane; native loader controls remain separate |
-| Detached/re-parented authority and descriptor hygiene | `managed_tree_propagates_authority_to_detached_reparented_targets`: granted reads/writes, denied absolute/parent/sibling/symlink reads and writes, granted/denied loopback sockets, and an intentionally inherited denied-data descriptor; descendant observes namespace-init parent and its own session | Execute required lane; failed probes are not enforcement evidence |
-| Timeout and detached descendant termination | `managed_tree_enforces_timeout_and_cleans_detached_descendants` | Execute required lane |
-| Normal/nonzero root exit and session-changing descendant cleanup | `managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit` | Execute required lane; SIGINT and supervisor crash are separate probes |
-| Combined output and task ceilings | `managed_tree_enforces_output_and_process_limits`; `managed_tree_bounds_forwarded_combined_output_and_cleans_writers` externally verifies 256 non-UTF-8 bytes per stream within the ceiling, then a combined 512-byte ceiling during overflow without assuming scheduler-dependent stream shares; both runs require complete cleanup and no delayed descendant marker | Execute required lane |
-| Unread caller output | `managed_tree_completion_is_bounded_when_parent_stdout_is_unread`: retain an unread caller pipe while a real target emits 1 MiB, require bounded failure with KernelOwnedComplete | Execute required lane; output remains buffered until tree cleanup |
-| Cgroup memory ceiling | `managed_tree_enforces_memory_limit_with_rust_workload` | Execute required lane; workload commits real pages and no longer requires Python |
-| Read-only metadata and kernel-control grant rejection | `managed_tree_denies_metadata_mutation_outside_write_grants`, `managed_tree_rejects_kernel_control_filesystem_write_grants` | Execute required lane |
-| Private procfs compatibility | `managed_tree_memory_stats_opt_in_uses_read_only_private_procfs` | Execute required lane, then establish fixture build compatibility |
-| Caller and supervisor crash | `managed_tree_caller_crash_kills_double_forked_descendants`, `managed_tree_supervisor_crash_kills_double_forked_descendants`: retain the kernel cgroup events object, require populated=0, and reject delayed descendant markers; supervisor identity is held by pidfd | Execute required lane |
-| CLI cancellation | `linux_managed_tree_cli_sigint_cancels_and_completes_kernel_cleanup`: signal only Tapid while a detached Node descendant ignores SIGINT; require a descendant-held FIFO handshake and live-writer negative control before signalling, bounded EOF after exit, exit 130, Cancelled, KernelOwnedComplete and no delayed marker | Execute required lane; POSIX signal-scope tests do not establish Linux tree cleanup |
-| Failed target exec | `managed_tree_failed_target_exec_reports_spawn_and_kernel_cleanup`: executable script with absent interpreter | Execute required lane; require structured Spawn and KernelOwnedComplete |
-| Clone3/cgroup reassignment and Unix socket controls | `managed_filter_denies_clone3_and_reconnectable_unix_socketpairs` | Full target/descendant positive and negative network controls |
-| Missing prerequisites | `managed_tree_requires_private_launcher_with_otherwise_valid_limits`; `managed_tree_rejects_independently_denied_kernel_prerequisites_before_target` first executes an identical valid request, then independently denies Landlock, pidfds, namespace creation, mount setup, seccomp installation, delegation-directory creation, controller/interface opens and launcher exec through inherited kernel filters | Execute required lane; kernel denial injection covers unavailable operations, not every host provisioning failure |
-| Reference fixture build/test/start and cancellation | `scripts/check-managed-news-site.ts` applies `tapid.linux-managed.toml` to an isolated fixture, checks build/test results and HTTP marker, cancels start, separately verifies complete cleanup and connection refusal; `tests/news_site_managed_test.ts` covers orchestration failures using a synthetic CLI | Execute required lane and measure native workload headroom before treating candidate limits as final |
+| Positive execution, Node identity, local tool lookup, argument order, empty/quoted/Unicode/metacharacter arguments, exit codes | `linux_managed_tree_cli_preserves_invocation_environment_and_checked_results` | Passed in the recorded lane; extend local-tool collision controls if changing PATH precedence |
+| Working directory, allowlisted and absent values, synthetic secret non-inheritance, Node options/proxy/agent filtering, descendant writes and denied symlink reads | Same CLI probe; existing Restricted permission tests remain separate | Passed in the recorded lane; native loader controls remain separate |
+| Detached/re-parented authority and descriptor hygiene | `managed_tree_propagates_authority_to_detached_reparented_targets`: granted reads/writes, denied absolute/parent/sibling/symlink reads and writes, granted/denied loopback sockets, and an intentionally inherited denied-data descriptor; descendant observes namespace-init parent and its own session | Passed in the recorded lane; failed probes are not enforcement evidence |
+| Timeout and detached descendant termination | `managed_tree_enforces_timeout_and_cleans_detached_descendants` | Passed in the recorded lane |
+| Normal/nonzero root exit and session-changing descendant cleanup | `managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit` | Passed in the recorded lane; SIGINT and supervisor crash are separate probes |
+| Combined output and task ceilings | `managed_tree_enforces_output_and_process_limits`; `managed_tree_bounds_forwarded_combined_output_and_cleans_writers` externally verifies 256 non-UTF-8 bytes per stream within the ceiling, then a combined 512-byte ceiling during overflow without assuming scheduler-dependent stream shares; both runs require complete cleanup and no delayed descendant marker | Passed in the recorded lane |
+| Unread caller output | `managed_tree_completion_is_bounded_when_parent_stdout_is_unread`: retain an unread caller pipe while a real target emits 1 MiB, require bounded failure with KernelOwnedComplete | Passed in the recorded lane; output remains buffered until tree cleanup |
+| Cgroup memory ceiling | `managed_tree_enforces_memory_limit_with_rust_workload` | Passed in the recorded lane; workload commits real pages and no longer requires Python |
+| Read-only metadata and kernel-control grant rejection | `managed_tree_denies_metadata_mutation_outside_write_grants`, `managed_tree_rejects_kernel_control_filesystem_write_grants` | Passed in the recorded lane |
+| Private procfs compatibility | `managed_tree_memory_stats_opt_in_uses_read_only_private_procfs` | Passed; ordinary fixture build also passed |
+| Caller and supervisor crash | `managed_tree_caller_crash_kills_double_forked_descendants`, `managed_tree_supervisor_crash_kills_double_forked_descendants`: retain the kernel cgroup events object, require populated=0, and reject delayed descendant markers; supervisor identity is held by pidfd | Passed in the recorded lane |
+| CLI cancellation | `linux_managed_tree_cli_sigint_cancels_and_completes_kernel_cleanup`: signal only Tapid while a detached Node descendant ignores SIGINT; require a descendant-held FIFO handshake and live-writer negative control before signalling, bounded EOF after exit, exit 130, Cancelled, KernelOwnedComplete and no delayed marker | Passed in the recorded lane; POSIX signal-scope tests do not establish Linux tree cleanup |
+| Failed target exec | `managed_tree_failed_target_exec_reports_spawn_and_kernel_cleanup`: executable script with absent interpreter | Passed in the recorded lane; require structured Spawn and KernelOwnedComplete |
+| Clone3/cgroup reassignment and Unix socket controls | `managed_filter_denies_clone3_and_reconnectable_unix_socketpairs` | Passed with the detached authority probe’s positive and negative network controls |
+| Missing prerequisites | `managed_tree_requires_private_launcher_with_otherwise_valid_limits`; `managed_tree_rejects_independently_denied_kernel_prerequisites_before_target` first executes an identical valid request, then independently denies Landlock, pidfds, namespace creation, mount setup, seccomp installation, delegation-directory creation, controller/interface opens and launcher exec through inherited kernel filters | Passed in the recorded lane; kernel denial injection covers unavailable operations, not every host provisioning failure |
+| Reference fixture build/test/start and cancellation | `scripts/check-managed-news-site.ts` applies `tapid.linux-managed.toml` to an isolated fixture, checks build/test results and HTTP marker, cancels start, separately verifies complete cleanup and connection refusal; `tests/news_site_managed_test.ts` covers orchestration failures using a synthetic CLI | Passed; measured scope and headroom below |
 
 The delegated native reference workload uses a unique root-owned mode-0700
 `/tmp/tapid-managed-news.*` directory. It does not run beneath the hosted
@@ -238,8 +243,8 @@ temporary workload; collection failures retain the workload for diagnosis.
 When `pids.peak` is unavailable, the lane samples hierarchical `pids.current`
 every 10 ms for at most 150000 samples and reports the observed maximum as a
 lower bound. This is an actual task-count observation, not an exact peak or
-proof that short-lived spikes had equivalent headroom. Native acceptance and
-support remain subject to the complete reference-workload result.
+proof that short-lived spikes had equivalent headroom. The recorded run exposes
+the kernel pids.peak file, so its task measurement is not sampled.
 
 
 Reconciliation of the supplied historical PR #176 concerns: current ManagedTree
@@ -247,8 +252,68 @@ capture has a finite combined ceiling (at most 16 MiB), and the existing
 Restricted news-site job uses project-local TMPDIR. The new native job attempts
 host delegation and namespace operations directly instead of importing the old
 container/remount design. Successful target execution and fixture compatibility
-remain unverified. No support claim, dependency-hook gate, or Windows evidence is
-changed by this coverage inventory.
+are demonstrated by the record below. This root-script evidence does not close
+dependency-hook issue
+[#155](https://github.com/LimeTip/tapid/issues/155) or Windows issue
+[#157](https://github.com/LimeTip/tapid/issues/157).
+
+### Recorded Ubuntu acceptance
+
+[CI run 40883412865, attempt 1](https://github.com/LimeTip/tapid/actions/runs/40883412865),
+[ManagedTree job 123480653133](https://github.com/LimeTip/tapid/actions/runs/40883412865/job/123480653133)
+passed on Ubuntu 24.04 x86_64, kernel 7.0.0-1017-azure, Node 22.23.4 and
+Rust 1.99.1. The tested source is synthetic merge
+`e067545b6f28dfb863bc4e4c9ac1e9596dd6ef74`, combining PR head
+`2ad579927adb9abbba41dfe23ee02af627b307e7` and base
+`8f087aeac1b0d0bb87e6b521dd22126153a33679`; it is not an assertion that
+an eventual main merge has already been tested.
+
+The [14-file evidence artifact](https://github.com/LimeTip/tapid/actions/runs/40883412865/artifacts/12901372252)
+has archive SHA-256
+`e912bd14f4b55f841f2fd5dd188e13f3f65925898dee85e0c779567704374e6f`.
+It retains source identity, policy, summary, logs, result receipts, acceptance
+marker and raw cgroup peaks. Tapid SHA-256 is
+`96e16d7e0bda90216e62507541cb5ec592be4ccc564d5b3723f2a94fb1aed0e2`;
+selected Node SHA-256 is
+`94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90`.
+The initial timeout/cleanup probe passed once, the full managed runner filter
+passed 27 tests, and the CLI filter passed two tests, with zero failures or
+ignored tests in each invocation. The initial probe is also in the full filter;
+these counts are not 30 distinct controls.
+
+Ordinary reference install, build, test and start passed. Build and test receipts
+report Exited(0); start reports Cancelled after exit 130. All three report
+KernelOwnedComplete. The fixture test log contains two passing tests. The
+harness checks the HTTP acceptance marker before cancellation and connection
+refusal afterward. These checks supplement, rather than replace, authoritative
+cleanup receipts.
+
+| Measurement | Observed | Configured ceiling / scope |
+| --- | ---: | --- |
+| Build elapsed / combined log bytes | 16,628 ms / 1,419 bytes | 180,000 ms / 4,194,304 bytes |
+| Test elapsed / combined log bytes | 128 ms / 494 bytes | 180,000 ms / 4,194,304 bytes |
+| Start combined log bytes | 192 bytes | 4,194,304 bytes; elapsed time is not retained in summary |
+| Delegated memory.peak | 1,317,449,728 bytes | 2,147,483,648 bytes per managed request |
+| Delegated pids.peak | 71 kernel tasks | 256 tasks per managed request |
+
+Build elapsed margin was 163,372 ms and output margin 4,192,885 bytes; test
+margins were 179,872 ms and 4,193,810 bytes. Start output margin was 4,194,112
+bytes. Delegated peaks leave 830,033,920 bytes and 185 tasks relative to request
+ceilings, but include orchestration and Tapid across the workload, not isolated
+per-command charges. They demonstrate conservative observed margins for this
+run only. The systemd driver's separately printed memory peak is not the
+workload measurement. Start readiness and cancellation passed, but no numeric
+start-time headroom is claimed.
+
+Supported Linux ManagedTree root-script configuration is limited to Ubuntu
+24.04 x86_64 with external Node 22 and the demonstrated writable cgroup v2
+memory/pids delegation, cgroup.kill, Landlock/seccomp and private PID/mount
+namespace prerequisites. Missing prerequisites fail closed. Output remains
+buffered until cleanup; uninterruptible kernel operations can delay cleanup;
+host administrator activity and concurrent host filesystem mutation remain
+outside the boundary. This record does not establish broader Linux, macOS,
+Windows or dependency-hook acceptance. Later source changes require applicable
+exact-candidate checks and independent review before merge.
 
 Issue 155 adds a separate managed backend. Local uncommitted-tree tests use Linux x86_64 kernel 6.8.0-117-generic in an isolated container with explicit namespace privileges and delegated memory/pids controllers. `TAPID_REQUIRE_MANAGED_ASSERTIONS=1` requires real native execution of the managed tests rather than treating unavailable host setup as acceptance. All 132 runner-library tests passed, including real timeout/output/process/memory enforcement, read-only metadata denial, detached-descendant cleanup, caller-crash cleanup, clone3/Unix-socket escape controls, and rejection of writable kernel-control filesystems. The CLI native fixture passed generated-file creation, GCC compilation, credential non-inheritance, immutable source storage, authenticated offline/frozen replay, forged-output rejection, changed-policy rejection, and failed-hook rollback. The build used Rust 1.99.0 and a temporary SHA-256 optimization override; execution used Node 20.19.2 and GCC 14.2.0. These results are development evidence, not a clean-commit acceptance record or a completed common probe matrix. See [ADR 0008](adr/0008-dependency-lifecycle-derived-trees.md) and [dependency lifecycle scripts](dependency-lifecycle.md).
 
