@@ -86,6 +86,8 @@ pub(crate) enum Command {
     Sandbox(sandbox::Args),
     #[command(name = "__verify-release-record", hide = true)]
     VerifyReleaseRecord(release_verification::Args),
+    #[command(name = "__inspect-release-archive", hide = true)]
+    InspectReleaseArchive(release_verification::ArchiveArgs),
     #[command(name = "__prepare-release-install", hide = true)]
     PrepareReleaseInstall(release_verification::InstallArgs),
     /// Create a private package.json manifest.
@@ -203,6 +205,7 @@ impl Command {
             Self::License => "license",
             Self::Sandbox(_) => "sandbox",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
+            Self::InspectReleaseArchive(_) => "__inspect-release-archive",
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
             Self::Init(_) => "init",
             Self::ImportPackageLock(_) => "import-package-lock",
@@ -265,6 +268,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::License) => license::run(),
         Some(Command::Sandbox(args)) => sandbox::run(args),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
+        Some(Command::InspectReleaseArchive(args)) => release_verification::inspect_archive(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {
             println!("Run 'tapid --help' for usage");

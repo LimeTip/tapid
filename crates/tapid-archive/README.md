@@ -35,3 +35,11 @@ declarations above 1 KiB, and local PAX declarations above 64 KiB before reading
 those bodies.
 The complete logical validation pass bounds all remaining parser metadata and
 honors PAX size overrides when checking entry and aggregate sizes.
+
+`inspect_release_archive` performs read-only inspection of a gzip tar release:
+exactly one regular `tapid` or `tapid.exe`, selected by the caller. Unix `tapid`
+must have an executable mode. It rejects extra members, parser extensions,
+links, directories, empty executables, truncated gzip streams, and nonzero
+trailing content. Compressed and expanded bytes are each limited to
+512 MiB, with at most 64 KiB of trailing zero framing within that limit. It neither extracts nor
+executes the member. Existing package extraction retains its broader contract.
