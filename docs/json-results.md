@@ -9,6 +9,7 @@ Use `tapid --json install` or `tapid install --json` to receive one newline-term
 | `install`, alias `i` | Install or replay result; resolved dependency preview with `--dry-run` |
 | `ci` | Locked install result with the existing install transaction states |
 | `manifest validate`, `lock verify` | Read-only validation result |
+| `lock inspect`, `lock compare` | Bounded persisted graph observations, same-format semantic comparisons and evidence changes |
 | `import-package-lock` | Offline npm v3 import result; verification remains pending |
 | `add`, `remove`, `update`, `prune` | Dependency operation result; `add`, `remove`, and `update` support resolved previews with `--dry-run` |
 | `tool install`, `tool list`, `tool update`, `tool remove` | Tool inventory and command mappings with operation change/recovery state |
@@ -362,6 +363,121 @@ locally computed registry integrity. Status reports those separately.
 Tool commands use operation `tool`. Their `changes.files` and `changes.paths` report affected or recovery paths under the tools root: `catalog.json`, `pending.json`, `committed`, `bin`, and `environments`. The `data.tools` array is sorted by npm package name and contains `name`, `version`, `requirement`, `environment`, `lockfile`, and a sorted `commands` array of `name`/`target` mappings. Targets are relative to the recorded environment. `data.bin_dir` identifies the PATH directory. Text follows the same bounded/sanitized presentation rules as other results.
 
 Mutations report committed state only after the global command decision. Retained in-use environments or cleanup failures produce `committed_cleanup_pending`; inconsistent pending publication produces recovery failure instead of overwriting unknown files. Listing may settle a previous transaction or clean inactive owned environments. Installed package scripts are never run by these operations. Execution of an installed command is a normal user process and has no sandbox receipt.
+
+## Persisted lock graph observations
+
+`tapid --json lock inspect <SNAPSHOT>` and
+`tapid --json lock compare <BEFORE> <AFTER>` require explicit regular files
+and JSON mode. They read only those snapshots. They do not read manifests,
+registry configuration or stores, recover transactions, install, resolve, or
+execute scripts. Symlinks and non-regular files are rejected using the existing
+bounded reader. These commands observe saved results; previews predict future
+operations. Matching digests neither approve execution nor establish safety.
+
+The existing schema-1 envelope contains `operation: "lock"`, unchanged state,
+null project paths, and a `data` contract versioned independently by
+`contract_version: 1`. No competing general command schema is introduced.
+
+| Field | Meaning |
+| --- | --- |
+| `action` | `inspect` or `compare` |
+| `snapshot_digest`, or `before_digest`/`after_digest` | SHA-256 of original bytes; whitespace affects cursor identity, not semantic equality |
+| `schema` | Inspected persisted schema |
+| `scope` | Tagged `all`, `packages`, or `instances`, with sorted deduplicated `values` for filters |
+| `coverage`, or `before_coverage`/`after_coverage` | Complete-input analysis, total and excluded instance/relationship counts |
+| `availability`, or per-side availability | Represented dimensions; false means unavailable, never equal |
+| `unavailable_reasons`, or per-side reasons | Stable reasons for absent dimensions: `not_recorded`, `format_does_not_record`, `digest_evidence_only`, `context_does_not_identify_provider_placement` |
+| `selected_graph_supported`, `unsupported_reason` | Comparison graph support; cross-format reason is `cross_format_selection_equivalence` |
+| `summary` | Complete counts for the declared scope; null for unsupported graph comparison |
+| `records` | Tagged `kind`/`value` detail records |
+| `detail_coverage` | Offset, returned, total, omitted on this page, remaining after this page, and whether this page contains every detail |
+| `continuation` | Opaque token for remaining details, or null |
+
+Inspection records are `instance` followed by `relationship`. Instances contain
+opaque `reference`, full untrusted display `identity`, actual `name`, `version`,
+and imported `placement` (null for native). Relationships contain `kind`,
+exact `parent` reference (null for entry points), `local_name` and `target`
+reference. Native edges retain dependency aliases; peer-provider edges are not
+inferred. Imported records preserve placements, workspace links, member edges,
+explicit peer targets and optionality. Imported `imported_entry` relationships
+(and optional variants) describe the importer's entry-point set, including hoisted
+member entry points; they do not claim every entry is a root declaration.
+
+Comparison records are added instances, removed instances, relationship changes,
+then evidence changes. A relationship change has nullable `before`/`after`.
+Evidence changes contain `dimension`, nullable exact subject reference, separate
+`before`/`after` field maps and `attestation_changed`. Raw attestations are never
+emitted. Dimensions are `declarations`, `source_artifact`,
+`verification_receipts`, and `derived_outputs`. Recipe/output changes cannot
+identify an exact script or host-toolchain change. Native declarations retain
+root/member digests only; imported declarations also retain persisted requirement
+fields. A digest change cannot identify which requirement changed. Receipt absence
+means verification is unrecorded, not failed or unsafe.
+
+Exact native identity includes source/registry, version, peer/platform context,
+workspace identity and copied-source pins. Imported identity also includes placement
+and represented constraints. Sanitized/truncated display values never determine
+identity. Native roots correspond by local binding name; workspace dependency sites
+require the same exact workspace identity, and dependency sites require the same
+exact parent, edge kind and local name. Replaced parents do not pair descendants
+by package name. Imported placements are stable sites. Ambiguous changes remain
+additions/removals. Legacy unnamed roots compare as sets. Root/binding differences
+are unavailable if either side lacks their representation.
+
+`changed_selections` counts changed named sites (including additions/removals).
+Root alias retargeting also changes unnamed root membership where recorded.
+Placement, binding, instance and edge deltas are overlapping views; never sum them
+as upgrades. Adding receipts changes evidence only. Complete summaries require full
+bounded analysis of both inputs. A filtered or paged record list cannot prove
+unrelated selections stayed unchanged; only complete unfiltered analysis supports
+that conclusion, and only for represented dimensions.
+
+| Format pair | Supported interpretation |
+| --- | --- |
+| Native schemas 4–7, 9, 10 | Represented graph/evidence with per-side legacy gaps; schema 5 replay restrictions do not prohibit inspection |
+| Imported schema 8 pairs | Validated all-placement graph and independent receipts, without host-platform selection |
+| Native/imported | Graph comparison unsupported, summary null; only root digest evidence is compared independently |
+| Raw npm/unknown | Unsupported format; no implicit import |
+| Malformed supported format | Validation failure; no graph or complete summary |
+
+Bounds are 32 MiB per input, 100,000 persisted instances and 500,000 relationships,
+with streaming preflight accounting before graph allocation. Imported structural
+counts include npm root/link entries and declaration fields; overlapping fields
+can hit this bound before normalization. Normalized relationships include placement
+records. JSON nesting is limited to 128 with stricter parser limits retained.
+No dependency paths are enumerated, so cycles do not expand traversal.
+
+Repeated `--package` actual names or `--instance` references form a union; the
+two filter kinds conflict. At most 64 values of 4,096 UTF-8 bytes are accepted
+before deduplication. Unknown values select nothing. Inspection retains incident
+relationships without expanding instances. Comparison keeps both retarget endpoints
+when either side touches scope. Root declaration evidence remains explicitly global.
+
+Instances sort by full internal identity. Relationships sort by root membership,
+root bindings, then other relationships, followed by parent identity, local name
+and target identity. Comparison details preserve category order, and evidence sorts
+by dimension (declarations, artifact, receipts, derived) then full subject identity.
+`--limit` defaults to 100 and accepts 1–1,000 records. The whole newline-terminated
+envelope is capped at 1 MiB; a page can return fewer records to fit. Display scalars
+use existing redaction and the 4,096-byte bound with `truncated_fields` pointers.
+Display shortening alone succeeds. If one record cannot fit, output fails rather
+than return an unusable continuation. There is no unlimited mode.
+
+Continuation is deterministic and bound to original snapshot byte digests, action,
+contract/order version and normalized scope. Pass it through `--cursor` with the
+same files and filters. Changing bytes (even whitespace), action or scope invalidates
+it. Page size can change. Every page recomputes bounded complete analysis; there is
+no saved state or store access. Tokens are pagination positions, not authorization.
+
+Exit 0 means supported observation, including changes found, unavailable dimensions
+and paged details. Exit 1 means I/O, invalid snapshot/scope/cursor, unsupported format
+or comparison, or resource/output failure. Cross-format failures may contain narrowly
+comparable declaration evidence but never an overall equality result. Missing JSON
+mode and invalid arguments exit 2. Stable operation error codes are
+`LOCK_GRAPH_IO`, `LOCK_GRAPH_INPUT_LIMIT`, `LOCK_GRAPH_ANALYSIS_LIMIT`,
+`LOCK_GRAPH_INVALID_SNAPSHOT`, `LOCK_GRAPH_UNSUPPORTED_FORMAT`,
+`LOCK_GRAPH_INVALID_SCOPE`, `LOCK_GRAPH_INVALID_CURSOR`,
+`LOCK_GRAPH_UNSUPPORTED_COMPARISON`, and `LOCK_GRAPH_OUTPUT_LIMIT`.
 
 ## Historical candidate exclusions
 

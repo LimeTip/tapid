@@ -8,7 +8,7 @@ assignees: ""
 
 # Release evidence: vX.Y.Z
 
-Use this checklist with [the release runbook](../../docs/release-distribution.md). Record immutable IDs and exact command output; do not paste sensitive authentication or signing material.
+Use this checklist with [the release runbook](../../docs/release-distribution.md) and [the operator guide](../../docs/release-automation.md). Record immutable IDs and exact command output; do not paste sensitive authentication or signing material.
 
 ## Scope and source
 
@@ -37,14 +37,14 @@ Follow the [operator guide](../../docs/release-automation.md) and [ADR 0007](../
 - Retained candidate summary: <!-- durable link/output binding source, reviewed notes digest, all unsigned artifact identities/digests, and exact crate plan -->
 - Candidate identity: <!-- exact summary/artifact digest or immutable identity -->
 - Independent reviewer: <!-- reviewer and independence from initiating actor -->
-- Approval timestamp: <!-- UTC -->
+- Approval timestamp: <!-- authoritative UTC if available; otherwise unavailable, never inferred -->
 - Approval result/read-back: <!-- stable-release deployment approval URL and result -->
 - Approved candidate identity: <!-- must match candidate above -->
 - Recovery approvals: <!-- not applicable, or one row for EVERY new recovery run, including crates-only recovery -->
 
 | Recovery run URL/ID/attempt | Workflow implementation commit | Immutable source | Candidate identity | Renewed stable-release approval | Independent reviewer | Timestamp | Approval read-back |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| <!-- run --> | <!-- SHA --> | <!-- SHA --> | <!-- same candidate --> | <!-- result --> | <!-- reviewer --> | <!-- UTC --> | <!-- URL --> |
+| <!-- run --> | <!-- SHA --> | <!-- SHA --> | <!-- same candidate --> | <!-- result --> | <!-- reviewer --> | <!-- authoritative UTC or unavailable --> | <!-- URL --> |
 
 ## GitHub source and binary release
 
@@ -61,6 +61,12 @@ Follow the [operator guide](../../docs/release-automation.md) and [ADR 0007](../
 | <!-- exact asset name --> | <!-- numeric ID --> | <!-- numeric size --> | <!-- verified digest/result --> |
 
 - Release notes read-back: <!-- exact reviewed file/body comparison and URL -->
+- Candidate authorization: <!-- one stable-release approval for the whole tested candidate -->
+- Authorization actor: <!-- independent reviewer login and authoritative timestamp if available -->
+- Authoritative review/deployment reference: <!-- GitHub review history and protected job/deployment URLs -->
+- Coordinator run ID/attempt: <!-- numeric run ID, attempt, and URL -->
+- Unsigned candidate fingerprint: <!-- SHA-256 binding source, tag object, notes, plan, and ten unsigned assets -->
+- Consolidated ledger: <!-- artifact URL for tapid-release-evidence-v1 -->
 - Independent GitHub publication approval: <!-- historical lane only: approver, timestamp, approved release ID; otherwise not applicable -->
 - Public release read-back: <!-- public ID, tag, draft/prerelease state, and asset set -->
 

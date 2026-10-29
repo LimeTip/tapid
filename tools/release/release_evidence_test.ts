@@ -20,7 +20,12 @@ const requiredEvidence = [
   "Draft/public release ID:",
   "Exact assets (name, numeric asset ID, provider size, and SHA-256 verification for each):",
   "Release notes read-back:",
-  "Independent GitHub publication approval:",
+  "Candidate authorization:",
+  "Authorization actor:",
+  "Authoritative review/deployment reference:",
+  "Coordinator run ID/attempt:",
+  "Unsigned candidate fingerprint:",
+  "Consolidated ledger:",
   "Public release read-back:",
   "Public-smoke workflow run ID:",
   "Tagged commit used by public smoke:",
@@ -29,7 +34,6 @@ const requiredEvidence = [
   "Job 3 conclusion:",
   "crates.io dry-run plan:",
   "Trusted Publisher verification:",
-  "Independent crates.io approval:",
   "crates.io workflow run:",
   "Published package/version set:",
   "Clean locked cargo-install command/output:",
@@ -130,7 +134,14 @@ function validateTemplate(template: string): void {
 test("release evidence template covers the complete operator ledger", async () => {
   const template = await readFile(templatePath, "utf8");
   validateTemplate(template);
+  assert(template.includes("Independent crates.io approval: <!-- historical lane or additional reviewer required during activation:"));
+  assert(template.includes("Independent GitHub publication approval: <!-- historical lane only:"));
+  assert(template.includes("Required approvals for the recorded lane are complete"));
+  assert(template.includes("authoritative UTC if available; otherwise unavailable, never inferred"));
+  assert(template.includes("authoritative UTC or unavailable"));
   assert(template.includes("../../docs/release-distribution.md"));
+  assert(!template.includes("approved independently"));
+  assert(template.includes("../../docs/release-automation.md"));
 });
 
 test("release evidence template is grounded in the v0.0.8 operations record", async () => {
