@@ -139,7 +139,8 @@ pub(crate) fn inspect(project: &Path, selector: Option<&str>) -> StatusReport {
             "spec_forms": ["semver", "npm_dist_tag", "npm_alias", "jsr_semver", "workspace:*", "workspace:^", "workspace:~", "file_tarball", "git+https"],
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
-            "registry_routing": "experimental"
+            "registry_routing": "experimental",
+            "lock_graph": {"contract_version":1,"inspect":true,"compare":"same_format","explicit_snapshots":true,"json_required":true}
         }),
         project: project.clone(),
     };
