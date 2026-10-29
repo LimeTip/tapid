@@ -4,9 +4,9 @@ import { expectedAssets } from './candidate.ts';
 import { capturePublicIdentity } from './public_smoke.ts';
 
 const sha = 'a'.repeat(40);
-const release = (tag = 'v1.2.3') => ({ id: 42, tag_name: tag, draft: false, prerelease: false,
+const release = (tag = 'v1.2.3') => ({ id: 42, tag_name: tag, draft: false, prerelease: false, immutable: true,
   assets: expectedAssets(tag).map((name, index) => ({ id: index + 1, name, size: 100 })) });
-function transport(metadata = release()) {
+function transport(metadata: unknown = release()) {
   const urls: string[] = [];
   return { urls, fetch: async (url: string, options: RequestInit) => {
     urls.push(url);
@@ -31,6 +31,16 @@ test('public identity fails closed for invalid inventory and release state', asy
     { ...release(), assets: [...release().assets, release().assets[0]] },
     { ...release(), assets: [...release().assets.slice(1), { id: 99, name: 'extra', size: 1 }] },
   ]) await rejects(capturePublicIdentity({ runnerSha: sha, run: '123/1', platforms: ['Linux'] }, transport(metadata).fetch));
+});
+test('public discovery rejects mutable or missing immutable state for latest and explicit selection', async () => {
+  for (const immutable of [false, undefined]) {
+    await rejects(capturePublicIdentity({ runnerSha: sha, run: '123/1', platforms: ['Linux'] },
+      transport({ ...release(), immutable }).fetch), /release must be immutable/);
+    const fetcher = async (url: string) => new Response(JSON.stringify(url.includes('/commits/')
+      ? { sha } : url.endsWith('/latest') ? release('v2.0.0') : { ...release(), immutable }));
+    await rejects(capturePublicIdentity({ tag: 'v1.2.3', runnerSha: sha, run: '123/1', platforms: ['Linux'] }, fetcher),
+      /release must be immutable/);
+  }
 });
 test('coordinator identity mismatch and malformed requested tags fail', async () => {
   for (const options of [{ tag: '../latest' }, { releaseId: '43', commit: sha }, { releaseId: '42', commit: 'b'.repeat(40) }]) {

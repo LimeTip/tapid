@@ -358,7 +358,8 @@ The scheduled daily run covers Linux; release and manual runs cover Linux, macOS
 
 Public smoke first runs a Linux public-inventory job, using the captured selected
 and latest tags and source commits. Public GitHub metadata and asset reads send
-no credentials. The current protocol requires exactly `expectedAssets(tag)` from
+no credentials. Both selected and latest releases must explicitly be public,
+stable, and immutable in GitHub metadata. The current protocol requires exactly `expectedAssets(tag)` from
 `tools/release/candidate.ts`, including all six archives. A source-built read-only
 verifier authenticates the production signature and checks each archive's original
 members without executing foreign binaries. The record and checksum generators

@@ -73,6 +73,7 @@ function releaseProtocol(value: string): PublicReleaseIdentity['protocol'] {
 async function identity(metadata: any, fetcher: PublicFetch): Promise<PublicReleaseIdentity> {
   tag(metadata.tag_name);
   if (metadata.draft !== false || metadata.prerelease !== false || !Number.isSafeInteger(metadata.id) || metadata.id <= 0) throw Error('release must be public stable');
+  if (metadata.immutable !== true) throw Error('release must be immutable');
   const protocol = releaseProtocol(metadata.tag_name);
   if (!Array.isArray(metadata.assets)) throw Error('missing public assets');
   const ids = new Set<number>();
