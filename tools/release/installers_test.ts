@@ -1,6 +1,7 @@
 import { strictEqual as equal, rejects, match, ok } from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createServer } from "node:https";
+import { X509Certificate, createHash } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1502,3 +1503,174 @@ try {
     match(result.stdout, /Native Windows fresh-session resolution verified/);
   } finally { await f.cleanup(); }
 });
+
+for (const runtime of platform === "win32" ? ["pwsh", "powershell.exe"] : ["pwsh"]) {
+  for (const [mode, expected] of [
+    ["stall", "download timed out"], ["ignore", "download timed out"],
+    ["headers", "download timed out"], ["acquisition", "download timed out"],
+    ["redirect-budget", "download timed out"], ["redirect-stall", "download timed out"],
+    ["progress", "download timed out"], ["cleanup-error", "download timed out"],
+    ["success", ""], ["redirect", ""], ["declared", "size limit"], ["overflow", "size limit"],
+    ["initial-http", "must use HTTPS"], ["downgrade", "target must use HTTPS"],
+    ["missing-target", "did not include a target"], ["http-error", "403"], ["redirect-limit", "too many redirects"],
+  ]) {
+    test(`PowerShell download ${mode} (${runtime})`, async context => {
+      const directory = await mkdtemp(join(tmpdir(), "tapid-download-"));
+      try {
+        const environment = { ...processEnv, HOME: directory, USERPROFILE: directory, XDG_CONFIG_HOME: directory, XDG_CACHE_HOME: directory, APPDATA: directory, LOCALAPPDATA: directory };
+        try { await run(runtime, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { env: environment, timeout: 20000, killSignal: "SIGKILL" }); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT" || processEnv.CI) throw error;
+          context.skip(`${runtime} unavailable`); return;
+        }
+        const source = await readFile(join(root, "scripts/install.ps1"), "utf8");
+        const functions = source.slice(source.indexOf("# Private construction"), source.indexOf("function Test-ReleaseVersion"));
+        await writeFile(join(directory, "fixture.cs"), await readFile(join(root, "tools/release/download_fixture.cs")));
+        await writeFile(join(directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Net.Http
+$references = @{}
+if ($PSVersionTable.PSVersion.Major -le 5) { $references.ReferencedAssemblies = @('System.Net.Http.dll', 'System.dll', 'System.Core.dll') }
+[Console]::Error.WriteLine('download fixture: compiling transport')
+Add-Type @references -Path (Join-Path $PSScriptRoot 'fixture.cs')
+function Fail([string]$Message) { throw "tapid installer: $Message" }
+${functions}
+function New-DownloadHandler { return [DownloadFixture]::new() }
+function Get-DownloadTimeoutMilliseconds { return $script:FixtureDeadline }
+$script:FixtureDeadline = 5000
+$path = Join-Path $PSScriptRoot 'download'
+[Console]::Error.WriteLine('download fixture: compiling deadline')
+Initialize-DownloadDeadline
+[Console]::Error.WriteLine('download fixture: warming call sites')
+# Warm the production call sites/JIT before measuring the short network deadline.
+[DownloadFixture]::Reset('redirect')
+Save-BoundedHttpsFile 'https://fixture.invalid/warmup' $path 10
+Remove-Item $path
+[Console]::Error.WriteLine('download fixture: warmup completed')
+[DownloadFixture]::Reset('${mode}')
+$script:FixtureDeadline = ${expected !== "download timed out" ? 5000 : ["redirect-budget", "redirect-stall", "progress"].includes(mode) ? 750 : 250}
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$failure = $null
+try { Save-BoundedHttpsFile '${mode === "initial-http" ? "http" : "https"}://fixture.invalid/file' $path 10 }
+catch { $failure = $_ }
+[Console]::Error.WriteLine('download fixture: measured transfer returned')
+if ('${expected}') {
+    if (-not $failure -or $failure -notmatch '${expected}') { throw "unexpected failure: $failure" }
+} elseif ($failure) { throw $failure }
+if ($clock.ElapsedMilliseconds -gt ($script:FixtureDeadline + 2000)) { throw 'deadline exceeded scheduling allowance' }
+if ('${expected}') {
+    if (Test-Path $path) { throw 'partial download remains' }
+} elseif ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($path)) -cne 'abcdefghij') { throw 'incorrect download bytes' }
+# Late operations have their own scheduling allowance, outside the measured deadline.
+$cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+while ('${mode}' -ne 'initial-http' -and $cleanupClock.ElapsedMilliseconds -lt 2000 -and
+    (-not [DownloadFixture]::StreamDisposed -or -not [DownloadFixture]::ContentDisposed -or
+    ('${mode}' -in 'headers', 'acquisition', 'ignore' -and -not [DownloadFixture]::Released))) { Start-Sleep -Milliseconds 10 }
+if ('${mode}' -ne 'initial-http' -and -not [DownloadFixture]::ContentDisposed) { throw 'response leaked' }
+if ('${mode}' -ne 'initial-http' -and -not [DownloadFixture]::StreamDisposed) { throw 'stream leaked' }
+if ('${mode}' -in 'stall', 'ignore', 'cleanup-error' -and -not [DownloadFixture]::Cancelled) { throw 'cancellation missing' }
+if ('${mode}' -eq 'redirect-stall' -and ([DownloadFixture]::Requests -ne 2 -or [DownloadFixture]::Reads -lt 2)) { throw 'final redirected body not exercised' }
+if ('${mode}' -eq 'progress' -and [DownloadFixture]::Reads -lt 2) { throw 'progressing body not exercised' }
+if ('${mode}' -eq 'redirect-budget' -and ([DownloadFixture]::Requests -gt 3 -or [DownloadFixture]::Requests -lt 2)) { throw 'redirect renewed budget' }
+if ('${mode}' -in 'headers', 'acquisition', 'ignore' -and -not [DownloadFixture]::Released) { throw 'pending operation not released' }
+if ('${mode}' -eq 'redirect-limit' -and [DownloadFixture]::Requests -ne 11) { throw 'redirect cap changed' }
+if ('${expected}' -and (Test-Path $path)) { throw 'late write recreated destination' }
+if (-not [DownloadFixture]::HandlerDisposed) { throw 'handler/client leaked' }
+if ('${mode}' -ne 'initial-http') {
+    if (-not [DownloadFixture]::Token.CanBeCanceled) { throw 'request cancellation missing' }
+}
+Write-Output 'download contract verified'
+  `);
+        const result = await run(runtime, ["-NoProfile", "-NonInteractive", "-File", join(directory, "test.ps1")], { timeout: 20000, killSignal: "SIGKILL", env: environment });
+        match(result.stdout, /download contract verified/);
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+  }
+}
+
+// Real HTTP-handler probe: certificate acceptance is confined to the child process,
+// exact loopback host/port, and this fixture's certificate. No trust store changes.
+for (const runtime of platform === "win32" ? ["pwsh", "powershell.exe"] : ["pwsh"]) {
+  test(`PowerShell download native HTTPS stall (${runtime})`, async context => {
+    const directory = await mkdtemp(join(tmpdir(), "tapid-https-download-"));
+    const cert = await readFile(join(root, "tools/release/fixtures/download-localhost-cert.pem"));
+    const key = await readFile(join(root, "tools/release/fixtures/download-localhost-key.pem"));
+    const sockets = new Set<import("node:net").Socket>();
+    let stalled = false;
+    let closed = false;
+    const server = createServer({ cert, key }, (request, response) => {
+      response.setHeader("Connection", "close");
+      if (request.url === "/stall") {
+        stalled = true;
+        request.socket.once("close", () => { closed = true; });
+        response.writeHead(200, { "Content-Length": "10" });
+        response.write("a");
+      } else { response.end("abcdefghij"); }
+    });
+    server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+    try {
+      const environment = { ...processEnv, HOME: directory, USERPROFILE: directory, XDG_CONFIG_HOME: directory, XDG_CACHE_HOME: directory, APPDATA: directory, LOCALAPPDATA: directory };
+      try { await run(runtime, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { env: environment, timeout: 20000, killSignal: "SIGKILL" }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || processEnv.CI) throw error;
+        context.skip(`${runtime} unavailable`); return;
+      }
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+      const address = server.address();
+      ok(address && typeof address !== "string");
+      const origin = `https://127.0.0.1:${address.port}`;
+      const pin = new X509Certificate(cert).fingerprint.replaceAll(":", "");
+      const source = await readFile(join(root, "scripts/install.ps1"), "utf8");
+      const functions = source.slice(source.indexOf("# Private construction"), source.indexOf("function Test-ReleaseVersion"));
+      await writeFile(join(directory, "test.ps1"), `$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Net.Http
+$references = @{}
+if ($PSVersionTable.PSVersion.Major -le 5) { $references.ReferencedAssemblies = @('System.Net.Http.dll', 'System.dll', 'System.Core.dll') }
+# Use C# delegates: TLS callbacks run outside a PowerShell runspace.
+$callback = if ($PSVersionTable.PSVersion.Major -le 5) {
+    'ServicePointManager.ServerCertificateValidationCallback = (sender, cert, chain, errors) => ((HttpWebRequest)sender).RequestUri.GetLeftPart(UriPartial.Authority) == "${origin}" && cert.GetCertHashString() == "${pin}";'
+} else {
+    'handler.ServerCertificateCustomValidationCallback = (request, cert, chain, errors) => request.RequestUri.GetLeftPart(UriPartial.Authority) == "${origin}" && cert.GetCertHashString() == "${pin}";'
+}
+Add-Type @references -TypeDefinition @"
+using System;
+using System.Net;
+using System.Net.Http;
+public static class NativeDownloadFixture {
+    public static HttpClientHandler Create() {
+        var handler = new HttpClientHandler();
+        handler.UseProxy = false;
+        handler.UseCookies = false;
+        $callback
+        return handler;
+    }
+}
+"@
+function Fail([string]$Message) { throw "tapid installer: $Message" }
+${functions}
+function New-DownloadHandler { return [NativeDownloadFixture]::Create() }
+function Get-DownloadTimeoutMilliseconds { return 1000 }
+$path = Join-Path $PSScriptRoot 'download'
+Save-BoundedHttpsFile '${origin}/success' $path 10
+if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($path)) -cne 'abcdefghij') { throw 'TLS success control failed' }
+Remove-Item $path
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$failure = $null
+try { Save-BoundedHttpsFile '${origin}/stall' $path 10 } catch { $failure = $_ }
+if (-not $failure -or $failure -notmatch 'download timed out') { throw "unexpected failure: $failure" }
+if ($clock.ElapsedMilliseconds -gt 3000) { throw 'native deadline exceeded scheduling allowance' }
+if (Test-Path $path) { throw 'native partial download remains' }
+Write-Output "Native TLS success and stalled body verified: $($PSVersionTable.PSVersion)"
+`);
+      const result = await run(runtime, ["-NoProfile", "-NonInteractive", "-File", join(directory, "test.ps1")], { timeout: 20000, killSignal: "SIGKILL", env: environment });
+      match(result.stdout, /Native TLS success and stalled body verified/);
+      context.diagnostic(result.stdout.trim());
+      for (let attempt = 0; attempt < 100 && !closed; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+      ok(stalled, "server must observe stalled-body request");
+      ok(closed, "timeout must close the real transport connection");
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}

@@ -717,6 +717,11 @@ jobs:
           $actual = & target/debug/tapid.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($actual -cne "tapid $expected") { throw "Unexpected native version: $actual" }
+      - name: Verify bounded Windows downloads on both PowerShell runtimes
+        shell: pwsh
+        run: |
+          node --experimental-strip-types --test --test-name-pattern="PowerShell download" tools/release/installers_test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify native Windows PATH contract
         shell: pwsh
         run: |

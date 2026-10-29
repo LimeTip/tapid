@@ -654,3 +654,11 @@ test('stable consumer shell gate rejects failure cancellation skipped and absent
     await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
   }
 });
+
+test('Windows installer CI requires bounded download probes on both PowerShell runtimes', async () => {
+  const probe = step(job(await workflow('ci'), 'windows-installer-contract'), 'Verify bounded Windows downloads on both PowerShell runtimes');
+  assert.match(probe, /shell: pwsh/);
+  assert.match(probe, /node --experimental-strip-types --test --test-name-pattern="PowerShell download" tools\/release\/installers_test.ts/);
+  assert.match(probe, /if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
+  assert.doesNotMatch(probe, /continue-on-error:|if:/);
+});
