@@ -705,3 +705,7 @@ fn network_fixture_response_rejects_invalid_framing() {
         std::io::ErrorKind::InvalidData
     );
 }
+
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "run_result_interruptions.rs"]
+mod result_interruptions;

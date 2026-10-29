@@ -34,6 +34,12 @@ If execution is still denied, inspect the worker mount/security policy before
 attributing the failure to executable permissions. This configuration does not
 supply native containment prerequisites or establish native platform support.
 
+Keep validation inside the isolated worker, without host credentials or an
+unsandboxed host fallback. Check both mount options and worker execution policy
+when generated fixtures cannot launch; a passing host run cannot prove the
+worker configuration. Linux results do not establish native macOS or Windows
+containment behavior.
+
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,
@@ -197,3 +203,68 @@ checkouts model worktree consumers of the same cache; they do not invoke Git.
 These are deterministic contract tests, not measurements of an external agent's
 reasoning or model tool selection. Existing transaction and containment tests
 remain responsible for their broader platform and attack-path coverage.
+
+### Bounded wait and lost-response evaluation
+
+Issue [#198](https://github.com/LimeTip/tapid/issues/198) is evaluated through
+existing store and `agent_workflows` seams, without operation IDs or completion
+records. A controlled macOS run of the nine workflow tests passed with these
+measurements (bytes include stdout and stderr; temporary path lengths can change
+them on another run):
+
+| Controlled scenario | Calls | Output bytes | Safe next action / limitation |
+| --- | ---: | ---: | --- |
+| Project contention, then release | 2 | 1,514 | Retry only after release; contender inputs stay unchanged. |
+| Two projects, shared-store expiry, then release | 3 | 7,496 | `STORE_BUSY`, `unchanged`, `after_contention`; retry succeeds after release. Expiry measured 5,043 ms. |
+| Existing lost commit response and frozen offline recovery | 3 | 2,694 | Inspect pending recovery, then preserve the committed lock through recovery. |
+| Abrupt interruption at `activation_complete` | 3 | 5,267 | Status preserves all entries/bytes; recovery rolls back project activation and published trees. |
+| Abrupt interruption at `commit_decision` | 3 | 5,282 | Status preserves evidence; recovery retains the committed lock, installed package, and store trees. |
+| Abrupt interruption at `post_commit_cleanup` | 3 | 5,282 | Activation cleanup has run; recovery removes remaining evidence without undoing commit. |
+| Completed install with response withheld, unchanged status, later add, status | 4 | 11,745 | Reconcile expected state; subsequent status describes the later state, without historical attribution. |
+
+Every scenario reports zero unnecessary repeated failures and enforces the 8 KiB
+per-result budget. Retrying after observed lock release is necessary and excluded
+from unnecessary repetitions. The response-withholding harness first observes
+subprocess completion; it does not simulate a particular transport failure rate.
+The three abrupt interruptions use debug-only crash checkpoints. The same
+workflow also pauses the parent at each boundary on Unix, sends it SIGTERM,
+asserts signal termination, and checks read-only inspection and normal recovery.
+Readiness is synchronized through an isolated temporary file; parent exit has a
+ten-second watchdog, and the debug-only pause aborts after fifteen seconds if
+the supervisor disappears. This proves parent-signal cancellation settlement,
+not graceful cancellation or process-tree termination. Existing lifecycle and CI
+crash tests also cover store publication and activation boundaries.
+
+A fresh integrated macOS run passed all 11 workflow tests, including both guide
+additions and all six crash/signal boundary cases. Shared-store expiry measured
+5,068 ms; its three calls emitted 7,502 bytes. Project contention emitted 1,520
+bytes over two calls, and completed-response withholding emitted 11,745 bytes
+over four calls. All scenarios reported zero unnecessary retries and enforced
+the per-result budget. These are local fixture measurements with variable path
+lengths, not production frequency or timeout-tuning evidence.
+
+Store unit tests use a subprocess watchdog for the real five-second default,
+short private deadlines for shared/exclusive and recovery escalation, compatible
+readers, and error preservation. Recovery accounting uses thread-local controlled
+monotonic time advanced after real filesystem recovery: expiry after the second
+recovery and expiry during the first recovery are checked without
+scheduler-dependent sleeps. A guard restores test overrides on panic. Native
+shared/exclusive release-during-wait tests synchronize unlock with an observed
+contended attempt and use channel watchdogs. The CLI separately proves expiry
+followed by a successful retry launched after confirmed release. CLI contention
+permits two seconds of scheduling tolerance and kills/reaps a contender at its
+nine-second watchdog.
+Whole-command duration is not bounded. Status snapshots include manifest,
+lockfile, installed layout, store contents, and recovery evidence, ignoring access
+timestamps. Status neither acquires transaction locks nor opens the shared store.
+
+These are controlled scenarios, not a production incident sample: response-loss
+frequency and its denominator remain unknown. After cleanup, present-state
+inspection cannot prove invocation identity or reconstruct ownership/ordering
+after later mutations. An `unchanged` inspection describes only that call, not the
+lost mutation. Existing reconciliation and recovery support the tested workflows;
+historical attribution remains explicitly unresolved. Operation IDs and bounded
+durable completion records are therefore deferred pending evidence of a required
+workflow needing that attribution, rather than adding cross-agent coordination
+for isolated worktrees. Native locking behavior remains subject to the existing
+Linux, macOS, and Windows CI matrix.
