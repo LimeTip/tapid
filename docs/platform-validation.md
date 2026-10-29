@@ -148,8 +148,8 @@ the checkout SHA, kernel/architecture, runtime/toolchain versions, controller
 observations, and test results. This configured job is **not** native acceptance
 evidence until it executes successfully on the candidate source.
 
-An always-run evidence step makes only the allowlisted acceptance files readable
-to the artifact uploader, using held descriptors and rejecting symlinks,
+An always-run evidence step copies only allowlisted acceptance files into a
+separate upload directory, using held descriptors and rejecting symlinks,
 nonregular files and hardlinks. It does not traverse the installed project.
 It prints bounded command diagnostics before upload and preserves the native
 step's failure status. Synthetic orchestration may declare its expected Node
@@ -217,6 +217,27 @@ does not imply a non-skipped native pass.
 | Clone3/cgroup reassignment and Unix socket controls | `managed_filter_denies_clone3_and_reconnectable_unix_socketpairs` | Full target/descendant positive and negative network controls |
 | Missing prerequisites | `managed_tree_requires_private_launcher_with_otherwise_valid_limits`; `managed_tree_rejects_independently_denied_kernel_prerequisites_before_target` first executes an identical valid request, then independently denies Landlock, pidfds, namespace creation, mount setup, seccomp installation, delegation-directory creation, controller/interface opens and launcher exec through inherited kernel filters | Execute required lane; kernel denial injection covers unavailable operations, not every host provisioning failure |
 | Reference fixture build/test/start and cancellation | `scripts/check-managed-news-site.ts` applies `tapid.linux-managed.toml` to an isolated fixture, checks build/test results and HTTP marker, cancels start, separately verifies complete cleanup and connection refusal; `tests/news_site_managed_test.ts` covers orchestration failures using a synthetic CLI | Execute required lane and measure native workload headroom before treating candidate limits as final |
+
+The delegated native reference workload uses a unique root-owned mode-0700
+`/tmp/tapid-managed-news.*` directory. It does not run beneath the hosted
+runner's private home: after setup capabilities are removed, uid 0 must still
+have ordinary traversal permission on every absolute ancestor. The privileged
+`managed_tree_absolute_tools_require_traversable_fixture_ancestors` control
+compares relative and absolute access below a disposable foreign-owned ancestor,
+then checks absolute tool execution with root-owned ancestors while retaining
+sibling-secret and package-write denials. It requires the delegated root lane;
+an ordinary account or non-Linux run does not establish this behavior.
+
+An always-run collector copies only allowlisted, single-link regular evidence
+files from held descriptors into a separate upload directory. It never copies
+the installed project. Successful collection precedes removal of the owned
+temporary workload; collection failures retain the workload for diagnosis.
+When `pids.peak` is unavailable, the lane samples hierarchical `pids.current`
+every 10 ms for at most 150000 samples and reports the observed maximum as a
+lower bound. This is an actual task-count observation, not an exact peak or
+proof that short-lived spikes had equivalent headroom. Native acceptance and
+support remain subject to the complete reference-workload result.
+
 
 Reconciliation of the supplied historical PR #176 concerns: current ManagedTree
 capture has a finite combined ceiling (at most 16 MiB), and the existing

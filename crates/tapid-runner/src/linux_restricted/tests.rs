@@ -1678,3 +1678,76 @@ fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
         "bounded output with kernel cleanup"
     );
 }
+
+#[test]
+fn managed_tree_absolute_tools_require_traversable_fixture_ancestors() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        eprintln!("privileged ancestor control requires the delegated native lane");
+        return;
+    }
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "ancestor control requires root setup"
+    );
+    use std::os::unix::fs::{PermissionsExt, chown};
+    let fixture = tapid_test_support::TempProject::new("managed-ancestor").unwrap();
+    fixture
+        .write(
+            "ancestor/project/node_modules/tool",
+            b"#!/bin/sh\necho executed\n",
+        )
+        .unwrap();
+    fixture
+        .write("ancestor/secret", b"outside authority")
+        .unwrap();
+    fs::create_dir(fixture.path().join("ancestor/project/output")).unwrap();
+    let ancestor = fixture.path().join("ancestor");
+    let root = ancestor.join("project");
+    let tool = root.join("node_modules/tool");
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+    // Only this disposable ancestor changes ownership. Root setup can resolve
+    // the held cwd; the target loses DAC bypass before executing project code.
+    chown(&ancestor, Some(65534), Some(65534)).unwrap();
+    let policy = || {
+        SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec!["output".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap()
+    };
+    let absolute = tool.to_str().unwrap();
+    assert!(!absolute.contains('\''));
+    let denied = format!(
+        "test -r node_modules/tool && test -x node_modules/tool && test ! -r '{absolute}' && test ! -x '{absolute}' && echo mismatch > output/denied"
+    );
+    let result = execute(&request(&root, &denied, policy())).unwrap();
+    assert_eq!(result.termination(), &Termination::Exited(0));
+    assert_eq!(fs::read(root.join("output/denied")).unwrap(), b"mismatch\n");
+    assert_eq!(
+        result.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+
+    // The native workload repair changes fixture ownership, not authority.
+    chown(&ancestor, Some(0), Some(0)).unwrap();
+    let allowed = format!(
+        "'{absolute}' > output/allowed && test ! -r ../secret && test ! -w node_modules/tool && ! echo changed > node_modules/tool"
+    );
+    let result = execute(&request(&root, &allowed, policy())).unwrap();
+    assert_eq!(result.termination(), &Termination::Exited(0));
+    assert_eq!(
+        fs::read(root.join("output/allowed")).unwrap(),
+        b"executed\n"
+    );
+    assert_eq!(fs::read(&tool).unwrap(), b"#!/bin/sh\necho executed\n");
+    assert_eq!(
+        result.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+}

@@ -728,19 +728,31 @@ test('ManagedTree evidence preparation touches only allowlisted single-link regu
   // macOS has no procfs descriptor directory. Exercise file selection, modes
   // and link rejection there using the trusted fixture path; Linux executes
   // the exact held-directory program. Neither is a privileged CI receipt.
-  if (process.platform !== 'linux') program = program.replace('`/proc/self/fd/${directory}`', 'path');
+  if (process.platform !== 'linux') program = program
+    .replace('`/proc/self/fd/${directory}`', 'path')
+    .replace('`/proc/self/fd/${output}/${name}`', 'destination + "/" + name')
+    .replace('`/proc/self/fd/${fd}`', 'held + "/" + name');
   const root = await mkdtemp(join(tmpdir(), 'managed evidence '));
   try {
     const script = join(root, 'prepare.mjs');
     await writeFile(script, program);
-    const run = (directory: string) => execFileAsync(process.execPath, [script, directory, String(process.getuid!()), String(process.getgid!())]);
+    let attempt = 0;
+    let destination: string;
+    const run = (directory: string) => {
+      destination = join(root, 'published-' + attempt++);
+      return execFileAsync(process.execPath, [script, directory, destination, String(process.getuid!()), String(process.getgid!())]);
+    };
     const directory = join(root, 'evidence');
     await mkdir(directory);
     await writeFile(join(directory, 'build.json'), 'receipt', { mode: 0o600 });
     await writeFile(join(directory, 'unrelated.json'), 'private', { mode: 0o600 });
     await mkdir(join(directory, 'project'), { mode: 0o700 });
     await run(directory);
-    assert.equal((await stat(join(directory, 'build.json'))).mode & 0o777, 0o644);
+    assert.equal((await stat(join(destination!, 'build.json'))).mode & 0o777, 0o644);
+    assert.equal(await readFile(join(destination!, 'build.json'), 'utf8'), 'receipt');
+    await assert.rejects(stat(join(destination!, 'project')));
+    await assert.rejects(stat(join(destination!, 'unrelated.json')));
+    assert.equal((await stat(join(directory, 'build.json'))).mode & 0o777, 0o600);
     assert.equal((await stat(join(directory, 'unrelated.json'))).mode & 0o777, 0o600);
     assert.equal((await stat(join(directory, 'project'))).mode & 0o777, 0o700);
     const outside = join(root, 'secret');
@@ -789,13 +801,13 @@ test('ManagedTree launch leaves shell expressions for Bash expansion', { skip: p
   // checked above, while the controlled probe can execute on either version.
   const probe = 'printf "pid=%s bashpid=%s leaf=%s substitution=%s\\n" "$$" "${BASHPID:-$$}" "${probe_path##*/}" "$(printf intact)"; exit 0';
   const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', stub + launch.replace('uname -a', () => probe)], {
-    env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: tmpdir(), RUSTFLAGS: '', node_bin: process.execPath, target_dir: tmpdir(), probe_path: '/owned/driver' },
+    env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: tmpdir(), RUSTFLAGS: '', node_bin: process.execPath, target_dir: tmpdir(), probe_path: '/owned/driver', workload: '/tmp/controlled-workload' },
   });
   assert.match(result.stdout, /^pid=(\d+) bashpid=\1 leaf=driver substitution=intact\n$/);
   const evidence = await mkdtemp(join(tmpdir(), 'managed failure status '));
   try {
     await assert.rejects(execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', stub + launch.replace('uname -a', () => probe.replace('exit 0', 'exit 37')) + ' 2>&1 | tee "$RUNNER_TEMP/failure.log"'], {
-      env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: evidence, RUSTFLAGS: '', node_bin: process.execPath, target_dir: evidence, probe_path: '/owned/driver' },
+      env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: evidence, RUSTFLAGS: '', node_bin: process.execPath, target_dir: evidence, probe_path: '/owned/driver', workload: '/tmp/controlled-workload' },
     }), error => (error as NodeJS.ErrnoException & { code: number }).code === 37);
     assert.match(await readFile(join(evidence, 'failure.log'), 'utf8'), /substitution=intact/);
   } finally { await rm(evidence, { recursive: true, force: true }); }
@@ -864,4 +876,43 @@ test('ManagedTree discovery corroborates unit ownership before controller writes
       }
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('ManagedTree workload has private root-owned temporary ancestors and evidence is copied separately', async () => {
+  const owner = job(await workflow('ci'), 'linux-managed-tree');
+  const setup = step(owner, 'Require native ManagedTree execution in a delegated host context');
+  assert(setup.includes('mktemp -d /tmp/tapid-managed-news.XXXXXXXXXX'));
+  assert(setup.includes('umask 077'));
+  assert(setup.includes('TAPID_MANAGED_WORKLOAD'));
+  assert(setup.includes('--evidence "$TAPID_MANAGED_WORKLOAD/evidence"'));
+  const prepare = step(owner, 'Prepare readable native acceptance evidence');
+  for (const token of ['copyFileSync', 'COPYFILE_EXCL', 'O_NOFOLLOW', 'nlink', 'TAPID_MANAGED_WORKLOAD']) assert(prepare.includes(token), token);
+  assert.doesNotMatch(setup, /chmod.*runner|chown.*runner/);
+});
+
+test('ManagedTree task fallback measures hierarchical current counts with a bounded sampler', { skip: process.platform === 'win32' ? 'Linux sampler requires Bash' : false }, async () => {
+  const setup = step(job(await workflow('ci'), 'linux-managed-tree'), 'Require native ManagedTree execution in a delegated host context');
+  const sampler = setup.slice(setup.indexOf('              # A sampled fallback'), setup.indexOf('              fixture_status=0'));
+  assert(sampler.includes('150000'));
+  assert(sampler.includes('pids.current'));
+  assert(sampler.includes('sleep 0.01'));
+  assert(setup.includes(') || fixture_status=$?'));
+  assert(setup.includes('exit "$fixture_status"'));
+  assert(setup.includes('lower bound, not exact peak'));
+  const root = await mkdtemp(join(tmpdir(), 'managed sampled tasks '));
+  try {
+    await mkdir(join(root, 'fixture'));
+    await writeFile(join(root, 'fixture', 'pids.current'), '7\n');
+    const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', sampler + `
+      for ((attempt = 0; attempt < 200; attempt++)); do
+        if test -r "$TAPID_MANAGED_WORKLOAD/pids.sampled" && test "$(cat "$TAPID_MANAGED_WORKLOAD/pids.sampled")" = 7; then break; fi
+        sleep 0.01
+      done
+      kill "$sampler"
+      wait "$sampler" || test "$?" = 143
+      cat "$TAPID_MANAGED_WORKLOAD/pids.sampled"
+    `], { env: { ...process.env, group: root, TAPID_MANAGED_WORKLOAD: root } });
+    assert.equal(result.stdout, '7\n');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
