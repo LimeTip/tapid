@@ -15,6 +15,43 @@ const MIN_RATIONALE_CHARS = 20;
 const EXCLUDED_TEST_PARTS = new Set(["test", "tests"]);
 const EXCLUDED_TOP_LEVEL_TREES = new Set(["target", "generated", "build"]);
 const EXCLUDED_TEST_FILES = new Set(["test.rs", "tests.rs"]);
+const CORE_DEPENDENCY_ALLOWLIST = new Set(["base64", "semver", "url"]);
+
+async function dependencyErrors(root: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("cargo", [
+    "metadata", "--manifest-path", join(root, "Cargo.toml"),
+    "--no-deps", "--format-version", "1", "--offline", "--locked",
+  ], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const metadata = JSON.parse(stdout);
+  if (!metadata || !Array.isArray(metadata.packages) || !Array.isArray(metadata.workspace_members)) {
+    throw new Error("invalid Cargo metadata: packages and workspace_members required");
+  }
+  const errors: string[] = [];
+  for (const id of metadata.workspace_members) {
+    const pkg = metadata.packages.find((entry: { id: unknown }) => entry?.id === id);
+    if (typeof id !== "string" || !id || !pkg || typeof pkg.name !== "string" || !pkg.name || !Array.isArray(pkg.dependencies)) {
+      throw new Error("invalid Cargo metadata: workspace member record required");
+    }
+    for (const dep of pkg.dependencies) {
+      if (!dep || typeof dep.name !== "string" || !dep.name || ![null, "build", "dev"].includes(dep.kind) ||
+          !(dep.rename === null || typeof dep.rename === "string") || !(dep.target === null || typeof dep.target === "string") || typeof dep.optional !== "boolean") {
+        throw new Error(`invalid Cargo metadata: dependency declaration for ${pkg.name}`);
+      }
+      if (dep.kind === "dev") continue;
+      const location = `${pkg.name}: dependency ${dep.name} (${dep.kind ?? "normal"}${dep.rename ? `, alias ${dep.rename}` : ""}${dep.target ? `, target ${dep.target}` : ""})`;
+      if (pkg.name !== "tapid-test-support" && dep.name === "tapid-test-support") {
+        errors.push(`${location} violates test-support isolation: production dependencies cannot use tapid-test-support`);
+      }
+      if (pkg.name !== "tapid" && pkg.name !== "tapid-test-support" && dep.name === "tapid") {
+        errors.push(`${location} violates CLI dependency direction: capabilities cannot depend on the CLI`);
+      }
+      if (pkg.name === "tapid-core" && !CORE_DEPENDENCY_ALLOWLIST.has(dep.name)) {
+        errors.push(`${location} violates core dependency allowlist: only base64, semver, and url are permitted`);
+      }
+    }
+  }
+  return errors;
+}
 
 async function trackedFiles(root: string): Promise<string[]> {
   const { stdout } = await execFileAsync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" });
@@ -86,6 +123,7 @@ export async function checkArchitecture(root: string) {
   for (const path of productionFiles) lineCounts.set(path, await physicalLineCount(join(root, path)));
 
   const { exceptions, errors } = await readExceptions(root, new Set(tracked));
+  errors.push(...await dependencyErrors(root));
   const advisories: string[] = [];
   for (const path of [...exceptions.keys()].sort()) {
     if (!productionFiles.includes(path)) {
