@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const REVIEW_RECOMMENDATION = 800;
@@ -15,6 +15,46 @@ const MIN_RATIONALE_CHARS = 20;
 const EXCLUDED_TEST_PARTS = new Set(["test", "tests"]);
 const EXCLUDED_TOP_LEVEL_TREES = new Set(["target", "generated", "build"]);
 const EXCLUDED_TEST_FILES = new Set(["test.rs", "tests.rs"]);
+// Stable, pure domain parsing only. New dependencies require an architecture review.
+const CORE_DEPENDENCIES = new Set(["base64", "semver", "url"]);
+
+type CargoMetadata = {
+  workspace_members: string[];
+  packages: {
+    id: string;
+    name: string;
+    dependencies: { name: string; kind: string | null; rename: string | null; target: string | null }[];
+  }[];
+};
+
+async function dependencyErrors(root: string): Promise<string[]> {
+  const wrapper = fileURLToPath(new URL("../scripts/dev.ts", import.meta.url));
+  const { stdout } = await execFileAsync(process.execPath, [
+    "--experimental-strip-types", wrapper, "metadata", "--no-deps",
+    "--format-version", "1", "--locked", "--offline",
+    "--manifest-path", join(root, "Cargo.toml"),
+  ], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const metadata: CargoMetadata = JSON.parse(stdout);
+  const members = new Set(metadata.workspace_members);
+  const errors: string[] = [];
+  for (const pkg of metadata.packages) {
+    if (!members.has(pkg.id)) continue;
+    for (const dependency of pkg.dependencies) {
+      if (dependency.kind === "dev") continue;
+      const edge = `${pkg.name} -> ${dependency.name}${dependency.rename ? ` (renamed ${dependency.rename})` : ""} [${dependency.kind ?? "normal"}${dependency.target ? `, ${dependency.target}` : ""}]`;
+      if (dependency.name === "tapid" || dependency.name === "tapid-cli") {
+        errors.push(`${edge}: capabilities must not depend on the CLI`);
+      }
+      if (dependency.name === "tapid-test-support") {
+        errors.push(`${edge}: test-support is permitted only as a dev dependency`);
+      }
+      if (pkg.name === "tapid-core" && !CORE_DEPENDENCIES.has(dependency.name)) {
+        errors.push(`${edge}: tapid-core permits only pure domain dependencies: base64, semver, url`);
+      }
+    }
+  }
+  return errors;
+}
 
 async function trackedFiles(root: string): Promise<string[]> {
   const { stdout } = await execFileAsync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" });
@@ -86,6 +126,7 @@ export async function checkArchitecture(root: string) {
   for (const path of productionFiles) lineCounts.set(path, await physicalLineCount(join(root, path)));
 
   const { exceptions, errors } = await readExceptions(root, new Set(tracked));
+  errors.push(...await dependencyErrors(root));
   const advisories: string[] = [];
   for (const path of [...exceptions.keys()].sort()) {
     if (!productionFiles.includes(path)) {

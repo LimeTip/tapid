@@ -922,12 +922,45 @@ fn package_key_roundtrips_contexts_without_loss() {
 }
 
 #[test]
+fn typed_context_accessors_preserve_scoped_peers_and_empty_contexts() {
+    let wire = "https://registry.example.test|demo@1.0.0|peer=name=@scope%2Fpeer%2Dname;version=1.2.3,name=z;version=2.0.0|platform=os=windows;cpu=aarch64;libc=";
+    let key = wire.parse::<super::LockfilePackageKey>().unwrap();
+    let expected = tapid_core::PeerContext::default()
+        .with(
+            "@scope/peer-name".parse().unwrap(),
+            "1.2.3".parse().unwrap(),
+        )
+        .with("z".parse().unwrap(), "2.0.0".parse().unwrap());
+    assert_eq!(key.peer_context().unwrap(), expected);
+    assert_eq!(
+        key.platform_context().unwrap(),
+        tapid_core::PlatformContext::new(Some("windows"), Some("aarch64"), None).unwrap()
+    );
+    assert_eq!(key.to_string(), wire);
+    let empty = "https://registry.example.test|demo@1.0.0|peer=-|platform=-"
+        .parse::<super::LockfilePackageKey>()
+        .unwrap();
+    assert_eq!(
+        empty.peer_context().unwrap(),
+        tapid_core::PeerContext::default()
+    );
+    assert_eq!(
+        empty.platform_context().unwrap(),
+        tapid_core::PlatformContext::new(None, None, None).unwrap()
+    );
+}
+
+#[test]
 fn typed_context_accessors_reject_noncanonical_public_field_mutations() {
     let key: super::LockfilePackageKey = package_fixture().key().parse().unwrap();
     for peer in [
         "react@1.0.0",
         "name=react;version=%31.0.0",
         "name=react;version=1.0.0,name=react;version=1.0.0",
+        "name=z;version=1.0.0,name=a;version=1.0.0",
+        "name=@scope%2fpeer;version=1.0.0",
+        "name=react;version=%",
+        "name=react;version=%GG",
     ] {
         let mut changed = key.clone();
         changed.peer_context = peer.into();

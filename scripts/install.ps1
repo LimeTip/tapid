@@ -46,23 +46,36 @@ function Expand-VerifiedArchive([string]$archivePath, [string]$extractRoot) {
 
 function Fail([string]$Message) { throw "tapid installer: $Message" }
 
-function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
+function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes, $HttpHandler = $null, [TimeSpan]$Timeout = [TimeSpan]::FromSeconds(120)) {
     Add-Type -AssemblyName System.Net.Http
-    $handler = [Net.Http.HttpClientHandler]::new()
-    $handler.AllowAutoRedirect = $false
+    # The private handler seam supports offline transport fixtures. Production
+    # always uses manual redirects so every target receives the HTTPS checks.
+    $handler = $HttpHandler
+    if (-not $handler) {
+        $handler = [Net.Http.HttpClientHandler]::new()
+        $handler.AllowAutoRedirect = $false
+    }
     $client = [Net.Http.HttpClient]::new($handler)
     $response = $null
     $source = $null
     $destinationStream = $null
+    $deadline = $null
     $downloadError = $null
     $cleanupError = $null
     try {
+        if ($Timeout -le [TimeSpan]::Zero) { Fail "download deadline must be positive" }
+        # One total two-minute deadline includes every redirect and body read.
+        # HttpClient.Timeout alone stops applying after ResponseHeadersRead.
+        $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+        $deadline = [Threading.CancellationTokenSource]::new($Timeout)
+        $token = $deadline.Token
         $client.DefaultRequestHeaders.UserAgent.ParseAdd("tapid-installer")
         $currentUri = [Uri]$Uri
         if ($currentUri.Scheme -ne "https") { Fail "download URL must use HTTPS" }
         [int]$redirectCount = 0
         while ($true) {
-            $response = $client.GetAsync($currentUri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $token.ThrowIfCancellationRequested()
+            $response = $client.GetAsync($currentUri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $token).GetAwaiter().GetResult()
             $statusCode = [int]$response.StatusCode
             if ($statusCode -in 301, 302, 303, 307, 308) {
                 if ($redirectCount -ge 10) { Fail "download encountered too many redirects" }
@@ -82,14 +95,16 @@ function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
         }
         if ($response.Content.Headers.ContentLength -gt $MaxBytes) { Fail "download exceeds the size limit" }
         $source = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $token.ThrowIfCancellationRequested()
         $destinationStream = [IO.File]::Create($Path)
         $buffer = [byte[]]::new(65536)
         [long]$total = 0
-        while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        while (($read = $source.ReadAsync($buffer, 0, $buffer.Length, $token).GetAwaiter().GetResult()) -gt 0) {
             $total += $read
             if ($total -gt $MaxBytes) { Fail "download exceeds the size limit" }
-            $destinationStream.Write($buffer, 0, $read)
+            $destinationStream.WriteAsync($buffer, 0, $read, $token).GetAwaiter().GetResult()
         }
+        $token.ThrowIfCancellationRequested()
     } catch {
         $downloadError = $_
     } finally {
@@ -98,6 +113,7 @@ function Save-BoundedHttpsFile([string]$Uri, [string]$Path, [long]$MaxBytes) {
         try { if ($response) { $response.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         try { $client.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         try { $handler.Dispose() } catch { if (-not $cleanupError) { $cleanupError = $_ } }
+        try { if ($deadline) { $deadline.Dispose() } } catch { if (-not $cleanupError) { $cleanupError = $_ } }
         if ($downloadError -or $cleanupError) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
     }
     if ($downloadError) { throw $downloadError }

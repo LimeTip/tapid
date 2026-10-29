@@ -348,6 +348,21 @@ fn existing_wrong_bytes_are_rejected() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Run a deterministic competitor after lookup and before artifact publication.
+struct CompetingReader<F> {
+    bytes: &'static [u8],
+    before_read: Option<F>,
+}
+
+impl<F: FnOnce() -> io::Result<()>> Read for CompetingReader<F> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if let Some(compete) = self.before_read.take() {
+            compete()?;
+        }
+        self.bytes.read(buffer)
+    }
+}
+
 #[test]
 /// Reject a mismatched publication winner, preserving its bytes and cleaning staging.
 fn racing_wrong_artifact_is_rejected_and_preserved() {
@@ -356,32 +371,15 @@ fn racing_wrong_artifact_is_rejected_and_preserved() {
     let expected_bytes = b"expected artifact";
     let expected = digest(expected_bytes);
     let destination = store.artifact_path(&expected);
-    struct CompetingReader {
-        destination: PathBuf,
-        bytes: &'static [u8],
-        inserted: bool,
-    }
-    impl Read for CompetingReader {
-        /// Insert mismatched bytes on the first read, after lookup and before publication.
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if !self.inserted {
-                fs::create_dir_all(self.destination.parent().unwrap())?;
-                fs::write(&self.destination, b"attacker bytes")?;
-                self.inserted = true;
-            }
-            let count = self.bytes.len().min(buffer.len());
-            buffer[..count].copy_from_slice(&self.bytes[..count]);
-            self.bytes = &self.bytes[count..];
-            Ok(count)
-        }
-    }
 
     let result = store.ingest(
         &expected,
         CompetingReader {
-            destination: destination.clone(),
             bytes: expected_bytes,
-            inserted: false,
+            before_read: Some(|| {
+                fs::create_dir_all(destination.parent().unwrap())?;
+                fs::write(&destination, b"attacker bytes")
+            }),
         },
     );
 
@@ -405,31 +403,14 @@ fn racing_matching_artifact_is_accepted_and_preserved() {
     let bytes = b"expected artifact";
     let expected = digest(bytes);
     let destination = store.artifact_path(&expected);
-    struct CompetingReader {
-        destination: PathBuf,
-        bytes: &'static [u8],
-        inserted: bool,
-    }
-    impl Read for CompetingReader {
-        /// Insert matching bytes on the first read, deterministically forcing a collision.
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if !self.inserted {
-                fs::create_dir_all(self.destination.parent().unwrap())?;
-                fs::write(&self.destination, self.bytes)?;
-                self.inserted = true;
-            }
-            let count = self.bytes.len().min(buffer.len());
-            buffer[..count].copy_from_slice(&self.bytes[..count]);
-            self.bytes = &self.bytes[count..];
-            Ok(count)
-        }
-    }
     let result = store.ingest(
         &expected,
         CompetingReader {
-            destination: destination.clone(),
             bytes,
-            inserted: false,
+            before_read: Some(|| {
+                fs::create_dir_all(destination.parent().unwrap())?;
+                fs::write(&destination, bytes)
+            }),
         },
     );
     assert!(matches!(result, Ok(IngestResult::AlreadyPresent(_))));
@@ -450,6 +431,37 @@ fn symlink_creation_unavailable(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
     ) || error.raw_os_error() == Some(1314)
+}
+
+#[test]
+fn racing_directory_artifact_is_rejected_and_preserved() {
+    let project = tapid_test_support::TempProject::new("racing-directory").unwrap();
+    let store = Store::new(project.path());
+    let bytes = b"expected artifact";
+    let expected = digest(bytes);
+    let destination = store.artifact_path(&expected);
+    let result = store.ingest(
+        &expected,
+        CompetingReader {
+            bytes,
+            before_read: Some(|| {
+                fs::create_dir_all(&destination)?;
+                fs::write(destination.join("competitor"), b"preserve me")
+            }),
+        },
+    );
+    assert!(matches!(result, Err(IngestError::Io(_))), "{result:?}");
+    assert!(destination.is_dir());
+    assert_eq!(
+        fs::read(destination.join("competitor")).unwrap(),
+        b"preserve me"
+    );
+    assert_eq!(
+        fs::read_dir(project.path().join(".staging"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[test]
@@ -483,36 +495,18 @@ fn racing_symlink_artifact_is_rejected_and_preserved() {
             Err(error) => panic!("failed to probe Windows symlink support: {error}"),
         }
     }
-    struct CompetingReader {
-        destination: PathBuf,
-        target: PathBuf,
-        bytes: &'static [u8],
-        inserted: bool,
-    }
-    impl Read for CompetingReader {
-        /// Insert the symlink on the first read, after lookup and before publication.
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if !self.inserted {
-                fs::create_dir_all(self.destination.parent().unwrap())?;
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&self.target, &self.destination)?;
-                #[cfg(windows)]
-                std::os::windows::fs::symlink_file(&self.target, &self.destination)?;
-                self.inserted = true;
-            }
-            let count = self.bytes.len().min(buffer.len());
-            buffer[..count].copy_from_slice(&self.bytes[..count]);
-            self.bytes = &self.bytes[count..];
-            Ok(count)
-        }
-    }
     let result = store.ingest(
         &expected,
         CompetingReader {
-            destination: destination.clone(),
-            target: target.clone(),
             bytes,
-            inserted: false,
+            before_read: Some(|| {
+                fs::create_dir_all(destination.parent().unwrap())?;
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &destination)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(&target, &destination)?;
+                Ok(())
+            }),
         },
     );
     #[cfg(unix)]
