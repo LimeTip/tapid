@@ -589,6 +589,22 @@ test('previous-release upgrade uses that release installer beneath the current r
   assert(!windowsUpgrade.includes('& $installer -Version $env:PREVIOUS_TAG'));
 });
 
+test('authoritative review evidence precedes signing and always reporting cannot gate publication', async () => {
+  const signing = job(await workflow('release-publication'), 'draft-release');
+  assert(signing.indexOf('evidence.ts authorize') > signing.indexOf('validate-unsigned'));
+  assert(signing.indexOf('evidence.ts authorize') < signing.indexOf('sign.ts sign'));
+  assert.match(signing, /name: release-authorization-\$\{\{ github.run_attempt \}\}/);
+  const coordinator = await workflow('crates-publication');
+  const report = job(coordinator, 'report');
+  assert.match(report, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(report, /needs: \[preflight, select, candidate, verify, promote, smoke, publish\]/);
+  assert.doesNotMatch(report, /contents: write|id-token: write|secrets\./);
+  assert.match(report, /evidence.ts report/);
+  assert.match(job(coordinator, 'publish'), /"\$INSTALL_ROOT\/bin\/tapid" --help/);
+  assert.match(job(coordinator, 'publish'), /name: release-install-\$\{\{ github.run_attempt \}\}/);
+  assert.doesNotMatch(job(coordinator, 'publish'), /needs:.*report/);
+});
+
 /** Preserve stable required contexts that fail unless the complete native consumer matrix succeeds. */
 function assertConsumerCompatibility(ci: string) {
   const compatibility = job(ci, 'consumer-validation');
