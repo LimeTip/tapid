@@ -85,6 +85,253 @@ fn private_node_runtime() -> (tapid_test_support::TempProject, PathBuf) {
     (runtime, node)
 }
 
+#[cfg(unix)]
+fn install_local_tool(project: &tapid_test_support::TempProject) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    // Match the reference tool's nested target and relative installed shim.
+    // Archive contains package.json and dist/bin/tool with an env-node shebang.
+    let bytes = include_bytes!("../fixtures/managed-nested-bin.tgz");
+    project.write("vendor/tool.tgz", bytes).unwrap();
+    let store = tapid_test_support::TempProject::new("run-installed-tool-store").unwrap();
+    let output = run(
+        project.path(),
+        &[
+            "add",
+            "local@file:vendor/tool.tgz",
+            "--store-dir",
+            store.path().to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shim = project.path().join("node_modules/.bin/scoped-tool");
+    assert!(
+        fs::symlink_metadata(&shim)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let target = fs::canonicalize(&shim).unwrap();
+    assert_eq!(
+        fs::read_link(&shim).unwrap(),
+        Path::new("../local/dist/bin/tool")
+    );
+    assert!(target.starts_with(fs::canonicalize(project.path()).unwrap()));
+    assert_ne!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    assert!(
+        fs::read(&target)
+            .unwrap()
+            .starts_with(b"#!/usr/bin/env node\n")
+    );
+    eprintln!(
+        "installed tool: shim={} link={} target={} mode={:o}",
+        shim.display(),
+        fs::read_link(&shim).unwrap().display(),
+        target.display(),
+        fs::metadata(&target).unwrap().permissions().mode()
+    );
+    shim
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_project_bin_executes_with_selected_node_before_containment() {
+    let project = project();
+    let shim = install_local_tool(&project);
+    let (_runtime, node) = private_node_runtime();
+    let output = Command::new(shim)
+        .env_clear()
+        .env("PATH", node.parent().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"alias-bin\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_managed_tree_cli_preserves_invocation_environment_and_checked_results() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let project = project();
+    let results = tapid_test_support::TempProject::new("managed-cli-results").unwrap();
+    let outside = tapid_test_support::TempProject::new("managed-cli-outside").unwrap();
+    outside
+        .write("secret", b"synthetic outside secret")
+        .unwrap();
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"managed-cli","version":"1.0.0","scripts":{"probe":"scoped-tool && tapid-local-probe"}}"#,
+        )
+        .unwrap();
+    install_local_tool(&project);
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[run.scripts.probe]
+assurance = "managed-tree"
+read = ["."]
+write = ["writable", ".next", ".tmp"]
+environment = ["TAPID_FLAG_VISIBLE", "TAPID_FLAG_ABSENT"]
+network = false
+subprocess = true
+timeout_seconds = 15
+max_output_bytes = 65536
+max_processes = 64
+max_memory_bytes = 536870912
+"#,
+        )
+        .unwrap();
+    for directory in ["writable", ".next", ".tmp"] {
+        fs::create_dir(project.path().join(directory)).unwrap();
+    }
+    symlink(outside.path(), project.path().join("outside-link")).unwrap();
+    for (name, script) in [
+        (
+            "tapid-local-probe",
+            "#!/bin/sh\nexec node probe.js \"$@\"\n",
+        ),
+        ("node", "#!/bin/sh\necho substituted-node; exit 91\n"),
+    ] {
+        let path = project
+            .write(format!("node_modules/.bin/{name}"), script.as_bytes())
+            .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    project.write("probe.js", br#"
+const a = require('node:assert/strict'), fs = require('node:fs');
+function authority() {
+  a.equal(process.env.TAPID_FLAG_VISIBLE, 'visible-value');
+  for (const name of ['TAPID_FLAG_SECRET', 'TAPID_FLAG_ABSENT', 'HOME', 'NODE_OPTIONS', 'HTTP_PROXY', 'SSH_AUTH_SOCK']) a.equal(process.env[name], undefined, name);
+  a.throws(() => fs.readFileSync('outside-link/secret'), {code:'EACCES'});
+  a.throws(() => fs.writeFileSync('denied', 'escape'), e => ['EACCES', 'EROFS'].includes(e.code));
+  a.throws(() => fs.writeFileSync('node_modules/local/dist/bin/denied', 'escape'), e => ['EACCES', 'EROFS'].includes(e.code));
+  for (const directory of ['.next', '.tmp']) fs.writeFileSync(directory + '/allowed', 'allowed');
+  fs.writeFileSync('writable/' + (process.argv[2] === 'child' ? 'child' : 'root'), 'allowed');
+}
+authority();
+if (process.argv[2] !== 'child') {
+  const child = require('node:child_process').spawnSync(process.execPath, ['probe.js', 'child'], {encoding:'utf8'});
+  a.equal(child.status, 0, child.stderr);
+  console.log(JSON.stringify({node:fs.realpathSync(process.execPath), cwd:fs.realpathSync('.'), args:process.argv.slice(2)}));
+  process.exitCode = Number(process.argv.at(-1));
+}
+"#).unwrap();
+    let forwarded = [
+        "",
+        "two words",
+        "'quoted'",
+        "λ",
+        "--leading",
+        "; touch escaped",
+        "$(touch escaped)",
+    ];
+    for code in ["0", "37"] {
+        let result_path = results.path().join(format!("result-{code}.json"));
+        let mut arguments = vec![
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--result-file",
+            result_path.to_str().unwrap(),
+            "--",
+        ];
+        arguments.extend(forwarded);
+        arguments.push(code);
+        let output = isolated_command(project.path(), &arguments, true)
+            .env("TAPID_FLAG_VISIBLE", "visible-value")
+            .env("TAPID_FLAG_SECRET", "synthetic-secret")
+            .env("NODE_OPTIONS", "--trace-warnings")
+            .env("HTTP_PROXY", "http://synthetic.invalid:9")
+            .env("SSH_AUTH_SOCK", outside.path().join("synthetic-agent"))
+            .env("PATH", outside.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code.parse().unwrap()),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = output
+            .stdout
+            .strip_prefix(b"alias-bin\n")
+            .expect("installed Node-backed bin must execute before the authority probe");
+        let actual: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+        assert_eq!(
+            actual["node"],
+            fs::canonicalize(&node).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            actual["cwd"],
+            fs::canonicalize(project.path()).unwrap().to_str().unwrap()
+        );
+        let mut expected = forwarded.to_vec();
+        expected.push(code);
+        assert_eq!(actual["args"], serde_json::json!(expected));
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(result_path).unwrap()).unwrap();
+        assert_eq!(result["outcome"], "completed");
+        let receipt = &result["receipt"];
+        assert_eq!(receipt["assurance"], "ManagedTree");
+        assert_eq!(receipt["termination"], format!("Exited({code})"));
+        assert_eq!(
+            receipt["completion"]["cleanup_confidence"],
+            "KernelOwnedComplete"
+        );
+        assert_eq!(receipt["requested"], receipt["enforced"]);
+        assert_eq!(receipt["configured_limits"]["max_processes"], 64);
+        eprintln!("Linux ManagedTree CLI checked receipt: {receipt}");
+        assert_eq!(
+            fs::read(project.path().join("writable/root")).unwrap(),
+            b"allowed"
+        );
+        assert_eq!(
+            fs::read(project.path().join("writable/child")).unwrap(),
+            b"allowed"
+        );
+        assert!(!project.path().join("escaped").exists());
+        assert!(!project.path().join("denied").exists());
+    }
+    fs::remove_file(project.path().join("writable/root")).unwrap();
+    let output = invoke(
+        project.path(),
+        &[
+            "run",
+            "probe",
+            "--node-runtime",
+            node.to_str().unwrap(),
+            "--unknown-tapid-argument",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
+    assert!(!project.path().join("writable/root").exists());
+    eprintln!(
+        "Linux ManagedTree CLI invocation, descendant authority and checked-result assertions executed"
+    );
+    eprintln!(
+        "Linux ManagedTree CLI policy: {}",
+        fs::read_to_string(project.path().join("tapid.toml")).unwrap()
+    );
+}
+
 #[test]
 fn run_permissions_enforce_scoped_writes_environment_and_descendants_without_persisting_config() {
     let project = project();
@@ -703,6 +950,152 @@ fn network_fixture_response_rejects_invalid_framing() {
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::InvalidData
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_managed_tree_cli_sigint_cancels_and_completes_kernel_cleanup() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+    struct OwnedCaller(Child);
+    impl Drop for OwnedCaller {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let project = project();
+    let results = tapid_test_support::TempProject::new("managed-cancel-results").unwrap();
+    let (_runtime, node) = private_node_runtime();
+    project
+        .write(
+            "tapid.toml",
+            br#"
+[run.scripts.probe]
+assurance = "managed-tree"
+read = ["."]
+write = ["writable"]
+network = false
+subprocess = true
+timeout_seconds = 15
+max_output_bytes = 65536
+max_processes = 64
+max_memory_bytes = 536870912
+"#,
+        )
+        .unwrap();
+    fs::create_dir(project.path().join("writable")).unwrap();
+    let lifetime = project.path().join("writable/lifetime");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&lifetime)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut observer = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&lifetime)
+        .unwrap();
+    project.write("probe.js", br#"
+const fs = require('node:fs');
+if (process.argv[2] === 'descendant') {
+  process.on('SIGINT', () => {});
+  const lifetime = fs.openSync('writable/lifetime', 'w');
+  fs.writeSync(lifetime, Buffer.from('R'));
+  fs.writeFileSync('writable/ready', 'ready');
+  setTimeout(() => fs.writeFileSync('writable/escaped', 'survived'), 1500);
+  setInterval(() => {}, 100);
+} else {
+  require('node:child_process').spawn(process.execPath, ['probe.js', 'descendant'], {detached:true, stdio:'ignore'}).unref();
+  setInterval(() => {}, 100);
+}
+"#).unwrap();
+    let result_path = results.path().join("cancel.json");
+    let mut caller = OwnedCaller(
+        isolated_command(
+            project.path(),
+            &[
+                "run",
+                "probe",
+                "--node-runtime",
+                node.to_str().unwrap(),
+                "--result-file",
+                result_path.to_str().unwrap(),
+            ],
+            true,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !project.path().join("writable/ready").exists() {
+        assert!(
+            caller.0.try_wait().unwrap().is_none(),
+            "caller exited before readiness"
+        );
+        assert!(Instant::now() < deadline, "descendant never became ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut byte = [0];
+    assert_eq!(
+        observer.read(&mut byte).unwrap(),
+        1,
+        "writer handshake missing"
+    );
+    assert_eq!(byte, [b'R']);
+    // A live writer must yield WouldBlock, never EOF. This is the negative
+    // control against an unopened FIFO being mistaken for completed cleanup.
+    assert_eq!(
+        observer.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    // Signal only Tapid: cancellation must kill even a detached target that ignores SIGINT.
+    assert_eq!(unsafe { libc::kill(caller.0.id() as i32, libc::SIGINT) }, 0);
+    let status = loop {
+        if let Some(status) = caller.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "cancellation did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(130));
+    let eof_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match observer.read(&mut byte) {
+            Ok(0) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < eof_deadline,
+                    "descendant still holds FIFO writer after cancellation"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => panic!("unexpected descendant lifetime observation: {other:?}"),
+        }
+    }
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(result_path).unwrap()).unwrap();
+    assert_eq!(result["outcome"], "completed");
+    assert_eq!(result["receipt"]["termination"], "Cancelled");
+    assert_eq!(
+        result["receipt"]["completion"]["cleanup_confidence"],
+        "KernelOwnedComplete"
+    );
+    std::thread::sleep(Duration::from_millis(1700));
+    assert!(!project.path().join("writable/escaped").exists());
+    eprintln!(
+        "Linux ManagedTree CLI SIGINT cancellation and authoritative cleanup assertions executed: {}",
+        result["receipt"]
     );
 }
 

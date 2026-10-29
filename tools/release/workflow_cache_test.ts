@@ -186,6 +186,15 @@ const assertInstallerCache = (ci: string) => {
     assert(install.includes(compilerEnv), `${name} requires checkout-local compiler env`);
     assert.equal((install.match(/\n        env:/g) || []).length, 1);
   }
+  // Validate the two ManagedTree declarations before excluding only those
+  // declarations from the installer-wide confinement check.
+  const managed = job(ci, 'linux-managed-tree');
+  const managedEnv = '    env:\n      CARGO_TARGET_DIR: target\n';
+  const delegatedEnv = '            --setenv="CARGO_TARGET_DIR=$PWD/target" \\\n';
+  assert(managed.includes(managedEnv), 'ManagedTree requires its checkout-local job target');
+  const delegated = step(managed, 'Require native ManagedTree execution in a delegated host context');
+  assert(delegated.includes(delegatedEnv), 'delegated context requires its absolute checkout target');
+  ci = ci.replace(managed, managed.replace(managedEnv, '').replace(delegatedEnv, ''));
   assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 4, 'compiler target is confined to two installer and two guard steps');
   // Strip the separately validated guard steps, then normalize the approved Test bootstrap,
   // pin migration and two installer compiler env blocks.
@@ -235,7 +244,7 @@ test('installer contracts reject widened env, common-dir reuse, source bypass an
   mutations.push(
     ['job env', ci.replace(native, native.replaceAll(compilerEnv, '').replace('    env:', '    env:\n      CARGO_TARGET_DIR: ${{ github.workspace }}/target'))],
     ['global env', ci.replaceAll(compilerEnv, '').replace('\nenv:', '\nenv:\n  CARGO_TARGET_DIR: ${{ github.workspace }}/target')],
-    ['GITHUB_ENV persistence', ci.replace('          set -euo pipefail', '          echo CARGO_TARGET_DIR=target >> "$GITHUB_ENV"\n          set -euo pipefail')],
+    ['GITHUB_ENV persistence', ci.replace(native, native.replace('          set -euo pipefail', '          echo CARGO_TARGET_DIR=target >> "$GITHUB_ENV"\n          set -euo pipefail'))],
     ['handoff producer env', ci.replace('  platform-consumer-validation:\n', '  platform-consumer-validation:\n    env:\n      CARGO_TARGET_DIR: target\n')],
     ['handoff verifier env', ci.replace('  windows-installer-contract:\n', '  windows-installer-contract:\n    env:\n      CARGO_TARGET_DIR: target\n')],
     ['wrong source identity', ci.replace('github.event.pull_request.head.sha || github.sha', 'github.sha')],
@@ -273,5 +282,20 @@ test('source installer contracts reject binary substitution, changed ref, root r
   }
   for (const changed of windowsMutations) {
     assert.notEqual(changed, ps); assert.throws(() => assertSourceInstallers(sh, changed));
+  }
+});
+
+test('installer confinement accepts only the reviewed ManagedTree target declarations', async () => {
+  const ci = await source('.github/workflows/ci.yml');
+  assertInstallerCache(ci);
+  const managed = job(ci, 'linux-managed-tree');
+  for (const changed of [
+    managed.replace('CARGO_TARGET_DIR: target', 'CARGO_TARGET_DIR: /shared'),
+    managed.replace('CARGO_TARGET_DIR=$PWD/target', 'CARGO_TARGET_DIR=/shared'),
+    managed.replace('    steps:', '    steps:\n      - name: Persist target\n        run: echo CARGO_TARGET_DIR=target >> "$GITHUB_ENV"'),
+    managed.replace('CARGO_TARGET_DIR: target', 'CARGO_TARGET_DIR: target\n      EXTRA_CARGO_TARGET_DIR: target'),
+  ]) {
+    assert.notEqual(changed, managed);
+    assert.throws(() => assertInstallerCache(ci.replace(managed, changed)));
   }
 });

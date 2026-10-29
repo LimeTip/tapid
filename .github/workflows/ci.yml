@@ -17,6 +17,237 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-managed-tree:
+    name: Linux ManagedTree (Ubuntu 24.04 x86_64, Node 22)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: target
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Build native acceptance executables
+        run: |
+          node --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked --no-run
+          node --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked --no-run
+      - name: Require native ManagedTree execution in a delegated host context
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_bin=$(node -p 'process.execPath')
+          target_dir=$("$node_bin" --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked | "$node_bin" -e "let s = ''; process.stdin.on('data', x => s += x).on('end', () => process.stdout.write(JSON.parse(s).target_directory))")
+          test "$(uname -m)" = x86_64
+          test "$(node -p 'process.versions.node.split(".")[0]')" = 22
+          git rev-parse HEAD > "$RUNNER_TEMP/linux-managed-source.txt"
+          systemd --version
+          systemd_version=$(systemd --version | head -n 1 | awk '{print $2}')
+          if ! [[ "$systemd_version" =~ ^[0-9]+$ ]] || ! (( systemd_version >= 254 )); then
+            echo "ManagedTree acceptance requires systemd >= 254 for DelegateSubgroup" >&2
+            exit 1
+          fi
+          # Root owns the private workload; /tmp is traversable after DAC
+          # bypass capabilities are removed. Never change checkout/home modes.
+          workload=$(sudo -n /bin/bash -euo pipefail -c 'umask 077; mktemp -d /tmp/tapid-managed-news.XXXXXXXXXX')
+          echo "TAPID_MANAGED_WORKLOAD=$workload" >> "$GITHUB_ENV"
+          # systemd places the driver in a leaf before exec. The delegation
+          # parent remains empty so memory/pids can serve execution siblings.
+          sudo -n systemd-run --wait --pipe --collect --expand-environment=no \
+            --unit="tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --property=Delegate=yes --property=DelegateSubgroup=driver \
+            --property=KillMode=control-group --property=RuntimeMaxSec=25min \
+            --working-directory="$PWD" \
+            --setenv="TAPID_MANAGED_UNIT=tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service" \
+            --setenv="PATH=$PATH" \
+            --setenv="CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            --setenv="RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            --setenv="CARGO_TARGET_DIR=$PWD/target" \
+            --setenv="RUSTFLAGS=$RUSTFLAGS" \
+            --setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1 \
+            --setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1 \
+            --setenv="TAPID_TEST_NODE=$node_bin" \
+            --setenv="TAPID_NEWS_FIXTURE_BINARY=$target_dir/debug/tapid" \
+            --setenv="TAPID_MANAGED_WORKLOAD=$workload" \
+            /bin/bash -euo pipefail -c '
+              uname -a
+              "$TAPID_TEST_NODE" --version
+              rustc --version
+              systemd --version
+              # Discovery observations must survive even a failed assertion.
+              echo "supervisor membership ($$):"
+              cat /proc/$$/cgroup
+              echo "observer membership:"
+              cat /proc/self/cgroup
+              unit_path=$(systemctl show --property=ControlGroup --value "$TAPID_MANAGED_UNIT") || {
+                echo "discovery: cannot query unit $TAPID_MANAGED_UNIT" >&2; exit 1;
+              }
+              member_path=$(sed -n "s/^0:://p" /proc/$$/cgroup)
+              echo "unit=$TAPID_MANAGED_UNIT unit_path=$unit_path membership=$member_path"
+              for observed in "$unit_path" "$member_path"; do
+                if ! [[ "$observed" =~ ^/([a-zA-Z0-9_.:@-]+/)*[a-zA-Z0-9_.:@-]+$ ]] ||
+                   [[ "$observed" = */../* || "$observed" = */./* || "$observed" = */.. || "$observed" = */. ]]; then
+                  echo "discovery: missing or malformed unified cgroup path" >&2; exit 1;
+                fi
+              done
+              driver=/sys/fs/cgroup$member_path
+              group=/sys/fs/cgroup$unit_path
+              echo "delegation parent=$group driver=$driver"
+              if ! test "$member_path" = "$unit_path/driver"; then
+                echo "hierarchy: unit delegation parent does not own the driver leaf" >&2; exit 1;
+              fi
+              cat "$group/cgroup.type" "$driver/cgroup.type"
+              cat "$group/cgroup.controllers" "$driver/cgroup.controllers"
+              # Read in the supervisor, without command substitutions or helper
+              # processes observing cgroup pseudo-files on its behalf.
+              supervisor_pid=$$
+              parent_empty=true
+              supervisor_present=false
+              echo "supervisor_pid=$supervisor_pid"
+              echo "delegation parent PID observation:"
+              while IFS= read -r pid; do
+                echo "parent_pid=$pid"
+                parent_empty=false
+              done < "$group/cgroup.procs"
+              echo "driver PID observation:"
+              while IFS= read -r pid; do
+                echo "driver_pid=$pid"
+                if test "$pid" = "$supervisor_pid"; then supervisor_present=true; fi
+              done < "$driver/cgroup.procs"
+              if ! "$parent_empty"; then
+                echo "membership: delegation parent is not empty" >&2; exit 1;
+              fi
+              if ! "$supervisor_present"; then
+                echo "membership: supervisor is absent from driver" >&2; exit 1;
+              fi
+              echo "+memory +pids" > "$group/cgroup.subtree_control"
+              cat "$group/cgroup.controllers" "$group/cgroup.subtree_control" /proc/self/cgroup
+              unshare --mount --pid --fork --mount-proc /bin/true
+              "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_tree_enforces_timeout_and_cleans_detached_descendants -- --nocapture
+              "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid-runner --lib --locked managed_ -- --nocapture
+              "$TAPID_TEST_NODE" --experimental-strip-types scripts/dev.ts test -p tapid --test cli --locked linux_managed_tree_cli_ -- --nocapture
+              mkdir "$group/fixture" "$group/fixture/driver"
+              echo "+memory +pids" > "$group/fixture/cgroup.subtree_control"
+              mkdir -p "$TAPID_MANAGED_WORKLOAD/evidence"
+              # A sampled fallback is a measured lower bound, never an exact peak.
+              (
+                peak=0
+                samples=0
+                echo 0 > "$TAPID_MANAGED_WORKLOAD/pids.sampled"
+                while test "$samples" -lt 150000; do
+                  read -r current < "$group/fixture/pids.current"
+                  if test "$current" -gt "$peak"; then
+                    peak=$current
+                    echo "$peak" > "$TAPID_MANAGED_WORKLOAD/pids.sampled"
+                  fi
+                  samples=$((samples + 1))
+                  sleep 0.01
+                done
+              ) &
+              sampler=$!
+              fixture_status=0
+              (
+                echo "$BASHPID" > "$group/fixture/driver/cgroup.procs"
+                exec "$TAPID_TEST_NODE" --experimental-strip-types scripts/check-managed-news-site.ts --binary "$TAPID_NEWS_FIXTURE_BINARY" --node "$TAPID_TEST_NODE" --evidence "$TAPID_MANAGED_WORKLOAD/evidence"
+              ) || fixture_status=$?
+              kill "$sampler"
+              wait "$sampler" || test "$?" = 143
+              # These peaks conservatively include orchestration, Tapid and
+              # trusted supervision in addition to the application workload.
+              cat "$group/fixture/memory.peak" > "$TAPID_MANAGED_WORKLOAD/evidence/memory.peak"
+              if test -r "$group/fixture/pids.peak"; then
+                cat "$group/fixture/pids.peak" > "$TAPID_MANAGED_WORKLOAD/evidence/pids.peak"
+              else
+                read -r sampled < "$TAPID_MANAGED_WORKLOAD/pids.sampled"
+                echo "sampled pids.current maximum=$sampled interval=10ms; lower bound, not exact peak" > "$TAPID_MANAGED_WORKLOAD/evidence/pids.peak"
+              fi
+              test -z "$(find "$group/fixture" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
+              test -z "$(find "$group" -mindepth 1 -maxdepth 1 -name "tapid-managed-*" -print -quit)"
+              exit "$fixture_status"
+            ' 2>&1 | tee "$RUNNER_TEMP/linux-managed-acceptance.log"
+      - name: Prepare readable native acceptance evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the fixed evidence directory and allowlisted regular files;
+          # never traverse the installed project or follow symbolic/hard links.
+          test -n "${TAPID_MANAGED_WORKLOAD:-}" || exit 0
+          sudo -n "$(node -p 'process.execPath')" --input-type=module - "$TAPID_MANAGED_WORKLOAD/evidence" "$RUNNER_TEMP/linux-managed-news" "$(id -u)" "$(id -g)" <<'NODE'
+          import { constants as c, openSync, closeSync, fstatSync, readdirSync, fchownSync, fchmodSync, mkdirSync, copyFileSync } from 'node:fs';
+          const [path, destination, uid, gid] = process.argv.slice(2);
+          let directory;
+          try { directory = openSync(path, c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW); }
+          catch (error) { if (error.code === 'ENOENT') process.exit(0); throw error; }
+          try {
+            mkdirSync(destination, { mode: 0o755 });
+            const output = openSync(destination, c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW);
+            try {
+              const held = `/proc/self/fd/${directory}`;
+              const allowed = /^(?:(?:summary|build|test|start)\.json|(?:install|build|test|start)\.log|policy\.toml|acceptance\.txt|(?:memory|pids)\.peak)$/;
+              for (const name of readdirSync(held).filter(name => allowed.test(name))) {
+                const fd = openSync(`${held}/${name}`, c.O_RDONLY | c.O_NOFOLLOW | c.O_NONBLOCK);
+                try {
+                  const stat = fstatSync(fd);
+                  if (!stat.isFile() || stat.nlink !== 1) throw new Error(`unsafe evidence: ${name}`);
+                  const target = `/proc/self/fd/${output}/${name}`;
+                  copyFileSync(`/proc/self/fd/${fd}`, target, c.COPYFILE_EXCL);
+                  const copied = openSync(target, c.O_RDONLY | c.O_NOFOLLOW);
+                  try { fchownSync(copied, Number(uid), Number(gid)); fchmodSync(copied, 0o644); }
+                  finally { closeSync(copied); }
+                } finally { closeSync(fd); }
+              }
+              fchownSync(output, Number(uid), Number(gid));
+              fchmodSync(output, 0o755);
+            } finally { closeSync(output); }
+          } finally { closeSync(directory); }
+          NODE
+          case "$TAPID_MANAGED_WORKLOAD" in
+            /tmp/tapid-managed-news.??????????) ;;
+            *) echo "invalid owned workload path" >&2; exit 1 ;;
+          esac
+          test ! -L "$TAPID_MANAGED_WORKLOAD"
+          test "$(sudo -n stat -c %u "$TAPID_MANAGED_WORKLOAD")" = 0
+          test "$(sudo -n stat -c %a "$TAPID_MANAGED_WORKLOAD")" = 700
+          sudo -n rm -rf -- "$TAPID_MANAGED_WORKLOAD"
+          # Print diagnostics before upload, so an uploader failure cannot hide
+          # the command failure. The native step retains its original status.
+          for name in summary.json build.log build.json test.log start.log; do
+            path="$RUNNER_TEMP/linux-managed-news/$name"
+            if test -f "$path" && ! test -L "$path"; then
+              echo "=== $name ==="
+              tail -c 65536 -- "$path"
+            fi
+          done
+      - name: Retain exact-source native acceptance logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-managed-acceptance
+          path: |
+            ${{ runner.temp }}/linux-managed-source.txt
+            ${{ runner.temp }}/linux-managed-acceptance.log
+            ${{ runner.temp }}/linux-managed-news/summary.json
+            ${{ runner.temp }}/linux-managed-news/build.json
+            ${{ runner.temp }}/linux-managed-news/test.json
+            ${{ runner.temp }}/linux-managed-news/start.json
+            ${{ runner.temp }}/linux-managed-news/install.log
+            ${{ runner.temp }}/linux-managed-news/build.log
+            ${{ runner.temp }}/linux-managed-news/test.log
+            ${{ runner.temp }}/linux-managed-news/start.log
+            ${{ runner.temp }}/linux-managed-news/policy.toml
+            ${{ runner.temp }}/linux-managed-news/acceptance.txt
+            ${{ runner.temp }}/linux-managed-news/memory.peak
+            ${{ runner.temp }}/linux-managed-news/pids.peak
+          retention-days: 30
+          if-no-files-found: error
+
   news-site-consumer:
     name: News-site Tapid scripts (Ubuntu 24.04)
     runs-on: ubuntu-24.04

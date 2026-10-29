@@ -45,6 +45,106 @@ fn execute(request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionErro
     super::super::execute_with_backend(request, &PlatformBackend)
 }
 
+fn project_workload(project: &tapid_test_support::TempProject) -> PathBuf {
+    // Self-executing probes need the same explicit read authority as any target.
+    // Keep the executable outside writable subtrees without granting Cargo's
+    // artifact directory (or the sibling outside-secret fixture).
+    let target = project.path().join("workload");
+    fs::copy(std::env::current_exe().unwrap(), &target).unwrap();
+    fs::canonicalize(target).unwrap()
+}
+
+// Only the trusted outer test driver retries transient executable-busy errors.
+// Production target execution retains its original fail-closed behavior.
+fn spawn_test_driver(
+    command: &mut Command,
+    deadline: std::time::Instant,
+) -> io::Result<std::process::Child> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("test driver launch exhausted after {attempts} attempts: {error}"),
+                    ));
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+fn managed_driver_spawn_recovers_after_executable_writer_closes() {
+    let project = tapid_test_support::TempProject::new("driver-busy-release").unwrap();
+    let executable = project.path().join("true");
+    fs::copy("/bin/true", &executable).unwrap();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    assert_eq!(
+        Command::new(&executable)
+            .spawn()
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ETXTBSY)
+    );
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        drop(writer);
+    });
+    let mut child = spawn_test_driver(
+        &mut Command::new(&executable),
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(child.wait().unwrap().success());
+    release.join().unwrap();
+}
+
+#[test]
+fn managed_driver_spawn_bounds_persistent_executable_writer() {
+    let project = tapid_test_support::TempProject::new("driver-busy-deadline").unwrap();
+    let executable = project.path().join("true");
+    fs::copy("/bin/true", &executable).unwrap();
+    let writer = fs::OpenOptions::new()
+        .write(true)
+        .open(&executable)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = spawn_test_driver(
+        &mut Command::new(&executable),
+        started + std::time::Duration::from_millis(50),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("attempts"), "{error}");
+    assert!(error.to_string().contains("os error 26"), "{error}");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    drop(writer);
+    assert!(Command::new(&executable).status().unwrap().success());
+}
+
+#[test]
+fn managed_driver_spawn_preserves_other_errors() {
+    let project = tapid_test_support::TempProject::new("driver-missing").unwrap();
+    let started = std::time::Instant::now();
+    let error = spawn_test_driver(
+        &mut Command::new(project.path().join("missing")),
+        started + std::time::Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
 fn root() -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "tapid-linux-restricted-{}-{}",
@@ -452,6 +552,40 @@ fn managed_tree_stays_fail_closed_before_target_execution() {
 }
 
 #[test]
+fn managed_tree_requires_private_launcher_with_otherwise_valid_limits() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-missing-launcher").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let mut req = request(project.path(), "echo uncontained > marker", policy);
+    // Model a consumer that did not install private launcher dispatch. Keep
+    // every policy dimension valid so missing limits cannot mask this failure.
+    req.launcher = None;
+    let error = execute(&req).unwrap_err();
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("private launcher was not initialized"),
+        "{error}"
+    );
+    assert!(error.completion().is_none());
+    assert!(!project.path().join("marker").exists());
+}
+
+#[test]
 fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
     // Self-targets need no Yama permission. This proves seccomp supplies the
     // denial independently of host tracing policy.
@@ -518,7 +652,7 @@ fn seccomp_denies_process_memory_and_pidfds_even_for_self() {
 }
 
 #[test]
-fn managed_tree_enforces_output_process_and_memory_limits() {
+fn managed_tree_enforces_output_and_process_limits() {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         return;
     }
@@ -531,10 +665,6 @@ fn managed_tree_enforces_output_process_and_memory_limits() {
         (
             "while :; do sleep 10 & done",
             Termination::ProcessLimitExceeded,
-        ),
-        (
-            "python3 -c 'a=bytearray(256*1024*1024); print(len(a))'",
-            Termination::MemoryLimitExceeded,
         ),
     ] {
         let policy = SandboxPolicy::new(
@@ -552,6 +682,328 @@ fn managed_tree_enforces_output_process_and_memory_limits() {
             result.completion().cleanup_confidence(),
             CleanupConfidence::KernelOwnedComplete
         );
+    }
+}
+
+#[test]
+fn managed_tree_propagates_authority_to_detached_reparented_targets() {
+    const ROLE: &str = "TAPID_TEST_MANAGED_AUTHORITY_ROLE";
+    const PROJECT: &str = "TAPID_TEST_MANAGED_AUTHORITY_PROJECT";
+    const OUTSIDE: &str = "TAPID_TEST_MANAGED_AUTHORITY_OUTSIDE";
+    const NETWORK: &str = "TAPID_TEST_MANAGED_AUTHORITY_NETWORK";
+    const TEST: &str = "execution::platform_backend::tests::managed_tree_propagates_authority_to_detached_reparented_targets";
+    let role = std::env::var(ROLE).unwrap_or_default();
+    if role == "target" || role == "descendant" {
+        if role == "descendant" {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while unsafe { libc::getppid() } != 1 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "probe was not reparented to namespace init"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
+        }
+        let outside = PathBuf::from(std::env::var_os(OUTSIDE).unwrap());
+        assert_eq!(unsafe { libc::fcntl(9, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert_eq!(fs::read("allowed").unwrap(), b"allowed read");
+        for path in [
+            outside.join("secret"),
+            PathBuf::from("outside-link/secret"),
+            PathBuf::from("..")
+                .join(outside.file_name().unwrap())
+                .join("secret"),
+        ] {
+            assert_eq!(
+                fs::read(&path).unwrap_err().raw_os_error(),
+                Some(libc::EACCES)
+            );
+            assert!(matches!(
+                fs::write(&path, b"escape").unwrap_err().raw_os_error(),
+                Some(libc::EACCES | libc::EROFS)
+            ));
+        }
+        assert!(matches!(
+            fs::write("denied", b"escape").unwrap_err().raw_os_error(),
+            Some(libc::EACCES | libc::EROFS)
+        ));
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0));
+        if std::env::var(NETWORK).unwrap() == "true" {
+            assert!(listener.is_ok(), "{listener:?}");
+        } else {
+            assert_eq!(listener.unwrap_err().raw_os_error(), Some(libc::EPERM));
+        }
+        fs::write(format!("writable/{role}"), b"authority checked").unwrap();
+        if role == "target" {
+            // setsid --fork exits while the new session continues under the
+            // private namespace init. Wait for that reparented target's proof.
+            assert!(
+                Command::new("/usr/bin/setsid")
+                    .arg("--fork")
+                    .arg(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(ROLE, "descendant")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while fs::read("writable/descendant").ok().as_deref() != Some(b"authority checked") {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "detached authority probe failed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        return;
+    }
+    if role == "driver" {
+        assert!(unsafe { libc::fcntl(9, libc::F_GETFD) } >= 0);
+        let project = PathBuf::from(std::env::var_os(PROJECT).unwrap());
+        let outside = std::env::var_os(OUTSIDE).unwrap();
+        for network in [false, true] {
+            let policy = SandboxPolicy::new(
+                SandboxMode::Required,
+                FilesystemPolicy::new(vec![".".into()], vec!["writable".into()]).unwrap(),
+                network,
+                vec![ROLE.into(), OUTSIDE.into(), NETWORK.into()],
+                true,
+                ExecutionLimits::new(Some(10), Some(8192), Some(64), Some(128 * 1024 * 1024))
+                    .unwrap(),
+            )
+            .unwrap();
+            let req = ExecutionRequest::builder(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(ROLE, "target")
+                .env(OUTSIDE, outside.clone())
+                .env(NETWORK, network.to_string())
+                .project_root(&project)
+                .policy(policy)
+                .build()
+                .unwrap();
+            let result = execute(&req).unwrap();
+            assert_eq!(result.termination(), &Termination::Exited(0));
+            assert_eq!(
+                result.completion().cleanup_confidence(),
+                CleanupConfidence::KernelOwnedComplete
+            );
+            for name in ["target", "descendant"] {
+                let marker = project.join("writable").join(name);
+                assert_eq!(fs::read(&marker).unwrap(), b"authority checked");
+                fs::remove_file(marker).unwrap();
+            }
+        }
+        return;
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-authority").unwrap();
+    let workload = project_workload(&project);
+    let outside = tapid_test_support::TempProject::new("managed-authority-outside").unwrap();
+    let secret = outside
+        .write("secret", b"synthetic outside secret")
+        .unwrap();
+    project.write("allowed", b"allowed read").unwrap();
+    fs::create_dir(project.path().join("writable")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), project.path().join("outside-link")).unwrap();
+    // The driver receives an intentionally inheritable descriptor containing
+    // denied data. Target setup must close it, even though the caller did not.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 9<\"$1\"; exec \"$2\" --exact \"$3\" --nocapture",
+            "managed-authority",
+        ])
+        .arg(&secret)
+        .arg(workload)
+        .arg(TEST)
+        .env(ROLE, "driver")
+        .env(PROJECT, project.path())
+        .env(OUTSIDE, outside.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(secret).unwrap(), b"synthetic outside secret");
+    assert!(!project.path().join("denied").exists());
+}
+
+#[test]
+fn managed_tree_bounds_forwarded_combined_output_and_cleans_writers() {
+    const OVERFLOW: &str = "TAPID_TEST_MANAGED_OUTPUT_OVERFLOW";
+    const ROLE: &str = "TAPID_TEST_MANAGED_OUTPUT_PROJECT";
+    if let Some(path) = std::env::var_os(ROLE) {
+        let project = PathBuf::from(path);
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(10), Some(512), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let overflow = std::env::var_os(OVERFLOW).is_some();
+        let stderr_bytes = if overflow { 4096 } else { 256 };
+        let ending = if overflow { "sleep 5" } else { "exit 0" };
+        let script = format!(
+            "setsid sh -c 'echo started > started; sleep 2; echo escaped > escaped' & while [ ! -f started ]; do sleep 0.01; done; i=0; while [ $i -lt 256 ]; do printf '\\376'; i=$((i+1)); done; i=0; while [ $i -lt {stderr_bytes} ]; do printf '\\377' >&2; i=$((i+1)); done; {ending}"
+        );
+        let result = execute(&request(&project, &script, policy)).unwrap();
+        let expected = if overflow {
+            Termination::OutputLimitExceeded
+        } else {
+            Termination::Exited(0)
+        };
+        assert_eq!(result.termination(), &expected);
+        assert_eq!(
+            result.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        // ManagedTree forwards its bounded buffer after cleanup rather than
+        // returning it in the outcome. The parent observes the actual streams.
+        assert!(result.stdout().is_empty());
+        assert!(result.stderr().is_empty());
+        std::process::exit(0);
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    for overflow in [false, true] {
+        let project = tapid_test_support::TempProject::new("managed-forwarded-output").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "execution::platform_backend::tests::managed_tree_bounds_forwarded_combined_output_and_cleans_writers",
+            "--nocapture",
+        ])
+        .env(ROLE, project.path())
+        .envs(overflow.then_some((OVERFLOW, "1")))
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Non-UTF-8 sentinels distinguish target bytes from libtest's own output.
+        let stdout_bytes = output.stdout.iter().filter(|&&byte| byte == 0xfe).count();
+        let stderr_bytes = output.stderr.iter().filter(|&&byte| byte == 0xff).count();
+        assert_eq!(stdout_bytes + stderr_bytes, 512);
+        if !overflow {
+            assert_eq!(stdout_bytes, 256);
+            assert_eq!(stderr_bytes, 256);
+        } else {
+            // The combined ceiling does not promise which ready stream wins the
+            // final bytes when the supervisor is descheduled between drain calls.
+            assert!(stdout_bytes <= 256);
+            assert!(stderr_bytes <= 512);
+        }
+        assert!(project.path().join("started").exists());
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(!project.path().join("escaped").exists());
+    }
+}
+
+#[test]
+fn managed_tree_enforces_memory_limit_with_rust_workload() {
+    const WORKLOAD: &str = "TAPID_MANAGED_MEMORY_WORKLOAD";
+    if std::env::var_os(WORKLOAD).is_some() {
+        fs::write("started", b"memory workload started").unwrap();
+        // Commit pages rather than only reserving virtual address space. Keep
+        // every allocation live until the cgroup's memory controller intervenes.
+        let mut chunks = Vec::new();
+        for _ in 0..256 {
+            let mut chunk = vec![0u8; 1024 * 1024];
+            for offset in (0..chunk.len()).step_by(4096) {
+                unsafe { std::ptr::write_volatile(chunk.as_mut_ptr().add(offset), 1) };
+            }
+            chunks.push(chunk);
+            std::hint::black_box(&chunks);
+        }
+        panic!("memory workload escaped its 64 MiB ceiling");
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-memory-limit").unwrap();
+    let workload = project_workload(&project);
+    project.write("started", b"").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec!["started".into()]).unwrap(),
+        false,
+        vec![WORKLOAD.into()],
+        true,
+        ExecutionLimits::new(Some(10), Some(4096), Some(32), Some(64 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let req = ExecutionRequest::builder(workload)
+        .args([
+            "--exact",
+            "execution::platform_backend::tests::managed_tree_enforces_memory_limit_with_rust_workload",
+            "--nocapture",
+        ])
+        .env(WORKLOAD, "1")
+        .project_root(project.path())
+        .executable_search_paths(["/usr/bin"])
+        .policy(policy)
+        .build()
+        .unwrap();
+    let result = execute(&req).unwrap();
+    assert_eq!(result.termination(), &Termination::MemoryLimitExceeded);
+    assert_eq!(
+        fs::read(project.path().join("started")).unwrap(),
+        b"memory workload started",
+        "memory target must reach its workload before controller termination"
+    );
+    assert_eq!(
+        result.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+}
+
+#[test]
+fn managed_tree_preserves_exit_codes_and_cleans_descendants_on_root_exit() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    for code in [0, 37] {
+        let project = tapid_test_support::TempProject::new("managed-root-exit").unwrap();
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+            false,
+            vec![],
+            true,
+            ExecutionLimits::new(Some(10), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap();
+        let script = format!(
+            "setsid sh -c 'sh -c \"echo started > started; sleep 2; echo escaped > escaped\" & wait' & while [ ! -f started ]; do sleep 0.01; done; exit {code}"
+        );
+        let result = execute(&request(project.path(), &script, policy)).unwrap();
+        assert_eq!(result.termination(), &Termination::Exited(code));
+        assert!(project.path().join("started").exists());
+        assert_eq!(
+            result.enforcement().assurance(),
+            AssuranceLevel::ManagedTree
+        );
+        assert_eq!(
+            result.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(!project.path().join("escaped").exists());
     }
 }
 
@@ -665,10 +1117,20 @@ fn managed_tree_memory_stats_opt_in_uses_read_only_private_procfs() {
 
 #[test]
 fn managed_tree_caller_crash_kills_double_forked_descendants() {
+    assert_managed_crash_cleanup(false);
+}
+
+#[test]
+fn managed_tree_supervisor_crash_kills_double_forked_descendants() {
+    assert_managed_crash_cleanup(true);
+}
+
+fn assert_managed_crash_cleanup(crash_supervisor: bool) {
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         return;
     }
     const ROLE: &str = "TAPID_TEST_MANAGED_CRASH_PROJECT";
+    const SUPERVISOR: &str = "TAPID_TEST_MANAGED_SUPERVISOR_CRASH";
     if let Some(path) = std::env::var_os(ROLE) {
         let root = PathBuf::from(path);
         let policy = SandboxPolicy::new(
@@ -680,17 +1142,34 @@ fn managed_tree_caller_crash_kills_double_forked_descendants() {
             ExecutionLimits::new(Some(20), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
         )
         .unwrap();
-        let _ = execute(&request(
+        let result = execute(&request(
             &root,
             "setsid sh -c 'sh -c \"echo started > started; sleep 3; echo escaped > escaped\" & exit 0' & sleep 15",
             policy,
         ));
+        if std::env::var_os(SUPERVISOR).is_some() {
+            let outcome = result.unwrap();
+            assert_eq!(outcome.termination(), &Termination::Signaled(libc::SIGKILL));
+            assert_eq!(
+                outcome.completion().cleanup_confidence(),
+                CleanupConfidence::KernelOwnedComplete
+            );
+            return;
+        }
         panic!("crash fixture unexpectedly returned");
     }
     let project = tapid_test_support::TempProject::new("managed-caller-crash").unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    struct CrashCaller(std::process::Child);
+    impl Drop for CrashCaller {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut caller = CrashCaller(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "execution::platform_backend::tests::managed_tree_caller_crash_kills_double_forked_descendants", "--nocapture"])
-        .env(ROLE, project.path()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        .env(ROLE, project.path()).envs(crash_supervisor.then_some((SUPERVISOR, "1"))).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let child = &mut caller.0;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !project.path().join("started").exists() && std::time::Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
@@ -699,8 +1178,107 @@ fn managed_tree_caller_crash_kills_double_forked_descendants() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(project.path().join("started").exists());
-    child.kill().unwrap();
-    child.wait().unwrap();
+    // Discover the trusted supervisor's boundary while the caller is alive,
+    // then retain the kernel events object across caller death. PID discovery
+    // alone is not cleanup evidence; populated=0 on this held boundary is.
+    let mut boundary = None;
+    for task in fs::read_dir(format!("/proc/{}/task", child.id())).unwrap() {
+        let children = fs::read_to_string(task.unwrap().path().join("children")).unwrap();
+        for pid in children.split_whitespace() {
+            let membership = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+            if let Some(relative) = membership
+                .lines()
+                .find_map(|line| line.strip_prefix("0::/"))
+            {
+                let path = Path::new(relative);
+                assert!(
+                    path.components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+                );
+                if path
+                    .file_name()
+                    .unwrap()
+                    .as_encoded_bytes()
+                    .starts_with(b"tapid-managed-")
+                {
+                    assert!(boundary.is_none(), "unexpected multiple managed boundaries");
+                    let path = Path::new("/sys/fs/cgroup").join(path);
+                    boundary = Some((
+                        File::open(path.join("cgroup.events")).unwrap(),
+                        path,
+                        pid.parse::<i32>().unwrap(),
+                    ));
+                }
+            }
+        }
+    }
+    let (mut events, boundary_path, supervisor_pid) =
+        boundary.expect("supervisor cgroup was not observed");
+    let supervisor_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, supervisor_pid, 0) };
+    assert!(supervisor_fd >= 0, "cannot hold supervisor identity");
+    let supervisor = unsafe { File::from_raw_fd(supervisor_fd as libc::c_int) };
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstatfs(events.as_raw_fd(), &mut stat) }, 0);
+    assert_eq!(stat.f_type, libc::CGROUP2_SUPER_MAGIC as libc::c_long);
+    let mut state = String::new();
+    events.read_to_string(&mut state).unwrap();
+    assert!(state.lines().any(|line| line == "populated 1"));
+    if crash_supervisor {
+        // Hold the caller's cleanup while independently observing kernel-owned
+        // descendant termination after supervisor death.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGSTOP) }, 0);
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(child.id() as i32, &mut status, libc::WUNTRACED) },
+            child.id() as i32
+        );
+        assert!(libc::WIFSTOPPED(status));
+        assert_eq!(
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    supervisor.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            },
+            0
+        );
+    } else {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    let empty_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        use std::io::{Seek, SeekFrom};
+        events.seek(SeekFrom::Start(0)).unwrap();
+        state.clear();
+        events.read_to_string(&mut state).unwrap();
+        if state.lines().any(|line| line == "populated 0") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < empty_deadline,
+            "caller crash left a populated kernel boundary: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // The killed caller cannot remove its now-empty cgroup directory. The
+    // observer owns fixture teardown only after kernel emptiness is established.
+    if crash_supervisor {
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGCONT) }, 0);
+        assert!(
+            child.wait().unwrap().success(),
+            "caller failed to report supervisor crash cleanup"
+        );
+        assert!(
+            !boundary_path.exists(),
+            "caller did not release the empty boundary"
+        );
+    } else {
+        fs::remove_dir(boundary_path).unwrap();
+    }
     std::thread::sleep(std::time::Duration::from_secs(4));
     assert!(
         !project.path().join("escaped").exists(),
@@ -764,5 +1342,473 @@ fn managed_filter_denies_clone3_and_reconnectable_unix_socketpairs() {
         assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn managed_tree_rejects_independently_denied_kernel_prerequisites_before_target() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    const FAULT: &str = "TAPID_TEST_MANAGED_KERNEL_FAULT";
+    let project = tapid_test_support::TempProject::new("managed-prerequisites").unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(4096), Some(64), Some(256 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let req = request(project.path(), "echo target > marker", policy);
+    let Some(fault) = std::env::var_os(FAULT) else {
+        // Prove the identical request can execute before denying one native
+        // prerequisite in each fresh subprocess. Unsupported-host rejection is
+        // not evidence that any particular prerequisite was tested.
+        let outcome = execute(&req).unwrap();
+        assert_eq!(outcome.termination(), &Termination::Exited(0));
+        assert_eq!(
+            outcome.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        assert!(project.path().join("marker").exists());
+        for fault in [
+            "landlock",
+            "pidfd",
+            "unshare",
+            "mount",
+            "seccomp",
+            "delegation",
+            "controllers",
+            "launcher-exec",
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "execution::platform_backend::tests::managed_tree_rejects_independently_denied_kernel_prerequisites_before_target", "--nocapture"])
+                .env(FAULT, fault).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{fault}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("kernel prerequisite rejection verified"),
+                "{fault}: helper assertions did not execute"
+            );
+        }
+        return;
+    };
+    let (syscall, argument) = match fault.to_str().unwrap() {
+        "landlock" => (libc::SYS_landlock_create_ruleset, None),
+        "pidfd" => (libc::SYS_pidfd_open, None),
+        "unshare" => (libc::SYS_unshare, None),
+        "mount" => (libc::SYS_mount, None),
+        "seccomp" => (libc::SYS_prctl, Some((16, PR_SET_SECCOMP as u32))),
+        "delegation" => (libc::SYS_mkdir, None),
+        "controllers" => (
+            libc::SYS_openat,
+            Some((
+                32,
+                (libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u32,
+            )),
+        ),
+        "launcher-exec" => (libc::SYS_execve, None),
+        _ => panic!("unknown prerequisite fault"),
+    };
+    // This filter changes actual kernel results rather than mocking backend
+    // declarations. The distinctive errno proves the intended syscall was
+    // intercepted; all unrelated calls retain the supported-host behavior.
+    let statement = |code, k| libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    };
+    let mut filter = vec![
+        statement((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
+        libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf: if argument.is_some() { 3 } else { 1 },
+            k: syscall as u32,
+        },
+    ];
+    if let Some((offset, argument)) = argument {
+        filter.push(statement(
+            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+            offset,
+        ));
+        filter.push(libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 1,
+            k: argument,
+        });
+    }
+    filter.push(statement(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        SECCOMP_RET_ERRNO | libc::ENOMEDIUM as u32,
+    ));
+    filter.push(statement(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        SECCOMP_RET_ALLOW,
+    ));
+    assert_eq!(unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+    assert_eq!(
+        unsafe {
+            libc::prctl(
+                PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &libc::sock_fprog {
+                    len: filter.len() as u16,
+                    filter: filter.as_mut_ptr(),
+                },
+            )
+        },
+        0
+    );
+    let mut arguments = [0 as libc::c_long; 6];
+    if let Some((offset, value)) = argument {
+        arguments[((offset - 16) / 8) as usize] = value as libc::c_long;
+    }
+    assert_eq!(
+        unsafe {
+            libc::syscall(
+                syscall,
+                arguments[0],
+                arguments[1],
+                arguments[2],
+                arguments[3],
+                arguments[4],
+                arguments[5],
+            )
+        },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOMEDIUM)
+    );
+    let error = execute(&req).unwrap_err();
+    assert_eq!(
+        error.category(),
+        ExecutionErrorCategory::UnsupportedContainment
+    );
+    assert!(
+        !project.path().join("marker").exists(),
+        "target ran without a prerequisite: {error}"
+    );
+    if fault == "landlock" || fault == "delegation" || fault == "controllers" {
+        let cause = if fault == "landlock" {
+            "Landlock ABI 3"
+        } else if fault == "delegation" {
+            "writable delegated cgroup v2 parent"
+        } else {
+            "required cgroup controller or interface unavailable"
+        };
+        assert!(error.to_string().contains(cause), "{error}");
+        assert!(error.completion().is_none());
+    } else {
+        let stage = if fault == "pidfd" || fault == "launcher-exec" {
+            "cannot launch managed supervisor"
+        } else {
+            "private"
+        };
+        assert!(error.to_string().contains(stage), "{fault:?}: {error}");
+        assert_eq!(
+            error
+                .completion()
+                .expect("partial launch must complete cleanup")
+                .cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+    }
+    println!("kernel prerequisite rejection verified: {fault:?}: {error}");
+}
+
+#[test]
+fn managed_tree_failed_target_exec_reports_spawn_and_kernel_cleanup() {
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-exec-failure").unwrap();
+    let target = project
+        .write(
+            "target",
+            format!(
+                "#!{}\necho escaped > marker\n",
+                project.path().join("missing-interpreter").display()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = SandboxPolicy::new(
+        SandboxMode::Required,
+        FilesystemPolicy::new(vec![".".into()], vec![".".into()]).unwrap(),
+        false,
+        vec![],
+        true,
+        ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+    )
+    .unwrap();
+    let req = ExecutionRequest::builder(target)
+        .project_root(project.path())
+        .policy(policy)
+        .build()
+        .unwrap();
+    let error = execute(&req).unwrap_err();
+    assert_eq!(error.category(), ExecutionErrorCategory::Spawn, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot exec restricted project script"),
+        "{error}"
+    );
+    assert_eq!(
+        error
+            .completion()
+            .expect("failed exec must clean its owned tree")
+            .cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    assert!(!project.path().join("marker").exists());
+}
+
+#[test]
+fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
+    const DRIVER: &str = "TAPID_TEST_MANAGED_UNREAD_OUTPUT_PROJECT";
+    const WORKLOAD: &str = "TAPID_TEST_MANAGED_UNREAD_OUTPUT_TARGET";
+    const TEST: &str = "execution::platform_backend::tests::managed_tree_completion_is_bounded_when_parent_stdout_is_unread";
+    if std::env::var_os(WORKLOAD).is_some() {
+        io::stdout().write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+        return;
+    }
+    if let Some(path) = std::env::var_os(DRIVER) {
+        let root = PathBuf::from(path);
+        let policy = SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec![]).unwrap(),
+            false,
+            vec![WORKLOAD.into()],
+            true,
+            ExecutionLimits::new(
+                Some(5),
+                Some(2 * 1024 * 1024),
+                Some(32),
+                Some(128 * 1024 * 1024),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let req = ExecutionRequest::builder(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(WORKLOAD, "1")
+            .project_root(&root)
+            .policy(policy)
+            .build()
+            .unwrap();
+        let error = execute(&req).expect_err("unread output must not silently succeed");
+        eprintln!(
+            "unread-output execution: category={:?}, completion={:?}, error={error}",
+            error.category(),
+            error.completion()
+        );
+        assert_eq!(
+            error.category(),
+            ExecutionErrorCategory::Internal,
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("remained backpressured"),
+            "driver must reach bounded output forwarding: {error}"
+        );
+        assert_eq!(
+            error
+                .completion()
+                .expect("output failure must retain cleanup evidence")
+                .cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete
+        );
+        fs::write(root.join("verified"), "bounded output with kernel cleanup").unwrap();
+        std::process::exit(0);
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        return;
+    }
+    let project = tapid_test_support::TempProject::new("managed-unread-output").unwrap();
+    let workload = project_workload(&project);
+    let diagnostics = project.path().join("driver-stderr");
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(10);
+    let mut child = spawn_test_driver(
+        Command::new(workload)
+            .args(["--exact", TEST, "--nocapture"])
+            .env(DRIVER, project.path())
+            .stdout(Stdio::piped())
+            .stderr(fs::File::create(&diagnostics).unwrap()),
+        started + std::time::Duration::from_millis(500),
+    )
+    .unwrap();
+    // Deliberately retain the unread caller pipe through completion. No reader
+    // may unblock a forwarding worker and turn this into a normal-output test.
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "unread-output driver failed: {status}\n{}",
+                fs::read_to_string(&diagnostics).unwrap()
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!(
+                "ManagedTree completion blocked on the unread caller stdout\n{}",
+                fs::read_to_string(&diagnostics).unwrap()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(project.path().join("verified")).unwrap(),
+        "bounded output with kernel cleanup"
+    );
+}
+
+#[test]
+fn managed_tree_absolute_tools_require_traversable_fixture_ancestors() {
+    const OPERATION: &str = "TAPID_TEST_MANAGED_ANCESTOR_OPERATION";
+    const TEST: &str = "execution::platform_backend::tests::managed_tree_absolute_tools_require_traversable_fixture_ancestors";
+    if let Ok(operation) = std::env::var(OPERATION) {
+        let error = match operation.as_str() {
+            "read-sibling" => fs::read("../secret").expect_err("sibling secret was readable"),
+            "write-package" => {
+                fs::write("node_modules/tool", b"changed").expect_err("package tool was writable")
+            }
+            _ => panic!("unknown ancestor probe operation"),
+        };
+        eprintln!("{operation}: {error:?}");
+        assert!(
+            matches!(error.raw_os_error(), Some(libc::EACCES | libc::EROFS)),
+            "{operation} failed for an unexpected reason: {error:?}"
+        );
+        eprintln!("{operation} denial verified");
+        return;
+    }
+    if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
+        eprintln!("privileged ancestor control requires the delegated native lane");
+        return;
+    }
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "ancestor control requires root setup"
+    );
+    use std::os::unix::fs::{PermissionsExt, chown};
+    let fixture = tapid_test_support::TempProject::new("managed-ancestor").unwrap();
+    fixture
+        .write(
+            "ancestor/project/node_modules/tool",
+            b"#!/bin/sh\necho executed\n",
+        )
+        .unwrap();
+    fixture
+        .write("ancestor/secret", b"outside authority")
+        .unwrap();
+    fs::create_dir(fixture.path().join("ancestor/project/output")).unwrap();
+    let ancestor = fixture.path().join("ancestor");
+    let root = ancestor.join("project");
+    let tool = root.join("node_modules/tool");
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+    // Only this disposable ancestor changes ownership. Root setup can resolve
+    // the held cwd; the target loses DAC bypass before executing project code.
+    chown(&ancestor, Some(65534), Some(65534)).unwrap();
+    let policy = || {
+        SandboxPolicy::new(
+            SandboxMode::Required,
+            FilesystemPolicy::new(vec![".".into()], vec!["output".into()]).unwrap(),
+            false,
+            vec![OPERATION.into()],
+            true,
+            ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
+        )
+        .unwrap()
+    };
+    let absolute = tool.to_str().unwrap();
+    assert!(!absolute.contains('\''));
+    let denied = format!(
+        "test -r node_modules/tool && test -x node_modules/tool && test ! -r '{absolute}' && test ! -x '{absolute}' && echo mismatch > output/denied"
+    );
+    let result = execute(&request(&root, &denied, policy())).unwrap();
+    assert_eq!(result.termination(), &Termination::Exited(0));
+    assert_eq!(fs::read(root.join("output/denied")).unwrap(), b"mismatch\n");
+    assert_eq!(
+        result.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+
+    // The native workload repair changes fixture ownership, not authority.
+    chown(&ancestor, Some(0), Some(0)).unwrap();
+    let allowed = format!("'{absolute}' > output/allowed 2> output/allowed-stderr");
+    let result = execute(&request(&root, &allowed, policy())).unwrap();
+    let ancestry: Vec<_> = tool
+        .ancestors()
+        .map(|path| (path, fs::metadata(path)))
+        .collect();
+    assert_eq!(
+        result.termination(),
+        &Termination::Exited(0),
+        "absolute tool execution: stdout={:?}, stderr={:?}, ancestors={ancestry:?}",
+        fs::read_to_string(root.join("output/allowed")),
+        fs::read_to_string(root.join("output/allowed-stderr"))
+    );
+    assert_eq!(
+        fs::read(root.join("output/allowed")).unwrap(),
+        b"executed\n"
+    );
+    assert_eq!(fs::read(&tool).unwrap(), b"#!/bin/sh\necho executed\n");
+    assert_eq!(
+        result.completion().cleanup_confidence(),
+        CleanupConfidence::KernelOwnedComplete
+    );
+    // Actual open operations are the security controls. In a capability-stripped
+    // root process access(2) predicates need not predict open(2) enforcement.
+    let probe = root.join("workload");
+    fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+    for operation in ["read-sibling", "write-package"] {
+        let command = format!(
+            "'{}' --exact '{TEST}' --nocapture > output/{operation}.stdout 2> output/{operation}.stderr",
+            probe.display()
+        );
+        let req = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", &command])
+            .env(OPERATION, operation)
+            .project_root(&root)
+            .policy(policy())
+            .build()
+            .unwrap();
+        let result = execute(&req).unwrap_or_else(|error| panic!("{operation}: {error}"));
+        let stdout = fs::read_to_string(root.join(format!("output/{operation}.stdout"))).unwrap();
+        let stderr = fs::read_to_string(root.join(format!("output/{operation}.stderr"))).unwrap();
+        assert_eq!(
+            result.termination(),
+            &Termination::Exited(0),
+            "{operation}: stdout={stdout:?}, stderr={stderr:?}"
+        );
+        assert!(
+            stderr.contains(&format!("{operation} denial verified")),
+            "{operation} assertions did not execute: stdout={stdout:?}, stderr={stderr:?}"
+        );
+        assert_eq!(
+            result.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete,
+            "{operation} cleanup"
+        );
+        assert_eq!(fs::read(&tool).unwrap(), b"#!/bin/sh\necho executed\n");
     }
 }

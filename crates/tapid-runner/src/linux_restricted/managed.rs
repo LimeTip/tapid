@@ -3,6 +3,7 @@ use super::*;
 use crate::ExecutionLimits;
 use std::os::unix::fs::OpenOptionsExt;
 
+use crate::execution::linux_cancellation as cancellation;
 #[path = "managed_filesystem.rs"]
 mod filesystem;
 use std::{
@@ -520,6 +521,7 @@ pub(super) fn prepare<'a>(
     preflight: &'a ValidatedPreflight,
     ruleset: LandlockRuleset,
 ) -> Result<OwnedExecutionAttempt<'a>, PreparationError> {
+    let cancellation = cancellation::Cancellation::activate().map_err(PreparationError::from)?;
     let cgroup = Cgroup::prepare(request.policy().limits()).map_err(PreparationError::from)?;
     let view = filesystem::View::reserve(&preflight.policy).map_err(PreparationError::from)?;
     Ok(OwnedExecutionAttempt::new(
@@ -531,6 +533,7 @@ pub(super) fn prepare<'a>(
             cgroup,
             view,
             child: None,
+            cancellation,
         }),
     ))
 }
@@ -541,6 +544,7 @@ struct Lifecycle<'a> {
     cgroup: Cgroup,
     view: filesystem::View,
     child: Option<Child>,
+    cancellation: cancellation::Cancellation,
 }
 impl Lifecycle<'_> {
     fn finish_tree(&mut self) -> Result<(), ExecutionError> {
@@ -640,6 +644,10 @@ impl ExecutionLifecycle for Lifecycle<'_> {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut termination;
         loop {
+            if self.cancellation.is_cancelled() {
+                termination = Termination::Cancelled;
+                break;
+            }
             if drain(&mut stdout, &mut out, err.len(), limit)?
                 || drain(&mut stderr, &mut err, out.len(), limit)?
             {
@@ -676,10 +684,27 @@ impl ExecutionLifecycle for Lifecycle<'_> {
         {
             termination = Termination::OutputLimitExceeded;
         }
-        // Forward buffered setup diagnostics even when the private launcher fails.
-        let _ = io::stdout().write_all(&out);
-        let _ = io::stderr().write_all(&err);
+        // Forward buffered setup diagnostics even when the private launcher
+        // fails. Reuse the owned sinks so caller backpressure cannot trap the
+        // cancellation scope in a blocking stdio write after tree cleanup.
+        if !out.is_empty() || !err.is_empty() {
+            let (mut sinks, [mut stdout_sink, mut stderr_sink]) = LiveSinks::spawn(
+                [io::stdout().as_fd(), io::stderr().as_fd()],
+                sanitize_output_descriptors,
+            )?;
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let backpressure = std::sync::atomic::AtomicBool::new(false);
+            write_live_output(&mut stdout_sink, &out, &stop, &backpressure)?;
+            write_live_output(&mut stderr_sink, &err, &stop, &backpressure)?;
+            drop(stdout_sink);
+            drop(stderr_sink);
+            sinks.finish()?;
+        }
         parse_private_report(report)?;
+        // Cleanup and buffered output are inside the cancellation scope too.
+        if self.cancellation.finish() {
+            termination = Termination::Cancelled;
+        }
         let receipt = EnforcementReceipt::checked(
             self.preflight,
             self.preflight.support.requested().clone(),

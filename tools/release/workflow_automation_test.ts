@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { strict as assert } from 'node:assert';
-import { readFile, readdir, mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, mkdir, writeFile, rm, copyFile, symlink, link, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -47,12 +47,13 @@ const assertStandaloneTestOwners = (ci: string) => {
           if-no-files-found: warn
           retention-days: 1`);
   ci = ci.replace(failureCapture, '');
-  assert.doesNotMatch(ci, /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest|cargo nextest list|cargo llvm-cov report|cargo llvm-cov show-env|--no-report|-- --list|\.profraw|tee /);
+  assert.doesNotMatch(ci, /nextest-coverage-pilot|stage5-|cargo llvm-cov nextest|cargo nextest list|cargo llvm-cov report|cargo llvm-cov show-env|--no-report|-- --list|\.profraw/);
   for (const [id, name, command, tool] of [
     ['nextest', 'Run tests with nextest', 'cargo nextest run --workspace --all-features --locked', 'cargo-nextest'],
     ['coverage', 'Generate LCOV coverage report', 'cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info', 'cargo-llvm-cov'],
   ] as const) {
     const owner = job(ci, id);
+    assert.doesNotMatch(owner, /tee /);
     assert.match(owner, /runs-on: ubuntu-latest/);
     assert.match(owner, /TAPID_REQUIRE_NODE_ASSERTIONS: '1'/);
     assert.doesNotMatch(owner, /\n    (?:if|needs|continue-on-error):|\n        (?:if|continue-on-error):|--exclude|--skip|--ignored|\|\| true/);
@@ -653,4 +654,265 @@ test('stable consumer shell gate rejects failure cancellation skipped abandoned 
   for (const result of ['failure', 'cancelled', 'skipped', 'abandoned', '']) {
     await assert.rejects(execFileAsync('bash', ['-c', command], { env: { CONSUMER_RESULT: result } }));
   }
+});
+
+test('standalone output pipeline restriction permits ManagedTree evidence only outside coverage owners', async () => {
+  const ci = await workflow('ci');
+  assert.match(job(ci, 'linux-managed-tree'), /\| tee /);
+  assertStandaloneTestOwners(ci);
+  for (const id of ['nextest', 'coverage']) {
+    const owner = job(ci, id);
+    const changed = owner.replace('    steps:', '    steps:\n      - name: Copy output\n        run: echo evidence | tee evidence.log\n');
+    assert.notEqual(changed, owner);
+    assert.throws(() => assertStandaloneTestOwners(ci.replace(owner, changed)), undefined, id);
+  }
+});
+
+const assertManagedDelegation = (ci: string) => {
+  const owner = job(ci, 'linux-managed-tree');
+  const setup = step(owner, 'Require native ManagedTree execution in a delegated host context');
+  for (const required of [
+    '--expand-environment=no',
+    '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
+    '--property=KillMode=control-group', '--property=RuntimeMaxSec=25min',
+    '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
+    'systemd_version >= 254', 'systemd --version',
+    '--setenv="TAPID_MANAGED_UNIT=tapid-managed-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.service"',
+    'systemctl show --property=ControlGroup --value "$TAPID_MANAGED_UNIT"',
+    'driver=/sys/fs/cgroup$member_path',
+    'test "$member_path" = "$unit_path/driver"', 'group=/sys/fs/cgroup$unit_path',
+    'done < "$group/cgroup.procs"',
+    'done < "$driver/cgroup.procs"',
+    'if ! "$parent_empty"; then', 'if ! "$supervisor_present"; then',
+    'cat "$group/cgroup.type" "$driver/cgroup.type"',
+    'echo "+memory +pids" > "$group/cgroup.subtree_control"',
+    'unshare --mount --pid --fork --mount-proc /bin/true',
+  ]) assert(setup.includes(required), `missing ManagedTree setup: ${required}`);
+  assert.doesNotMatch(setup, /mkdir "\$group\/driver"|echo \$\$ > /);
+  assert(setup.indexOf('group=/sys/fs/cgroup$unit_path') < setup.indexOf('echo "+memory +pids"'));
+  assert.match(owner, /timeout-minutes: 30/);
+  assert.match(step(owner, 'Retain exact-source native acceptance logs'), /if: always\(\)/);
+};
+
+test('ManagedTree delegation uses a systemd-owned driver leaf and an empty parent', async () => {
+  assertManagedDelegation(await workflow('ci'));
+});
+
+const assertManagedEvidence = (ci: string) => {
+  const owner = job(ci, 'linux-managed-tree');
+  const prepare = step(owner, 'Prepare readable native acceptance evidence');
+  assert.match(prepare, /if: always\(\)/);
+  assert(owner.indexOf(prepare) < owner.indexOf(step(owner, 'Retain exact-source native acceptance logs')));
+  assert.match(prepare, /set -euo pipefail/);
+  for (const required of ['O_NOFOLLOW', 'O_DIRECTORY', 'fstatSync', 'isFile()', 'nlink', 'fchownSync', 'fchmodSync', '/proc/self/fd/', 'build.log', 'summary.json', 'linux-managed-news']) {
+    assert(prepare.includes(required), `missing evidence protection: ${required}`);
+  }
+  assert.doesNotMatch(prepare, /chown -R|chmod -R|continue-on-error|\|\| true/);
+  // Preparation is a separate always-run step: it cannot overwrite the native
+  // step's status or swallow systemd's pipefail result.
+  assert.match(step(owner, 'Require native ManagedTree execution in a delegated host context'), /set -euo pipefail/);
+};
+
+test('ManagedTree failure evidence is prepared before upload without masking native failure', async () => {
+  const ci = await workflow('ci');
+  assertManagedEvidence(ci);
+  for (const token of ['O_NOFOLLOW', 'O_DIRECTORY', 'fchownSync', 'fchmodSync', 'if: always()']) {
+    const prepare = step(job(ci, 'linux-managed-tree'), 'Prepare readable native acceptance evidence');
+    assert.throws(() => assertManagedEvidence(ci.replace(prepare, prepare.replaceAll(token, 'REMOVED'))));
+  }
+});
+
+test('ManagedTree evidence preparation touches only allowlisted single-link regular files', { skip: process.platform === 'win32' ? 'Linux evidence uses POSIX descriptors' : false }, async () => {
+  const prepare = step(job(await workflow('ci'), 'linux-managed-tree'), 'Prepare readable native acceptance evidence');
+  let program = prepare.match(/<<'NODE'\n([\s\S]*?)\n          NODE/)![1].replace(/^          /gm, '');
+  // macOS has no procfs descriptor directory. Exercise file selection, modes
+  // and link rejection there using the trusted fixture path; Linux executes
+  // the exact held-directory program. Neither is a privileged CI receipt.
+  if (process.platform !== 'linux') program = program
+    .replace('`/proc/self/fd/${directory}`', 'path')
+    .replace('`/proc/self/fd/${output}/${name}`', 'destination + "/" + name')
+    .replace('`/proc/self/fd/${fd}`', 'held + "/" + name');
+  const root = await mkdtemp(join(tmpdir(), 'managed evidence '));
+  try {
+    const script = join(root, 'prepare.mjs');
+    await writeFile(script, program);
+    let attempt = 0;
+    let destination: string;
+    const run = (directory: string) => {
+      destination = join(root, 'published-' + attempt++);
+      return execFileAsync(process.execPath, [script, directory, destination, String(process.getuid!()), String(process.getgid!())]);
+    };
+    const directory = join(root, 'evidence');
+    await mkdir(directory);
+    await writeFile(join(directory, 'build.json'), 'receipt', { mode: 0o600 });
+    await writeFile(join(directory, 'unrelated.json'), 'private', { mode: 0o600 });
+    await mkdir(join(directory, 'project'), { mode: 0o700 });
+    await run(directory);
+    assert.equal((await stat(join(destination!, 'build.json'))).mode & 0o777, 0o644);
+    assert.equal(await readFile(join(destination!, 'build.json'), 'utf8'), 'receipt');
+    await assert.rejects(stat(join(destination!, 'project')));
+    await assert.rejects(stat(join(destination!, 'unrelated.json')));
+    assert.equal((await stat(join(directory, 'build.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(directory, 'unrelated.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(directory, 'project'))).mode & 0o777, 0o700);
+    const outside = join(root, 'secret');
+    await writeFile(outside, 'synthetic secret', { mode: 0o600 });
+    await symlink(outside, join(directory, 'start.json'));
+    await assert.rejects(run(directory));
+    await rm(join(directory, 'start.json'));
+    await link(outside, join(directory, 'start.json'));
+    await assert.rejects(run(directory), /unsafe evidence/);
+    assert.equal((await stat(outside)).mode & 0o777, 0o600);
+    const alias = join(root, 'alias');
+    await symlink(directory, alias);
+    await assert.rejects(run(alias));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('ManagedTree launch leaves shell expressions for Bash expansion', { skip: process.platform === 'win32' ? 'Linux harness requires POSIX Bash' : false }, async () => {
+  const ci = await workflow('ci');
+  assertManagedDelegation(ci);
+  for (const replacement of ['', '--expand-environment=yes']) {
+    const broken = ci.replace('--expand-environment=no', replacement);
+    assert.notEqual(broken, ci);
+    assert.throws(() => assertManagedDelegation(broken));
+  }
+  const setup = step(job(ci, 'linux-managed-tree'), 'Require native ManagedTree execution in a delegated host context');
+  const start = setup.indexOf('sudo -n systemd-run');
+  const end = setup.indexOf("' 2>&1", start);
+  assert(start >= 0 && end > start);
+  const launch = setup.slice(start, end + 1);
+  // Controlled argument transport, not native systemd evidence. Inspect the
+  // actual command argument before Bash evaluates the trusted probe.
+  const stub = `sudo() {
+    test "$1" = -n; shift
+    test "$1" = systemd-run; shift
+    expansion=false
+    while test "$1" != /bin/bash; do
+      if test "$1" = --expand-environment=no; then expansion=true; fi
+      shift
+    done
+    "$expansion"
+    program="\${5}"
+    [[ "$program" = *'$$'* && "$program" = *'$BASHPID'* && "$program" = *'\${probe_path##*/}'* && "$program" = *'$(systemctl '* ]]
+    "$@"
+  }\n`;
+  // macOS ships Bash 3 without BASHPID; its literal in the native program is
+  // checked above, while the controlled probe can execute on either version.
+  const probe = 'printf "pid=%s bashpid=%s leaf=%s substitution=%s\\n" "$$" "${BASHPID:-$$}" "${probe_path##*/}" "$(printf intact)"; exit 0';
+  const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', stub + launch.replace('uname -a', () => probe)], {
+    env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: tmpdir(), RUSTFLAGS: '', node_bin: process.execPath, target_dir: tmpdir(), probe_path: '/owned/driver', workload: '/tmp/controlled-workload' },
+  });
+  assert.match(result.stdout, /^pid=(\d+) bashpid=\1 leaf=driver substitution=intact\n$/);
+  const evidence = await mkdtemp(join(tmpdir(), 'managed failure status '));
+  try {
+    await assert.rejects(execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', stub + launch.replace('uname -a', () => probe.replace('exit 0', 'exit 37')) + ' 2>&1 | tee "$RUNNER_TEMP/failure.log"'], {
+      env: { ...process.env, GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1', RUNNER_TEMP: evidence, RUSTFLAGS: '', node_bin: process.execPath, target_dir: evidence, probe_path: '/owned/driver', workload: '/tmp/controlled-workload' },
+    }), error => (error as NodeJS.ErrnoException & { code: number }).code === 37);
+    assert.match(await readFile(join(evidence, 'failure.log'), 'utf8'), /substitution=intact/);
+  } finally { await rm(evidence, { recursive: true, force: true }); }
+});
+
+test('ManagedTree delegation rejects missing prerequisites and driver-parent confusion', async () => {
+  const ci = await workflow('ci');
+  assertManagedDelegation(ci);
+  for (const required of [
+    '--property=Delegate=yes', '--property=DelegateSubgroup=driver',
+    '--setenv=TAPID_REQUIRE_MANAGED_ASSERTIONS=1', '--setenv=TAPID_REQUIRE_NODE_ASSERTIONS=1',
+    'group=/sys/fs/cgroup$unit_path', 'test "$member_path" = "$unit_path/driver"',
+    'done < "$group/cgroup.procs"', 'systemd_version >= 254',
+    'done < "$driver/cgroup.procs"',
+    'if ! "$parent_empty"; then', 'if ! "$supervisor_present"; then',
+  ]) {
+    const broken = ci.replace(required, '');
+    assert.notEqual(broken, ci, required);
+    assert.throws(() => assertManagedDelegation(broken), undefined, required);
+  }
+});
+
+test('ManagedTree discovery corroborates unit ownership before controller writes', { skip: process.platform === 'win32' ? 'Linux harness requires POSIX Bash' : false }, async () => {
+  const setup = step(job(await workflow('ci'), 'linux-managed-tree'), 'Require native ManagedTree execution in a delegated host context');
+  const start = setup.indexOf('              # Discovery observations');
+  const end = setup.indexOf('              unshare --mount');
+  assert(start >= 0 && end > start);
+  const directory = await mkdtemp(join(tmpdir(), "tapid delegation ' path-"));
+  try {
+    for (const [name, membership, unit, parentPids, driverPids, error] of [
+      ['valid', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '4242', ''],
+      ['missing', '1:cpu:/other', '/system.slice/test.service', '', '4242', 'discovery:'],
+      ['unexpected', '0::/system.slice/test.service/other', '/system.slice/test.service', '', '4242', 'hierarchy:'],
+      ['empty', '0::', '/system.slice/test.service', '', '4242', 'discovery:'],
+      ['malformed', '0::/system.slice/../test.service/driver', '/system.slice/test.service', '', '4242', 'discovery:'],
+      ['nonempty', '0::/system.slice/test.service/driver', '/system.slice/test.service', '55', '4242', 'membership: delegation parent is not empty'],
+      ['mismatch', '0::/system.slice/test.service/driver', '/system.slice/test.service', '', '99', 'membership: supervisor is absent from driver'],
+      ['wrong-unit', '0::/system.slice/test.service/driver', '/system.slice/other.service', '', '4242', 'hierarchy:'],
+    ]) {
+      const root = join(directory, name);
+      const group = join(root, 'system.slice/test.service');
+      await mkdir(join(group, 'driver'), { recursive: true });
+      for (const leaf of ['', '/driver']) {
+        for (const [file, value] of [['cgroup.type', 'domain'], ['cgroup.controllers', 'memory pids'], ['cgroup.procs', leaf ? driverPids : parentPids], ['cgroup.subtree_control', '']]) {
+          await writeFile(`${group}${leaf}/${file}`, value + (value ? '\n' : ''));
+        }
+      }
+      await writeFile(join(root, 'membership'), membership + '\n');
+      const script = `systemctl() { printf '%s\\n' '${unit}'; }\n` +
+        'if test "$FIXTURE_DRIVER_PIDS" = 4242; then printf "%s\\n" "$$" > "$FIXTURE_DRIVER_FILE"; fi\n' + setup.slice(start, end)
+        .replaceAll('/sys/fs/cgroup', '"$FIXTURE_CGROUP_ROOT"')
+        .replaceAll('/proc/self/cgroup', '"$FIXTURE_MEMBERSHIP"').replaceAll('/proc/$$/cgroup', '"$FIXTURE_MEMBERSHIP"');
+      const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', script], { env: { ...process.env, TAPID_MANAGED_UNIT: 'test.service', FIXTURE_CGROUP_ROOT: root, FIXTURE_MEMBERSHIP: join(root, 'membership'), FIXTURE_DRIVER_PIDS: driverPids, FIXTURE_DRIVER_FILE: join(group, 'driver/cgroup.procs') } })
+        .then(value => ({ ...value, code: 0 }), failure => failure);
+      assert.match(result.stdout, /0::|1:cpu:/, name);
+      if (error) {
+        assert.notEqual(result.code, 0, name);
+        assert(result.stderr.includes(error), `${name}: ${result.stderr}`);
+        assert.equal(await readFile(join(group, 'cgroup.subtree_control'), 'utf8'), '', name);
+      } else {
+        assert.equal(result.code, 0, result.stderr);
+        const supervisor = result.stdout.match(/supervisor_pid=(\d+)/)?.[1];
+        assert(supervisor, result.stdout);
+        assert(result.stdout.includes(`driver_pid=${supervisor}\n`), result.stdout);
+        assert.equal(await readFile(join(group, 'cgroup.subtree_control'), 'utf8'), '+memory +pids\n');
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('ManagedTree workload has private root-owned temporary ancestors and evidence is copied separately', async () => {
+  const owner = job(await workflow('ci'), 'linux-managed-tree');
+  const setup = step(owner, 'Require native ManagedTree execution in a delegated host context');
+  assert(setup.includes('mktemp -d /tmp/tapid-managed-news.XXXXXXXXXX'));
+  assert(setup.includes('umask 077'));
+  assert(setup.includes('TAPID_MANAGED_WORKLOAD'));
+  assert(setup.includes('--evidence "$TAPID_MANAGED_WORKLOAD/evidence"'));
+  const prepare = step(owner, 'Prepare readable native acceptance evidence');
+  for (const token of ['copyFileSync', 'COPYFILE_EXCL', 'O_NOFOLLOW', 'nlink', 'TAPID_MANAGED_WORKLOAD']) assert(prepare.includes(token), token);
+  assert.doesNotMatch(setup, /chmod.*runner|chown.*runner/);
+});
+
+test('ManagedTree task fallback measures hierarchical current counts with a bounded sampler', { skip: process.platform === 'win32' ? 'Linux sampler requires Bash' : false }, async () => {
+  const setup = step(job(await workflow('ci'), 'linux-managed-tree'), 'Require native ManagedTree execution in a delegated host context');
+  const sampler = setup.slice(setup.indexOf('              # A sampled fallback'), setup.indexOf('              fixture_status=0'));
+  assert(sampler.includes('150000'));
+  assert(sampler.includes('pids.current'));
+  assert(sampler.includes('sleep 0.01'));
+  assert(setup.includes(') || fixture_status=$?'));
+  assert(setup.includes('exit "$fixture_status"'));
+  assert(setup.includes('lower bound, not exact peak'));
+  const root = await mkdtemp(join(tmpdir(), 'managed sampled tasks '));
+  try {
+    await mkdir(join(root, 'fixture'));
+    await writeFile(join(root, 'fixture', 'pids.current'), '7\n');
+    const result = await execFileAsync('/bin/bash', ['-euo', 'pipefail', '-c', sampler + `
+      for ((attempt = 0; attempt < 200; attempt++)); do
+        if test -r "$TAPID_MANAGED_WORKLOAD/pids.sampled" && test "$(cat "$TAPID_MANAGED_WORKLOAD/pids.sampled")" = 7; then break; fi
+        sleep 0.01
+      done
+      kill "$sampler"
+      wait "$sampler" || test "$?" = 143
+      cat "$TAPID_MANAGED_WORKLOAD/pids.sampled"
+    `], { env: { ...process.env, group: root, TAPID_MANAGED_WORKLOAD: root } });
+    assert.equal(result.stdout, '7\n');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

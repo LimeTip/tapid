@@ -1756,6 +1756,10 @@ fn path_error(kind: &str, path: &Path, error: std::io::Error) -> ExecutionError 
     )
 }
 
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
+#[path = "linux_cancellation.rs"]
+mod linux_cancellation;
+
 #[cfg(windows)]
 #[path = "windows_execution.rs"]
 mod platform_backend;
