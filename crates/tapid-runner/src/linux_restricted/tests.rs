@@ -1681,6 +1681,24 @@ fn managed_tree_completion_is_bounded_when_parent_stdout_is_unread() {
 
 #[test]
 fn managed_tree_absolute_tools_require_traversable_fixture_ancestors() {
+    const OPERATION: &str = "TAPID_TEST_MANAGED_ANCESTOR_OPERATION";
+    const TEST: &str = "execution::platform_backend::tests::managed_tree_absolute_tools_require_traversable_fixture_ancestors";
+    if let Ok(operation) = std::env::var(OPERATION) {
+        let error = match operation.as_str() {
+            "read-sibling" => fs::read("../secret").expect_err("sibling secret was readable"),
+            "write-package" => {
+                fs::write("node_modules/tool", b"changed").expect_err("package tool was writable")
+            }
+            _ => panic!("unknown ancestor probe operation"),
+        };
+        eprintln!("{operation}: {error:?}");
+        assert!(
+            matches!(error.raw_os_error(), Some(libc::EACCES | libc::EROFS)),
+            "{operation} failed for an unexpected reason: {error:?}"
+        );
+        eprintln!("{operation} denial verified");
+        return;
+    }
     if std::env::var_os("TAPID_REQUIRE_MANAGED_ASSERTIONS").is_none() {
         eprintln!("privileged ancestor control requires the delegated native lane");
         return;
@@ -1715,7 +1733,7 @@ fn managed_tree_absolute_tools_require_traversable_fixture_ancestors() {
             SandboxMode::Required,
             FilesystemPolicy::new(vec![".".into()], vec!["output".into()]).unwrap(),
             false,
-            vec![],
+            vec![OPERATION.into()],
             true,
             ExecutionLimits::new(Some(5), Some(1024), Some(32), Some(128 * 1024 * 1024)).unwrap(),
         )
@@ -1736,11 +1754,19 @@ fn managed_tree_absolute_tools_require_traversable_fixture_ancestors() {
 
     // The native workload repair changes fixture ownership, not authority.
     chown(&ancestor, Some(0), Some(0)).unwrap();
-    let allowed = format!(
-        "'{absolute}' > output/allowed && test ! -r ../secret && test ! -w node_modules/tool && ! echo changed > node_modules/tool"
-    );
+    let allowed = format!("'{absolute}' > output/allowed 2> output/allowed-stderr");
     let result = execute(&request(&root, &allowed, policy())).unwrap();
-    assert_eq!(result.termination(), &Termination::Exited(0));
+    let ancestry: Vec<_> = tool
+        .ancestors()
+        .map(|path| (path, fs::metadata(path)))
+        .collect();
+    assert_eq!(
+        result.termination(),
+        &Termination::Exited(0),
+        "absolute tool execution: stdout={:?}, stderr={:?}, ancestors={ancestry:?}",
+        fs::read_to_string(root.join("output/allowed")),
+        fs::read_to_string(root.join("output/allowed-stderr"))
+    );
     assert_eq!(
         fs::read(root.join("output/allowed")).unwrap(),
         b"executed\n"
@@ -1750,4 +1776,39 @@ fn managed_tree_absolute_tools_require_traversable_fixture_ancestors() {
         result.completion().cleanup_confidence(),
         CleanupConfidence::KernelOwnedComplete
     );
+    // Actual open operations are the security controls. In a capability-stripped
+    // root process access(2) predicates need not predict open(2) enforcement.
+    let probe = root.join("workload");
+    fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+    for operation in ["read-sibling", "write-package"] {
+        let command = format!(
+            "'{}' --exact '{TEST}' --nocapture > output/{operation}.stdout 2> output/{operation}.stderr",
+            probe.display()
+        );
+        let req = ExecutionRequest::builder("/bin/sh")
+            .args(["-c", &command])
+            .env(OPERATION, operation)
+            .project_root(&root)
+            .policy(policy())
+            .build()
+            .unwrap();
+        let result = execute(&req).unwrap_or_else(|error| panic!("{operation}: {error}"));
+        let stdout = fs::read_to_string(root.join(format!("output/{operation}.stdout"))).unwrap();
+        let stderr = fs::read_to_string(root.join(format!("output/{operation}.stderr"))).unwrap();
+        assert_eq!(
+            result.termination(),
+            &Termination::Exited(0),
+            "{operation}: stdout={stdout:?}, stderr={stderr:?}"
+        );
+        assert!(
+            stderr.contains(&format!("{operation} denial verified")),
+            "{operation} assertions did not execute: stdout={stdout:?}, stderr={stderr:?}"
+        );
+        assert_eq!(
+            result.completion().cleanup_confidence(),
+            CleanupConfidence::KernelOwnedComplete,
+            "{operation} cleanup"
+        );
+        assert_eq!(fs::read(&tool).unwrap(), b"#!/bin/sh\necho executed\n");
+    }
 }

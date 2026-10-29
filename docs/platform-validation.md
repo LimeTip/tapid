@@ -225,7 +225,10 @@ have ordinary traversal permission on every absolute ancestor. The privileged
 `managed_tree_absolute_tools_require_traversable_fixture_ancestors` control
 compares relative and absolute access below a disposable foreign-owned ancestor,
 then checks absolute tool execution with root-owned ancestors while retaining
-sibling-secret and package-write denials. It requires the delegated root lane;
+sibling-secret and package-write denials through separate Rust read/write
+attempts, rather than permission-query predicates. Each operation checks
+kernel-owned cleanup and unchanged package bytes; absolute execution failures
+include ancestor metadata. It requires the delegated root lane;
 an ordinary account or non-Linux run does not establish this behavior.
 
 An always-run collector copies only allowlisted, single-link regular evidence
