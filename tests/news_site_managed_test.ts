@@ -30,17 +30,25 @@ if (args[0] === 'install') {
 const script = JSON.parse(fs.readFileSync(project + '/package.json')).scripts?.build || '';
 const diagnostic = script.startsWith('node -e ');
 if (fs.existsSync(project + '/.tmp/tool-diagnostic.cjs')) process.exit(46);
-if (diagnostic && mode !== 'diagnostic-real') {
+if (diagnostic && !mode.startsWith('diagnostic-real')) {
  const record = mode === 'diagnostic-large' ? 'x'.repeat(20000) : mode === 'diagnostic-malformed' ? '{' : JSON.stringify({runtime:process.execPath, paths:[{error:'ENOENT'}], attempts:[{error:'EACCES'}]});
  console.log('unrelated output {not observations}');
  if (mode === 'diagnostic-duplicate') console.log('TAPID_TOOL_DIAGNOSTIC_V1 {}');
  if (mode !== 'diagnostic-unavailable') console.log('TAPID_TOOL_DIAGNOSTIC_V1 ' + record);
 }
-if (diagnostic && mode === 'diagnostic-real') {
- const result = require('node:child_process').spawnSync('/bin/sh', ['-c', script], {shell:false, cwd:project, env:{PATH:require('node:path').dirname(process.execPath)}, stdio:'inherit'});
+if (diagnostic && mode.startsWith('diagnostic-real')) {
+ const preload = project + '/controlled-fs.cjs';
+ if (mode === 'diagnostic-real-denied') fs.writeFileSync(preload, \`const fs = require('node:fs');
+const denied = () => { const e = new Error('controlled'); e.code = 'EACCES'; throw e; };
+fs.realpathSync = denied;
+const stat = fs.statSync; fs.statSync = name => String(name).endsWith('/node_modules') ? denied() : stat(name);
+const access = fs.accessSync; fs.accessSync = (name, mode) => String(name).endsWith('/node_modules') ? denied() : access(name, mode);
+process.getuid = undefined; process.getgid = () => { throw new Error('unavailable'); };
+\`);
+ const result = require('node:child_process').spawnSync('/bin/sh', ['-c', script], {shell:false, cwd:project, env:{PATH:require('node:path').dirname(process.execPath), ...(mode === 'diagnostic-real-denied' ? {NODE_OPTIONS:'--require=' + preload} : {})}, stdio:'inherit'});
  if (result.status !== 0) process.exit(45);
 }
-if (!diagnostic && ['build-failure', 'outside-bin', 'diagnostic-large', 'diagnostic-unavailable', 'diagnostic-malformed', 'diagnostic-duplicate', 'diagnostic-real'].includes(mode) && args[1] === 'build') process.exit(37);
+if (!diagnostic && ['build-failure', 'outside-bin', 'diagnostic-large', 'diagnostic-unavailable', 'diagnostic-malformed', 'diagnostic-duplicate', 'diagnostic-real', 'diagnostic-real-denied'].includes(mode) && args[1] === 'build') process.exit(37);
 const result = args[args.indexOf('--result-file') + 1];
 function receipt(termination) {
  fs.writeFileSync(result, JSON.stringify({outcome:'completed', receipt:{assurance:'ManagedTree', termination, requested:{filesystem_read:true}, enforced:{filesystem_read:true}, completion:{cleanup_confidence:mode === 'bad-cleanup' ? 'NoCleanupGuarantee' : 'KernelOwnedComplete'}}}));
@@ -209,4 +217,29 @@ test('generated diagnostic observes execution errors without retaining child out
   assert.equal(observations.attempts[1].status, 0);
   assert.ok(observations.paths.some(entry => entry.path.endsWith('/next/cli.js')));
   assert.equal(observations.attempts[1].stdout, undefined);
+}));
+
+
+test('realpath denial retains independent lexical and relative project observations', () => temporary(async path => {
+  const options = await fixture(path, 'diagnostic-real-denied');
+  await assert.rejects(runManagedNewsSite(options), /build.*37/);
+  const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
+  assert.equal(report.diagnostic.error, undefined);
+  const observed = report.diagnostic.observations;
+  assert.equal(observed.target_error, 'EACCES');
+  assert.equal(observed.cwd, realpathSync(report.project));
+  assert.equal(observed.uid.error, 'unavailable');
+  assert.equal(observed.gid.error, 'unavailable');
+  const absolute = observed.paths.find(entry => entry.path === join(observed.cwd, 'node_modules'));
+  assert.equal(absolute.stat.error, 'EACCES');
+  assert.equal(absolute.read.error, 'EACCES');
+  assert.equal(absolute.execute.error, 'EACCES');
+  const relative = observed.paths.find(entry => entry.path === 'node_modules');
+  assert.equal(typeof relative.stat.inode, 'number');
+  assert.equal(relative.read.allowed, true);
+  assert.ok(observed.paths.some(entry => entry.path === join(observed.cwd, 'node_modules/.bin/next')));
+  assert.ok(observed.paths.some(entry => entry.path === observed.cwd && entry.lstat.inode));
+  assert.ok(Buffer.byteLength(JSON.stringify(observed)) <= 16384);
+  assert.equal(readFileSync(join(report.project, 'package.json'), 'utf8'), JSON.stringify({mode:'diagnostic-real-denied'}));
+  assert.match(report.error, /build.*37/);
 }));

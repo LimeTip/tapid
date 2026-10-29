@@ -77,23 +77,44 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const toolDiagnostic = String.raw`
 const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
 const report = { runtime: process.execPath, runtime_directory: path.dirname(process.execPath), search: (process.env.PATH || '').split(path.delimiter).slice(0, 16), paths: [], attempts: [] };
-const shim = path.resolve('node_modules/.bin/next');
 const code = error => typeof error.code === 'string' ? error.code.slice(0, 64) : 'unavailable';
+report.cwd = process.cwd();
+for (const [name, operation] of [['uid', 'getuid'], ['gid', 'getgid']]) {
+  try { report[name] = { value: process[operation]() }; } catch (error) { report[name] = { error: code(error) }; }
+}
+const shim = path.resolve('node_modules/.bin/next');
 let target;
 try { target = fs.realpathSync(shim); report.target = target; report.link = fs.readlinkSync(shim); } catch (error) { report.target_error = code(error); }
 const paths = new Set([process.execPath, path.dirname(process.execPath), '/usr/bin/env', shim]);
 for (let current = path.dirname(process.execPath); paths.size < 16; current = path.dirname(current)) {
   paths.add(current); if (current === path.dirname(current)) break;
 }
+// Lexical observations do not depend on realpath succeeding. Bound each chain
+// independently so deep runtime paths cannot suppress project observations.
+for (const name of ['.', 'node_modules', 'node_modules/.bin', 'node_modules/.bin/next']) {
+  paths.add(name); paths.add(path.resolve(name));
+}
+for (let current = path.dirname(report.cwd), count = 0; count < 12; count++, current = path.dirname(current)) {
+  paths.add(current); if (current === path.dirname(current)) break;
+}
 // Inspect target ancestors only inside the project, never a symlink escape.
 if (target && !path.relative(process.cwd(), target).startsWith('..') && !path.isAbsolute(path.relative(process.cwd(), target))) {
   for (let current = target; current.startsWith(process.cwd()); current = path.dirname(current)) {
-    paths.add(current); if (current === process.cwd() || paths.size >= 24) break;
+    paths.add(current); if (current === process.cwd() || paths.size >= 48) break;
   }
 }
 for (const name of paths) {
   const entry = { path: name };
-  try { entry.mode = fs.statSync(name).mode; fs.accessSync(name, fs.constants.X_OK); entry.executable = true; } catch (error) { entry.error = code(error); }
+  for (const [label, operation] of [['stat', 'statSync'], ['lstat', 'lstatSync']]) {
+    try {
+      const metadata = fs[operation](name);
+      entry[label] = { mode: metadata.mode, device: metadata.dev, inode: metadata.ino, uid: metadata.uid, gid: metadata.gid };
+    } catch (error) { entry[label] = { error: code(error) }; }
+  }
+  for (const [label, flag] of [['read', fs.constants.R_OK], ['execute', fs.constants.X_OK]]) {
+    try { fs.accessSync(name, flag); entry[label] = { allowed: true }; }
+    catch (error) { entry[label] = { error: code(error) }; }
+  }
   report.paths.push(entry);
 }
 for (const command of ['next', shim]) {

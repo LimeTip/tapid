@@ -174,7 +174,9 @@ Node executes an inline program, without loading a generated project file or
 reading a project report file. A tagged JSON record is read from a descriptor-checked
 regular diagnostic log capped at 32 KiB; malformed, missing, duplicate or oversized
 records remain diagnostic errors. It records
-runtime/search paths, executable modes and accessibility, and loading results
+runtime/search paths, cwd and numeric uid/gid, independent lexical project
+ancestors and relative/absolute path observations, stat/lstat modes and device/inode
+identities, separate read/execute accessibility, and loading results
 for `next --version` by command name and absolute shim path. Application output
 and unrelated environment values are not retained. Observations are limited to 16 KiB and
 diagnostic log prefixes to 4 KiB in `summary.json`; inaccessible observations
