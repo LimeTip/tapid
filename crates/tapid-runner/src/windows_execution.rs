@@ -699,7 +699,9 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             // Keep the Job and grants alive until either the kernel's active-process count reaches
             // zero or the associated completion port delivers ACTIVE_PROCESS_ZERO. If a bounded
             // notification wait fails, re-terminate and retry; no failed query is treated as proof.
+            trace_windows_stage("cleanup: confirm empty Job");
             job.empty_before_revocation();
+            trace_windows_stage("cleanup: Job confirmed empty");
         }
         #[cfg(test)]
         if self.grants.is_some()
@@ -713,7 +715,9 @@ impl<'a> WindowsExecutionLifecycle<'a> {
             EMPTY_JOB_BEFORE_RESTORE.with(|count| count.set(count.get() + 1));
         }
         self.child.take();
+        trace_windows_stage("cleanup: stop and join socket broker");
         self.network.take(); // Broker outlives clients, but not the execution.
+        trace_windows_stage("cleanup: socket broker stopped");
         if let Some(guard) = self.guard.take()
             && let Err(error) = guard.finish()
         {
