@@ -1,6 +1,15 @@
 //! Pure, deterministic resolution of normalized registry metadata.
 #![deny(unsafe_code)]
 
+mod interpretation;
+pub use interpretation::{
+    CopiedDeclaration, DeclarationTarget, InterpretedDeclaration, InterpretedRoots, RootMembership,
+    copied_declaration, declaration_registry, dependency_parts, interpret_workspace_member,
+    interpret_workspace_roots, legacy_root_requirements, manifest_overrides, manifest_roots,
+    register_local_root_identity, root_membership, validate_workspace_registry_peer,
+    workspace_requirement,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,

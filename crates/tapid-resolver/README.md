@@ -35,3 +35,21 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+Manifest interpretation is pure and depends on `tapid-manifest` declaration views.
+`interpret_workspace_member` accepts indexed name/version facts and a fallible
+registry selector, returning section-preserving declarations with local binding
+names, declared requirements, and workspace or exact registry targets. Aliases
+route by actual target; peers retain their existing local-provider contract.
+`interpret_workspace_roots` checks identity conflicts and direct overrides and
+returns root constraints and effective member requirements in input order. It
+never mutates the original member requirements. `workspace_requirement` expands
+only the existing `workspace:*`, `workspace:^`, and `workspace:~` forms.
+
+`manifest_roots` retains registry preflight semantics, excluding workspace and
+copied declarations. `root_membership` preserves required/optional overlap, and
+`legacy_root_requirements` retains declared source identities and every applicable
+requirement without applying fresh-resolution overrides. Replay consumers validate
+recorded graphs separately. `copied_declaration` classifies immutable copied-source
+syntax using the existing Git parser; it does not read or prepare artifacts.
+See [ADR 0012](https://github.com/LimeTip/tapid/blob/main/docs/adr/0012-shared-dependency-interpretation.md).
