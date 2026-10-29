@@ -1,7 +1,70 @@
 use super::*;
 use proptest::prelude::*;
-fn req(s: &str) -> Requirement {
+
+#[test]
+fn ancestor_peer_provider_without_direct_root() {
+    let mut plugin = package("plugin", "1.0.0", &[]);
+    plugin
+        .peer_dependencies
+        .insert("host".parse().unwrap(), req("^1"));
+    let metadata = registry(
+        "https://registry.npmjs.org",
+        vec![
+            package("parent", "1.0.0", &[("host", "1.1.0"), ("plugin", "1")]),
+            package("host", "1.1.0", &[]),
+            plugin,
+        ],
+    );
+    let result = resolve_instances_with_preferences(
+        &[dep("https://registry.npmjs.org", "parent", "1")],
+        &[metadata],
+        Default::default(),
+        |source, _| Ok(source.clone()),
+        &ResolutionPreferences::default(),
+    )
+    .expect("an explicitly selected enclosing provider satisfies the plugin peer");
+    let parent = &result.instances[result.roots.values().next().unwrap()];
+    let plugin = &result.instances[&parent.dependencies[&"plugin".parse().unwrap()]];
+    assert_eq!(
+        plugin.peers[&"host".parse().unwrap()],
+        parent.dependencies[&"host".parse().unwrap()]
+    );
+    assert_eq!(result.instances.len(), 3);
+}
+pub(super) fn req(s: &str) -> Requirement {
     s.parse().unwrap()
+}
+
+#[test]
+fn contextual_dependency_cycle_preserves_an_unchanged_external_provider() {
+    let mut a = package("a", "1.0.0", &[("b", "1")]);
+    a.peer_dependencies
+        .insert("host".parse().unwrap(), req("1"));
+    let result = resolve_instances_with_preferences(
+        &[
+            dep("https://registry.npmjs.org", "a", "1"),
+            dep("https://registry.npmjs.org", "host", "1"),
+        ],
+        &[registry(
+            "https://registry.npmjs.org",
+            vec![
+                a,
+                package("b", "1.0.0", &[("a", "1")]),
+                package("host", "1.0.0", &[]),
+            ],
+        )],
+        Default::default(),
+        |source, _| Ok(source.clone()),
+        &ResolutionPreferences::default(),
+    )
+    .expect("a finite dependency cycle with unchanged exact providers is supported");
+    let a = &result.roots[&(
+        "https://registry.npmjs.org".parse().unwrap(),
+        "a".parse().unwrap(),
+    )];
+    let b = &result.instances[&result.instances[a].dependencies[&"b".parse().unwrap()]];
+    assert_eq!(&b.dependencies[&"a".parse().unwrap()], a);
+    assert_eq!(result.instances.len(), 3);
 }
 
 #[test]
@@ -136,10 +199,14 @@ proptest! {
     }
 }
 
-fn dep(registry: &str, name: &str, range: &str) -> Dependency {
+pub(super) fn dep(registry: &str, name: &str, range: &str) -> Dependency {
     Dependency::new(registry.parse().unwrap(), name.parse().unwrap(), req(range))
 }
-fn package(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageVersionMetadata {
+pub(super) fn package(
+    name: &str,
+    version: &str,
+    dependencies: &[(&str, &str)],
+) -> PackageVersionMetadata {
     PackageVersionMetadata {
         dist_tags: BTreeSet::new(),
         name: name.parse().unwrap(),
@@ -152,7 +219,7 @@ fn package(name: &str, version: &str, dependencies: &[(&str, &str)]) -> PackageV
         optional_peer_dependencies: BTreeSet::new(),
     }
 }
-fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
+pub(super) fn registry(url: &str, packages: Vec<PackageVersionMetadata>) -> RegistryMetadata {
     RegistryMetadata::normalize(url.parse().unwrap(), packages).unwrap()
 }
 

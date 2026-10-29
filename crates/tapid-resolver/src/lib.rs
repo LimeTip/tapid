@@ -9,6 +9,12 @@ use std::{
 use tapid_core::{PackageName, PackageSource, PackageVersion, PeerContext};
 use tapid_registry_client::{RegistryPackageId, RegistrySnapshot};
 
+mod instances;
+pub use instances::{
+    InstanceRef, InstanceResolution, PeerBindingFailure, ResolvedInstance,
+    resolve_instances_with_preferences,
+};
+
 #[cfg(test)]
 thread_local! {
     static REQUIREMENT_BASE_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -573,6 +579,8 @@ pub struct RequirementOrigin {
 /// Structured deterministic failures from requirement parsing and graph selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveError {
+    /// Exact contextual provider lookup failed before materialization.
+    ContextualPeerDependency(Box<PeerBindingFailure>),
     MetadataLimitExceeded,
     InvalidRequirement(String),
     UnsupportedRange(String),
@@ -608,6 +616,7 @@ pub enum ResolveError {
 impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ContextualPeerDependency(error) => fmt::Display::fmt(error, f),
             Self::PeerDependency {
                 package,
                 peer,
@@ -672,6 +681,107 @@ pub fn resolve_graph_with_preferences<F>(
     mut registry_for_dependency: F,
     preferred: &ResolutionPreferences,
 ) -> Result<Resolution, ResolveError>
+where
+    F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
+{
+    let ArtifactSelections {
+        selected,
+        selected_packages,
+        roots,
+        root_bindings,
+        dependencies,
+    } = select_graph(
+        ds,
+        metadata,
+        options,
+        &mut registry_for_dependency,
+        preferred,
+    )?;
+    let mut root_providers: BTreeMap<PackageName, Vec<&RegistryPackageId>> = BTreeMap::new();
+    for ((_, local_name), root) in &root_bindings {
+        root_providers
+            .entry(local_name.clone())
+            .or_default()
+            .push(root);
+    }
+    let mut peer_contexts = BTreeMap::new();
+    for (id, package) in &selected_packages {
+        let mut context = PeerContext::default();
+        for (peer, requirement) in &package.peer_dependencies {
+            let candidates = root_providers.get(peer);
+            let mut provider = None;
+            for candidate in candidates.into_iter().flatten() {
+                let actual_name = if requirement.is_alias() {
+                    requirement.package_name(peer)
+                } else {
+                    &candidate.name
+                };
+                let peer_registry = registry_for_dependency(&id.registry, actual_name)
+                    .map_err(ResolveError::RegistryRouting)?;
+                if candidate.registry != peer_registry {
+                    continue;
+                }
+                if provider.replace(*candidate).is_some() {
+                    return Err(ResolveError::RegistryRouting(format!(
+                        "ambiguous root peer binding for {peer}"
+                    )));
+                }
+            }
+            if candidates.is_none() {
+                // Preserve route validation even when no local provider exists.
+                registry_for_dependency(&id.registry, requirement.package_name(peer))
+                    .map_err(ResolveError::RegistryRouting)?;
+            }
+            if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
+                continue;
+            }
+
+            if !provider.is_some_and(|provider| {
+                selected_packages.get(provider).is_some_and(|metadata| {
+                    requirement.matches_tagged_version(&provider.version, &metadata.dist_tags)
+                }) && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
+            }) {
+                return Err(ResolveError::PeerDependency {
+                    package: Box::new(id.clone()),
+                    peer: peer.to_string(),
+                    requirement: requirement.raw.clone(),
+                    provider: provider.cloned().map(Box::new),
+                });
+            }
+            context = context.with(
+                peer.clone(),
+                provider
+                    .expect("validated root peer provider")
+                    .version
+                    .clone(),
+            );
+        }
+        peer_contexts.insert(id.clone(), context);
+    }
+
+    Ok(Resolution {
+        selected: selected.into_iter().collect(),
+        roots,
+        root_bindings,
+        dependencies: dependencies.into_iter().collect(),
+        peer_contexts,
+    })
+}
+struct ArtifactSelections {
+    selected: BTreeSet<RegistryPackageId>,
+    selected_packages: BTreeMap<RegistryPackageId, PackageVersionMetadata>,
+    roots: Vec<RegistryPackageId>,
+    root_bindings: BTreeMap<(PackageSource, PackageName), RegistryPackageId>,
+    dependencies: BTreeSet<ResolvedDependency>,
+}
+
+fn select_graph<F>(
+    ds: &[Dependency],
+    metadata: &[RegistryMetadata],
+    options: ResolutionOptions,
+    registry_for_dependency: &mut F,
+    preferred: &ResolutionPreferences,
+) -> Result<ArtifactSelections, ResolveError>
 where
     F: FnMut(&PackageSource, &PackageName) -> Result<PackageSource, String>,
 {
@@ -837,74 +947,12 @@ where
 
     roots.sort();
     roots.dedup();
-    let mut root_providers: BTreeMap<PackageName, Vec<&RegistryPackageId>> = BTreeMap::new();
-    for ((_, local_name), root) in &root_bindings {
-        root_providers
-            .entry(local_name.clone())
-            .or_default()
-            .push(root);
-    }
-    let mut peer_contexts = BTreeMap::new();
-    for (id, package) in &selected_packages {
-        let mut context = PeerContext::default();
-        for (peer, requirement) in &package.peer_dependencies {
-            let candidates = root_providers.get(peer);
-            let mut provider = None;
-            for candidate in candidates.into_iter().flatten() {
-                let actual_name = if requirement.is_alias() {
-                    requirement.package_name(peer)
-                } else {
-                    &candidate.name
-                };
-                let peer_registry = registry_for_dependency(&id.registry, actual_name)
-                    .map_err(ResolveError::RegistryRouting)?;
-                if candidate.registry != peer_registry {
-                    continue;
-                }
-                if provider.replace(*candidate).is_some() {
-                    return Err(ResolveError::RegistryRouting(format!(
-                        "ambiguous root peer binding for {peer}"
-                    )));
-                }
-            }
-            if candidates.is_none() {
-                // Preserve route validation even when no local provider exists.
-                registry_for_dependency(&id.registry, requirement.package_name(peer))
-                    .map_err(ResolveError::RegistryRouting)?;
-            }
-            if provider.is_none() && package.optional_peer_dependencies.contains(peer) {
-                continue;
-            }
-
-            if !provider.is_some_and(|provider| {
-                selected_packages.get(provider).is_some_and(|metadata| {
-                    requirement.matches_tagged_version(&provider.version, &metadata.dist_tags)
-                }) && (!requirement.is_alias() || requirement.package_name(peer) == &provider.name)
-            }) {
-                return Err(ResolveError::PeerDependency {
-                    package: Box::new(id.clone()),
-                    peer: peer.to_string(),
-                    requirement: requirement.raw.clone(),
-                    provider: provider.cloned().map(Box::new),
-                });
-            }
-            context = context.with(
-                peer.clone(),
-                provider
-                    .expect("validated root peer provider")
-                    .version
-                    .clone(),
-            );
-        }
-        peer_contexts.insert(id.clone(), context);
-    }
-
-    Ok(Resolution {
-        selected: selected.into_iter().collect(),
+    Ok(ArtifactSelections {
+        selected,
+        selected_packages,
         roots,
         root_bindings,
-        dependencies: dependencies.into_iter().collect(),
-        peer_contexts,
+        dependencies,
     })
 }
 
