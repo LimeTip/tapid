@@ -168,6 +168,15 @@ as the primary error. These observations precede containment and do not
 establish the private mount namespace's permissions. The CLI invocation probe
 installs an offline package through the verified install path and invokes its
 Node-backed bin by command name before the existing outside-secret controls.
+After a failed reference build, a separate diagnostic reuses the build script's
+ManagedTree policy, selected runtime and memory-statistics option. It records
+runtime/search paths, executable modes and accessibility, and loading results
+for `next --version` by command name and absolute shim path. Application output
+and unrelated environment values are not retained. Observations are limited to 16 KiB and
+diagnostic log prefixes to 4 KiB in `summary.json`; inaccessible observations
+remain explicit errors. The isolated manifest is restored afterward. Diagnostic
+success never accepts the failed build or replaces its primary error. Native
+execution of this diagnostic is required to attribute the reference-tool denial.
 The fixture's separate candidate policy uses 180 seconds, 4 MiB combined output,
 256 kernel tasks and 2 GiB cgroup memory.
 These are provisional ceilings, not native measurements or support evidence.

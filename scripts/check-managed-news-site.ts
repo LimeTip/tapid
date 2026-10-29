@@ -72,6 +72,37 @@ async function freePort(): Promise<number> {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Executed only by the selected Node inside the failed build's ManagedTree.
+// Never retain application output, unrelated environment values, or file contents.
+const toolDiagnostic = String.raw`
+const fs = require('node:fs'), path = require('node:path'), cp = require('node:child_process');
+const report = { runtime: process.execPath, runtime_directory: path.dirname(process.execPath), search: (process.env.PATH || '').split(path.delimiter).slice(0, 16), paths: [], attempts: [] };
+const shim = path.resolve('node_modules/.bin/next');
+const code = error => typeof error.code === 'string' ? error.code.slice(0, 64) : 'unavailable';
+let target;
+try { target = fs.realpathSync(shim); report.target = target; report.link = fs.readlinkSync(shim); } catch (error) { report.target_error = code(error); }
+const paths = new Set([process.execPath, path.dirname(process.execPath), '/usr/bin/env', shim]);
+for (let current = path.dirname(process.execPath); paths.size < 16; current = path.dirname(current)) {
+  paths.add(current); if (current === path.dirname(current)) break;
+}
+// Inspect target ancestors only inside the project, never a symlink escape.
+if (target && !path.relative(process.cwd(), target).startsWith('..') && !path.isAbsolute(path.relative(process.cwd(), target))) {
+  for (let current = target; current.startsWith(process.cwd()); current = path.dirname(current)) {
+    paths.add(current); if (current === process.cwd() || paths.size >= 24) break;
+  }
+}
+for (const name of paths) {
+  const entry = { path: name };
+  try { entry.mode = fs.statSync(name).mode; fs.accessSync(name, fs.constants.X_OK); entry.executable = true; } catch (error) { entry.error = code(error); }
+  report.paths.push(entry);
+}
+for (const command of ['next', shim]) {
+  const result = cp.spawnSync(command, ['--version'], { stdio: 'ignore', timeout: 10000 });
+  report.attempts.push({ command, status: result.status, signal: result.signal, error: result.error ? code(result.error) : null });
+}
+fs.writeFileSync('.tmp/tool-diagnostic.json', JSON.stringify(report));
+`;
+
 export async function runManagedNewsSite(options: Options) {
   const evidence = resolve(options.evidence);
   mkdirSync(evidence, { recursive: true });
@@ -162,7 +193,49 @@ export async function runManagedNewsSite(options: Options) {
       }
     } catch (error) { tool.error = String(error); }
     save();
-    await command("build", [...runArgs("build"), "--allow-process-memory-stats"]);
+    try {
+      await command("build", [...runArgs("build"), "--allow-process-memory-stats"]);
+    } catch (error) {
+      // Reuse the build script name so its effective policy is identical. Restore
+      // the manifest even when diagnostics fail; diagnostics never accept a build.
+      const manifestPath = join(project, "package.json");
+      let manifestBytes: Buffer | undefined;
+      summary.diagnostic = {};
+      try {
+        manifestBytes = readFileSync(manifestPath);
+        const manifest = JSON.parse(manifestBytes.toString());
+        manifest.scripts = { ...manifest.scripts, build: 'node .tmp/tool-diagnostic.cjs' };
+        writeFileSync(join(project, '.tmp/tool-diagnostic.cjs'), toolDiagnostic);
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+        const args = [...runArgs('build'), '--allow-process-memory-stats'];
+        args[args.indexOf('--result-file') + 1] = join(evidence, 'diagnostic.json');
+        await command('diagnostic', args);
+        summary.diagnostic.receipt = checkedResult(join(evidence, 'diagnostic.json'), 'Exited(0)');
+        const fd = openSync(join(project, '.tmp/tool-diagnostic.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const metadata = fstatSync(fd);
+          assert.ok(metadata.isFile() && metadata.size <= 16384, 'diagnostic observations exceed bound or are not regular');
+          const bytes = Buffer.alloc(16385);
+          const count = readSync(fd, bytes, 0, bytes.length, 0);
+          assert.ok(count <= 16384, 'diagnostic observations exceed bound');
+          summary.diagnostic.observations = JSON.parse(bytes.subarray(0, count).toString());
+        } finally { closeSync(fd); }
+      } catch (diagnosticError) {
+        summary.diagnostic.error = String(diagnosticError);
+      } finally {
+        try { if (manifestBytes) writeFileSync(manifestPath, manifestBytes); }
+        catch (restoreError) { summary.diagnostic.restore_error = String(restoreError); }
+        try {
+          const fd = openSync(join(evidence, 'diagnostic.log'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          try {
+            assert.ok(fstatSync(fd).isFile(), 'diagnostic log is not regular');
+            const bytes = Buffer.alloc(4096);
+            summary.diagnostic.log_prefix = bytes.subarray(0, readSync(fd, bytes, 0, bytes.length, 0)).toString();
+          } finally { closeSync(fd); }
+        } catch (logError) { summary.diagnostic.log_error = String(logError); }
+      }
+      throw error;
+    }
     summary.build = checkedResult(join(evidence, "build.json"), "Exited(0)");
     await command("test", runArgs("test"));
     summary.test = checkedResult(join(evidence, "test.json"), "Exited(0)");

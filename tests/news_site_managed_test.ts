@@ -27,7 +27,15 @@ if (args[0] === 'install') {
  } else fs.symlinkSync('../next/cli.js', project + '/node_modules/.bin/next');
  process.exit(0);
 }
-if (['build-failure', 'outside-bin'].includes(mode) && args[1] === 'build') process.exit(37);
+const diagnostic = fs.existsSync(project + '/.tmp/tool-diagnostic.cjs');
+if (diagnostic) fs.writeFileSync(project + '/.tmp/tool-diagnostic.json', JSON.stringify({runtime:process.execPath, paths:[{error:'ENOENT'}], attempts:[{error:'EACCES'}]}));
+if (diagnostic && mode === 'diagnostic-large') fs.writeFileSync(project + '/.tmp/tool-diagnostic.json', 'x'.repeat(20000));
+if (diagnostic && mode === 'diagnostic-unavailable') fs.unlinkSync(project + '/.tmp/tool-diagnostic.json');
+if (diagnostic && mode === 'diagnostic-real') {
+ const result = require('node:child_process').spawnSync(process.execPath, [project + '/.tmp/tool-diagnostic.cjs'], {cwd:project, env:{PATH:require('node:path').dirname(process.execPath)}});
+ if (result.status !== 0) process.exit(45);
+}
+if (!diagnostic && ['build-failure', 'outside-bin', 'diagnostic-large', 'diagnostic-unavailable', 'diagnostic-real'].includes(mode) && args[1] === 'build') process.exit(37);
 const result = args[args.indexOf('--result-file') + 1];
 function receipt(termination) {
  fs.writeFileSync(result, JSON.stringify({outcome:'completed', receipt:{assurance:'ManagedTree', termination, requested:{filesystem_read:true}, enforced:{filesystem_read:true}, completion:{cleanup_confidence:mode === 'bad-cleanup' ? 'NoCleanupGuarantee' : 'KernelOwnedComplete'}}}));
@@ -77,7 +85,7 @@ test("fixture build failure propagates without running later scripts", () => tem
   await assert.rejects(runManagedNewsSite(options), /build.*37/);
   const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
   const calls = readFileSync(join(report.project, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(report.status, 'failed');
   assert.equal(report.local_tool.link, '../next/cli.js');
   assert.equal(report.local_tool.target, realpathSync(join(report.project, 'node_modules/next/cli.js')));
@@ -150,4 +158,46 @@ test("forced caller termination cannot count as successful cancellation", () => 
   const args = report.commands.at(-1).args;
   const port = args[args.indexOf('--port') + 1];
   await assert.rejects(fetch('http://127.0.0.1:' + port + '/acceptance', {signal: AbortSignal.timeout(1000)}));
+}));
+
+test("failed build retains contained diagnostics without accepting diagnostic success", () => temporary(async path => {
+  const options = await fixture(path, "build-failure");
+  await assert.rejects(runManagedNewsSite(options), /build.*37/);
+  const report = JSON.parse(readFileSync(join(options.evidence, "summary.json"), "utf8"));
+  assert.equal(report.status, "failed");
+  assert.equal(report.diagnostic.receipt.receipt.termination, "Exited(0)");
+  assert.equal(report.diagnostic.observations.runtime, process.execPath);
+  assert.equal(report.diagnostic.observations.attempts[0].error, "EACCES");
+  assert.equal(report.diagnostic.observations.paths[0].error, "ENOENT");
+  const build = report.commands.find(command => command.name === 'build');
+  const diagnostic = report.commands.find(command => command.name === 'diagnostic');
+  const expected = [...build.args];
+  expected[expected.indexOf('--result-file') + 1] = join(options.evidence, 'diagnostic.json');
+  assert.deepEqual(diagnostic.args, expected);
+  assert.equal(readFileSync(join(report.project, "package.json"), "utf8"), JSON.stringify({mode:"build-failure"}));
+}));
+
+for (const mode of ['diagnostic-large', 'diagnostic-unavailable']) {
+  test(`${mode} preserves primary failure with bounded diagnostic error`, () => temporary(async path => {
+    const options = await fixture(path, mode);
+    await assert.rejects(runManagedNewsSite(options), /build.*37/);
+    const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
+    assert.equal(report.status, 'failed');
+    assert.equal(report.diagnostic.observations, undefined);
+    assert.match(report.diagnostic.error, mode === 'diagnostic-large' ? /bound/ : /ENOENT/);
+  }));
+}
+
+test('generated diagnostic observes execution errors without retaining child output', () => temporary(async path => {
+  const options = await fixture(path, 'diagnostic-real');
+  await assert.rejects(runManagedNewsSite(options), /build.*37/);
+  const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
+  assert.equal(report.diagnostic.error, undefined);
+  const observations = report.diagnostic.observations;
+  assert.equal(observations.runtime, process.execPath);
+  assert.equal(observations.attempts.length, 2);
+  assert.equal(observations.attempts[0].error, 'ENOENT');
+  assert.equal(observations.attempts[1].status, 0);
+  assert.ok(observations.paths.some(entry => entry.path.endsWith('/next/cli.js')));
+  assert.equal(observations.attempts[1].stdout, undefined);
 }));
