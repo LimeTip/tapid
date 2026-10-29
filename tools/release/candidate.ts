@@ -5,7 +5,7 @@ import { copyFile, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { TARGETS, checksumLines, releaseRecord, releaseVersion } from './release.ts';
+import { archiveNames, checksumLines, releaseRecord, releaseVersion } from './release.ts';
 import { renderInstallers, templatesForCommit, type InstallerTemplates } from './bootstrap.ts';
 
 export type Asset = { id: number; name: string; size: number };
@@ -71,7 +71,7 @@ export function validateReleaseIntent(input: unknown): ReleaseIntent {
 }
 export function expectedAssets(tag: string): string[] {
   source(tag,'0'.repeat(40));
-  return [...TARGETS.map(t=>`tapid-${tag.slice(1)}-${t}.tar.gz`),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1'].sort();
+  return [...archiveNames(tag.slice(1)),'SHA256SUMS','tapid-release-v1.tsv','tapid-release-v1.tsv.sig','install.sh','install.ps1'].sort();
 }
 export async function selectCandidate(api: ReleaseAdapter, tag: string, commit: string) {
   source(tag,commit); repository(api.repository);
@@ -102,7 +102,8 @@ export function validateCandidate(value: unknown): Candidate {
   if(typeof value.tag_object!=='string' || !/^[a-f0-9]{40}$/.test(value.tag_object) || value.title!==value.tag) throw Error('invalid candidate tag object or title');
   numeric(value.release_id as number);
   for(const name of ['notes_sha256','plan_sha256']) if(typeof value[name]!=='string' || !/^[a-f0-9]{64}$/.test(value[name] as string)) throw Error('invalid candidate digest');
-  if(!Array.isArray(value.assets) || value.assets.length!==11) throw Error('invalid candidate asset set');
+  const names=expectedAssets(value.tag);
+  if(!Array.isArray(value.assets) || value.assets.length!==names.length) throw Error(`invalid candidate asset set: expected ${names.length} assets (${names.join(', ')}); found ${Array.isArray(value.assets) ? value.assets.length : 'non-array'}`);
   const ids=new Set<number>();
   for(const asset of value.assets) {
     keys(asset,['id','name','size','sha256']); numeric(asset.id as number);
@@ -110,7 +111,7 @@ export function validateCandidate(value: unknown): Candidate {
     if(typeof asset.name!=='string' || typeof asset.sha256!=='string' || !/^[a-f0-9]{64}$/.test(asset.sha256)) throw Error('invalid asset digest');
     if(!Number.isSafeInteger(asset.size) || (asset.size as number)<=0 || (asset.size as number)>limit(asset.name)) throw Error('invalid asset size');
   }
-  if(JSON.stringify(value.assets.map(a=>a.name))!==JSON.stringify(expectedAssets(value.tag))) throw Error('invalid candidate asset names or order');
+  if(JSON.stringify(value.assets.map(a=>a.name))!==JSON.stringify(names)) throw Error(`invalid candidate asset names or order: expected ${names.join(', ')}; found ${value.assets.map(a=>a.name).join(', ')}`);
   return value as Candidate;
 }
 function limit(name: string): number { return name.endsWith('.tar.gz') ? 512*1024*1024 : 256*1024; }
@@ -148,7 +149,7 @@ export function validateUnsignedCandidate(value: unknown): UnsignedCandidate {
   const synthetic=value.assets.map((asset,index)=>{
     keys(asset,['name','size','sha256']); return {...asset,id:index+1};
   });
-  synthetic.push({name:'tapid-release-v1.tsv.sig',size:1,sha256:'0'.repeat(64),id:11});
+  synthetic.push({name:'tapid-release-v1.tsv.sig',size:1,sha256:'0'.repeat(64),id:synthetic.length+1});
   synthetic.sort((a,b)=>String(a.name)<String(b.name)?-1:1);
   validateCandidate({...value,schema:'tapid-release-candidate-v1',release_id:1,assets:synthetic});
   return value as UnsignedCandidate;
@@ -157,7 +158,7 @@ export async function attestUnsignedCandidate(directory:string,notes:string,plan
   source(tag,commit);repository(repo);
   const names=expectedAssets(tag).filter(name=>!name.endsWith('.sig'));
   const local=(await readdir(directory)).filter(name=>name!=='tapid-release-v1.tsv.sig').sort();
-  if(JSON.stringify(local)!==JSON.stringify(names)) throw Error('unsigned candidate must contain exactly ten files');
+  if(JSON.stringify(local)!==JSON.stringify(names)) throw Error(`unsigned candidate asset mismatch: expected ${names.join(', ')}; found ${local.join(', ')}`);
   const assets=[];
   for(const name of names) assets.push({name,...await fileDigest(join(directory,name),limit(name))});
   const base=`https://github.com/${repo}/releases/download/${tag}`;
@@ -215,7 +216,7 @@ export async function createDraftCandidate(api:ReleaseAdapter,directory:string,n
     if(!names.includes(asset.name) || seen.has(asset.name)) throw Error('unexpected existing release assets');seen.add(asset.name);numeric(asset.id);
     if(ids.has(asset.id)||!Number.isSafeInteger(asset.size)||asset.size<=0||asset.size>limit(asset.name))throw Error('invalid existing release asset');ids.add(asset.id);
   }
-  if(!state.draft && (state.immutable!==true || state.assets.length!==11)) throw Error('existing public release must be complete and immutable');
+  if(!state.draft && (state.immutable!==true || state.assets.length!==names.length)) throw Error('existing public release must be complete and immutable');
   const downloaded=await mkdtemp(join(tmpdir(),'tapid-draft-readback-'));
   try {
     // Check every existing asset before the first upload. Never overwrite bytes.
@@ -246,7 +247,7 @@ export async function attestCandidate(api: ReleaseAdapter,directory: string,note
   const body=await smallFile(notes);
   if(state.id!==releaseId || state.tag_name!==tag || state.name!==tag || state.prerelease || state.body!==body || typeof state.draft!=='boolean') throw Error('reviewed release identity or notes mismatch');
   const names=expectedAssets(tag);
-  if(JSON.stringify([...state.assets].map(a=>a.name).sort())!==JSON.stringify(names)) throw Error('expected exactly eleven release assets');
+  if(JSON.stringify([...state.assets].map(a=>a.name).sort())!==JSON.stringify(names)) throw Error(`release asset mismatch: expected ${names.join(', ')}; found ${state.assets.map(a=>a.name).sort().join(', ')}`);
   const local=(await readdir(directory)).sort();
   if(JSON.stringify(local)!==JSON.stringify(names)) throw Error('unexpected files in candidate asset directory');
   const ids=new Set<number>();const assets: Candidate['assets']=[];
@@ -296,31 +297,35 @@ export async function publishCandidate(api: ReleaseAdapter,input: Candidate,note
 
 
 if(process.argv[1] && pathToFileURL(resolve(process.argv[1])).href===import.meta.url) {
-  const {githubAdapter}=await import('./candidate_github.ts');
-  const api=githubAdapter(process.env.GITHUB_REPOSITORY ?? 'LimeTip/tapid');
-  const [command,...args]=process.argv.slice(2);
-  let result: unknown;
-  if(command==='select' && args.length===2) result=await selectCandidate(api,args[0],args[1]);
-  else if(command==='intent' && args.length===1) result=validateReleaseIntent(JSON.parse(await smallFile(args[0])));
-  else if(command==='download' && args.length===4) {
-    await downloadCandidate(api,Number(args[0]),args[1],args[2],args[3]);result={release_id:Number(args[0]),downloaded:true};
-  } else if(command==='unsigned' && args.length===6) {
-    source(args[3],args[4]);
-    const candidate=await attestUnsignedCandidate(args[0],args[1],args[2],api.repository,args[3],args[4],args[5],await templatesForCommit(args[4]));
-    result={candidate,candidate_sha256:candidateFingerprint(candidate)};
-  } else if(command==='validate-unsigned' && args.length===4) {
-    const candidate=validateUnsignedCandidate(unwrapCandidate(JSON.parse(await smallFile(args[3]))));
-    result={candidate_sha256:await validateUnsignedFiles(args[0],args[1],args[2],candidate,await templatesForCommit(candidate.commit))};
-  } else if(command==='create-draft' && args.length===4) {
-    const candidate=validateUnsignedCandidate(unwrapCandidate(JSON.parse(await smallFile(args[3]))));
-    result=await createDraftCandidate(api,args[0],args[1],args[2],candidate,await templatesForCommit(candidate.commit));
-  } else if(command==='attest' && args.length===6) {
-    source(args[3],args[4]);
-    const candidate=await attestCandidate(api,args[0],args[1],args[2],args[3],args[4],Number(args[5]),await templatesForCommit(args[4]));
-    result={candidate,candidate_sha256:candidateFingerprint(candidate)};
-  } else if(command==='publish' && args.length===3) {
-    const candidate=validateCandidate(unwrapCandidate(JSON.parse(await smallFile(args[0]))));
-    result=await publishCandidate(api,candidate,args[1],args[2],await templatesForCommit(candidate.commit));
-  } else throw Error('usage: candidate.ts select TAG SHA | intent FILE | download RELEASE_ID DIR TAG SHA | unsigned DIR NOTES PLAN TAG SHA TAG_OBJECT | validate-unsigned DIR NOTES PLAN CANDIDATE | create-draft DIR NOTES PLAN UNSIGNED_CANDIDATE | attest DIR NOTES PLAN TAG SHA RELEASE_ID | publish CANDIDATE NOTES PLAN');
-  process.stdout.write(JSON.stringify(result)+'\n');
+  if(process.argv[2]==='expected-assets' && process.argv.length===4) {
+    console.log(expectedAssets(process.argv[3]).join('\n'));
+  } else {
+    const {githubAdapter}=await import('./candidate_github.ts');
+    const api=githubAdapter(process.env.GITHUB_REPOSITORY ?? 'LimeTip/tapid');
+    const [command,...args]=process.argv.slice(2);
+    let result: unknown;
+    if(command==='select' && args.length===2) result=await selectCandidate(api,args[0],args[1]);
+    else if(command==='intent' && args.length===1) result=validateReleaseIntent(JSON.parse(await smallFile(args[0])));
+    else if(command==='download' && args.length===4) {
+      await downloadCandidate(api,Number(args[0]),args[1],args[2],args[3]);result={release_id:Number(args[0]),downloaded:true};
+    } else if(command==='unsigned' && args.length===6) {
+      source(args[3],args[4]);
+      const candidate=await attestUnsignedCandidate(args[0],args[1],args[2],api.repository,args[3],args[4],args[5],await templatesForCommit(args[4]));
+      result={candidate,candidate_sha256:candidateFingerprint(candidate)};
+    } else if(command==='validate-unsigned' && args.length===4) {
+      const candidate=validateUnsignedCandidate(unwrapCandidate(JSON.parse(await smallFile(args[3]))));
+      result={candidate_sha256:await validateUnsignedFiles(args[0],args[1],args[2],candidate,await templatesForCommit(candidate.commit))};
+    } else if(command==='create-draft' && args.length===4) {
+      const candidate=validateUnsignedCandidate(unwrapCandidate(JSON.parse(await smallFile(args[3]))));
+      result=await createDraftCandidate(api,args[0],args[1],args[2],candidate,await templatesForCommit(candidate.commit));
+    } else if(command==='attest' && args.length===6) {
+      source(args[3],args[4]);
+      const candidate=await attestCandidate(api,args[0],args[1],args[2],args[3],args[4],Number(args[5]),await templatesForCommit(args[4]));
+      result={candidate,candidate_sha256:candidateFingerprint(candidate)};
+    } else if(command==='publish' && args.length===3) {
+      const candidate=validateCandidate(unwrapCandidate(JSON.parse(await smallFile(args[0]))));
+      result=await publishCandidate(api,candidate,args[1],args[2],await templatesForCommit(candidate.commit));
+    } else throw Error('usage: candidate.ts expected-assets TAG | select TAG SHA | intent FILE | download RELEASE_ID DIR TAG SHA | unsigned DIR NOTES PLAN TAG SHA TAG_OBJECT | validate-unsigned DIR NOTES PLAN CANDIDATE | create-draft DIR NOTES PLAN UNSIGNED_CANDIDATE | attest DIR NOTES PLAN TAG SHA RELEASE_ID | publish CANDIDATE NOTES PLAN');
+    process.stdout.write(JSON.stringify(result)+'\n');
+  }
 }
