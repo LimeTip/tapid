@@ -21,7 +21,7 @@ if (args[0] === 'install') {
  fs.mkdirSync(project + '/node_modules/.bin', {recursive:true});
  fs.mkdirSync(project + '/node_modules/next', {recursive:true});
  fs.writeFileSync(project + '/node_modules/next/cli.js', '#!/usr/bin/env node\\n', {mode:0o755});
- if (mode === 'outside-bin') {
+ if (mode.startsWith('outside-bin')) {
   fs.writeFileSync(project + '/../outside-tool', 'synthetic outside data');
   fs.symlinkSync('../../../outside-tool', project + '/node_modules/.bin/next');
  } else fs.symlinkSync('../next/cli.js', project + '/node_modules/.bin/next');
@@ -81,7 +81,7 @@ test("fixture build failure propagates without running later scripts", () => tem
   assert.equal(report.status, 'failed');
   assert.equal(report.local_tool.link, '../next/cli.js');
   assert.equal(report.local_tool.target, realpathSync(join(report.project, 'node_modules/next/cli.js')));
-  assert.equal(report.local_tool.mode & 0o111, 0o111);
+  assert.equal(report.local_tool.mode & 0o100, 0o100);
   assert.equal(report.local_tool.interpreter, '/usr/bin/env node');
   assert.equal(report.local_tool.scope, 'host-before-containment');
 }));
@@ -95,6 +95,20 @@ test("tool diagnostics do not read a target outside the project or mask build fa
   assert.equal(report.local_tool.mode, undefined);
   assert.match(report.error, /build.*37/);
   assert.equal(JSON.stringify(report).includes('synthetic outside data'), false);
+}));
+
+test("incomplete tool inspection rejects acceptance after successful scripts and cleanup", () => temporary(async path => {
+  const options = await fixture(path, "outside-bin-success");
+  await assert.rejects(runManagedNewsSite(options), /installed tool inspection incomplete.*target escapes project/);
+  const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
+  assert.equal(report.status, 'failed');
+  assert.match(report.local_tool.error, /target escapes project/);
+  assert.match(report.error, /installed tool inspection incomplete/);
+  assert.equal(report.commands.length, 4);
+  assert.equal(report.cleanup_attempted, true);
+  assert.equal(report.start.receipt.termination, 'Cancelled');
+  assert.equal(report.start.receipt.completion.cleanup_confidence, 'KernelOwnedComplete');
+  assert.equal(readFileSync(join(report.project, 'shutdown-attempted'), 'utf8'), 'yes');
 }));
 
 test("readiness timeout still cancels and checks cleanup", () => temporary(async path => {

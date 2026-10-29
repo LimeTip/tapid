@@ -162,7 +162,9 @@ binary fingerprints, logs and checked result files. It also retains host-side
 metadata for the installed `next` shim: link, canonical
 project-contained target, executable mode, recognized Node shebang and applicable
 host mount options. Inspection executes no application fallback and rejects
-resolved out-of-project targets. These observations precede containment and do not
+resolved out-of-project targets. Incomplete inspection fails acceptance after
+script execution and checked cleanup, preserving any earlier command failure
+as the primary error. These observations precede containment and do not
 establish the private mount namespace's permissions. The CLI invocation probe
 installs an offline package through the verified install path and invokes its
 Node-backed bin by command name before the existing outside-secret controls.

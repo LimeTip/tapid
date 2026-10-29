@@ -1060,3 +1060,7 @@ if (process.argv[2] === 'descendant') {
         result["receipt"]
     );
 }
+
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "run_result_interruptions.rs"]
+mod result_interruptions;

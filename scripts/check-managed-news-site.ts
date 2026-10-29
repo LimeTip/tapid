@@ -208,6 +208,7 @@ export async function runManagedNewsSite(options: Options) {
       stillServing = true;
     } catch { /* Refusal after checked authoritative cleanup is expected. */ }
     assert.equal(stillServing, false, "acceptance server survived cancellation");
+    assert.equal(tool.error, undefined, `installed tool inspection incomplete: ${tool.error}`);
     summary.status = "passed";
     return summary;
   } catch (error) {
