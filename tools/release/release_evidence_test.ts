@@ -45,7 +45,7 @@ const requiredEvidence = [
 const workedV008Record = `
 Product version: v0.0.8
 Preparation PR URL: https://github.com/LimeTip/tapid/pull/120
-Preparation PR final head: 35073b495b322a4619806793a204325f2867253a
+Preparation PR final head: 1231d6f3040ca7fa0a3de9f00808f18f737397c4
 Merge SHA: 35073b495b322a4619806793a204325f2867253a
 Post-merge checks on merge SHA: all required checks passed
 Product-vs-supporting-crate version distinction confirmed: product v0.0.8; supporting crates retain truthful versions
@@ -125,6 +125,7 @@ test("release evidence template covers the complete operator ledger", async () =
 test("release evidence template is grounded in the v0.0.8 operations record", async () => {
   const record = await readFile(operationsRecordPath, "utf8");
   for (const immutableEvidence of [
+    "Preparation PR final head: `1231d6f3040ca7fa0a3de9f00808f18f737397c4`",
     "GitHub release ID: `383262465`",
     "Annotated tag object: `8ba56bbb4757edf43ab6d758499ad4cbdc778d0b`",
     "Tagged commit: `35073b495b322a4619806793a204325f2867253a`",
