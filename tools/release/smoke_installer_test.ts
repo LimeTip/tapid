@@ -1,4 +1,4 @@
-import { strictEqual } from 'node:assert/strict';
+import { rejects, strictEqual } from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,34 @@ import { promisify } from 'node:util';
 import { test } from 'node:test';
 
 const run = promisify(execFile);
+test('native latest consumers survive supplemental failures and retain only attempted evidence', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
+  for (const job of ['unix', 'windows']) {
+    const body = workflow.split(`\n  ${job}:`)[1].split(/\n  [a-z][a-z-]*:/)[0];
+    const consumer = body.split('name: Run latest discovery consumer contract')[1].split('\n      - name:')[0];
+    const upload = body.split('name: Retain latest consumer evidence')[1].split('\n      - name:')[0];
+    const condition = (step: string) => step.match(/\n        if: (.+)/)![1].replace(/^\$\{\{\s*|\s*\}\}$/g, '');
+    // Model Actions' implicit success() guard when no status function is present.
+    const scheduled = (expression: string, priorSuccess: boolean, cancelled: boolean, install: string, outcome: string) => {
+      const hasStatus = /\b(success|failure|always|cancelled)\(/.test(expression);
+      const evaluate = new Function('cancelled', 'always', 'steps', `return (${expression});`);
+      return (hasStatus || priorSuccess) && evaluate(() => cancelled, () => true, {
+        install_latest: { outcome: install }, latest_consumer: { outcome },
+      });
+    };
+    for (const priorSuccess of [true, false]) {
+      for (const cancelled of [true, false]) {
+        for (const install of ['success', 'failure', 'skipped']) {
+          strictEqual(scheduled(condition(consumer), priorSuccess, cancelled, install, 'skipped'), !cancelled && install === 'success', `${job}: consumer scheduling`);
+        }
+        for (const outcome of ['success', 'failure', 'skipped']) {
+          strictEqual(scheduled(condition(upload), priorSuccess, cancelled, 'success', outcome), outcome !== 'skipped', `${job}: evidence retention`);
+        }
+      }
+    }
+    strictEqual(upload.includes('if-no-files-found: error'), true, `${job}: attempted evidence is required`);
+  }
+});
 test('previous-release installer selection preserves the legacy version boundary', async () => {
   const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
   const block = workflow.split(`if node - "$previous_tag" <<'JAVASCRIPT'\n`)[1].split('          JAVASCRIPT')[0];
@@ -49,3 +77,40 @@ for (const [selected, latest] of [['v0.0.10', 'v0.0.10'], ['v0.0.10', 'v0.0.11']
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 }
+
+test('native discovery binds latest source identity and isolates Windows before installation', async () => {
+  const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
+  strictEqual(workflow.includes('latest_sha: ${{ steps.release.outputs.latest_sha }}'), true);
+  const windows = workflow.split('\n  windows:')[1];
+  strictEqual(windows.indexOf('name: Isolate installer home') < windows.indexOf('name: Install the published release'), true);
+  for (const segment of workflow.split('name: Install latest release through discovery').slice(1)) {
+    const step = segment.split('\n      - name:')[0];
+    strictEqual(step.includes('RELEASE_SHA: ${{ needs.resolve.outputs.latest_sha }}'), true);
+    strictEqual(step.includes('--version "$RELEASE_TAG"'), false);
+    strictEqual(step.includes('-Version $env:RELEASE_TAG'), false);
+    if (step.includes('shell: bash')) {
+      strictEqual(step.includes('actual="$("$install_dir/tapid" --version)"'), true);
+      strictEqual(step.includes('test "$actual" = "tapid ${RELEASE_TAG#v}"'), true);
+    }
+  }
+  strictEqual((workflow.match(/name: Run latest discovery consumer contract/g) || []).length, 2);
+});
+
+test('Unix discovery rejects a failing version process even when its output matches', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tapid-smoke-version-'));
+  try {
+    const workflow = await readFile(new URL('../../.github/workflows/release-public-smoke.yml', import.meta.url), 'utf8');
+    const step = workflow.split('name: Install latest release through discovery')[1].split('\n      - name:')[0];
+    const script = step.split('        run: |\n')[1];
+    await writeFile(join(directory, 'public-install.sh'), `#!/bin/sh
+mkdir -p "$2"
+cat > "$2/tapid" <<'BINARY'
+#!/bin/sh
+printf 'tapid 1.2.3\\n'
+exit 37
+BINARY
+chmod +x "$2/tapid"
+`);
+    await rejects(run('bash', ['-c', script], { env: { HOME: directory, RUNNER_TEMP: directory, RELEASE_TAG: 'v1.2.3', PATH: process.env.PATH } }), { code: 37 });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

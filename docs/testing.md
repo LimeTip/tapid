@@ -20,7 +20,7 @@ directly, so a `noexec` temporary mount produces `PermissionDenied` even with th
 correct executable mode. For an isolated worker with a non-executable default
 temporary mount, configure `TMPDIR` before starting Node/Cargo to an absolute,
 private directory on the worker's executable workspace filesystem. For example,
-from the repository root:
+from the repository root, this runs a focused library check:
 
 ```sh
 mkdir -p target/test-tmp
@@ -28,11 +28,15 @@ chmod 700 target/test-tmp
 TMPDIR="$PWD/target/test-tmp" CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid --lib --locked
 ```
 
-This selects fixture storage through the existing runtime API; do not replace
+Confirm execution permissions inside the worker itself; a successful host run
+does not establish worker mount policy. This selects fixture storage through the
+existing runtime API, not test behavior or containment policy. Do not replace
 direct executable launches with shell invocations or skip execution assertions.
 If execution is still denied, inspect the worker mount/security policy before
-attributing the failure to executable permissions. This configuration does not
-supply native containment prerequisites or establish native platform support.
+attributing the failure to executable permissions; changing `TMPDIR` cannot
+override a sandbox execution denial. This configuration does not supply native
+containment prerequisites or establish native platform support. The full local
+lane under [Before handoff](#before-handoff) remains required when applicable.
 
 Keep validation inside the isolated worker, without host credentials or an
 unsandboxed host fallback. Check both mount options and worker execution policy

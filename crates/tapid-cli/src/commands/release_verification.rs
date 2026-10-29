@@ -45,3 +45,22 @@ pub(crate) fn prepare_install(args: InstallArgs) -> ExitCode {
         }
     }
 }
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct ArchiveArgs {
+    archive: PathBuf,
+    expected_name: String,
+}
+
+pub(crate) fn verify_archive(args: ArchiveArgs) -> ExitCode {
+    match crate::application::release_verification::verify_archive(
+        &args.archive,
+        &args.expected_name,
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("release archive verification failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}

@@ -175,6 +175,18 @@ commit-pinned, its permissions stay `contents: read`, and its JSON/script-digest
 artifacts have 30-day retention. Merging activates the
 schedule; this local change has not run hosted CI or changed repository settings.
 
+Public read-back also checks the exact current asset inventory and all six archive
+members through the Rust verifier, authenticates production signatures, regenerates
+metadata and installers, and compares owned discovery routes with captured latest.
+The discovery-installed binary receives its own quickstart/frozen replay on Unix
+and Windows. Latest source identity is propagated independently of selected source
+identity. Temporary Windows home/profile/application-data paths are established
+before installation. The final report fails for missing or unsuccessful platform
+evidence; scheduled Linux-only coverage is labeled separately. This describes the
+implemented workflow contract, not new hosted evidence for the historical runs
+above. See [public smoke reporting](release-distribution.md#7-verify-public-installation) for the
+read-back and artifact contract.
+
 The public lane tests real package installation before reusing the existing empty
 consumer fixture for root-script forwarding, exit 41 and lifecycle suppression.
 That supplemental fixture is not package-installation evidence. PowerShell

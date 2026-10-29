@@ -356,6 +356,40 @@ Each platform must:
 
 The scheduled daily run covers Linux; release and manual runs cover Linux, macOS, and Windows. Historical latest versions through 0.0.10 explicitly skip the new truthful-repeat assertion. The canonical documentation upgrade check remains separate. Matching source and destination releases demonstrate repeated installation, not a previous-version upgrade.
 
+Public smoke first runs a Linux public-inventory job, using the captured selected
+and latest tags and source commits. Public GitHub metadata and asset reads send
+no credentials. Both selected and latest releases must explicitly be public,
+stable, and immutable in GitHub metadata. The current protocol requires exactly `expectedAssets(tag)` from
+`tools/release/candidate.ts`, including all six archives. A source-built read-only
+verifier authenticates the production signature and checks each archive's original
+members without executing foreign binaries. The record and checksum generators
+bind the downloaded bytes, sizes, versions, and immutable URLs. Owned versioned
+and latest record/signature routes must match; immutable signatures do not expire.
+Historical installer verification remains separate and is explicitly reported.
+
+Generated installers must match templates at the corresponding source commit;
+website installers must match captured latest. Both native lanes execute default
+discovery without a version or record override, in temporary homes and install
+roots, and run the real npm quickstart and frozen replay against that executable.
+Selected and latest consumer evidence remains separate even when their tags match.
+A concurrent promotion that changes public latest after capture fails the run.
+
+The website source is maintained outside this repository. Inventory discovers
+release-documentation links under `/docs/releases/` from the public homepage and
+performs bounded reads of those same-origin routes. Missing navigation or an
+unreachable route fails; HTTP success does not substitute for native installation.
+
+Rerun **Public installer smoke** using `release_tag` for an explicit stable tag,
+or leave it empty to capture GitHub latest stable. Reruns only read releases.
+The final **Public smoke report** job runs after failures and requires inventory
+and every required native result. `public-smoke-summary` contains JSON and Markdown
+with run identity, selected/latest commits, asset sizes/digests and public URLs,
+platform outcomes, failures and skips. Missing, malformed, or mismatched artifacts
+fail aggregation. Scheduled evidence is labeled **scheduled Linux only** and does
+not establish cross-platform acceptance. Diagnostic records and existing installer,
+consumer, and upgrade artifacts are retained on failures. These checks do not
+establish complete crates.io publication or fresh hosted evidence by themselves.
+
 Read the job steps and logs. Do not infer real installation from workflow success alone.
 
 The supplemental root-script fixture uses `tests/fixtures/validate_consumer_project.js`

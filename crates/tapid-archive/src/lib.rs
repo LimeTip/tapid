@@ -2,7 +2,9 @@
 
 #![deny(unsafe_code)]
 
+mod executable;
 mod tree_validation;
+pub use executable::validate_executable_archive;
 pub use tree_validation::validate_tree;
 
 use sha2::{Digest, Sha256};

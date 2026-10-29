@@ -86,6 +86,8 @@ pub(crate) enum Command {
     Sandbox(sandbox::Args),
     #[command(name = "__verify-release-record", hide = true)]
     VerifyReleaseRecord(release_verification::Args),
+    #[command(name = "__verify-release-archive", hide = true)]
+    VerifyReleaseArchive(release_verification::ArchiveArgs),
     #[command(name = "__prepare-release-install", hide = true)]
     PrepareReleaseInstall(release_verification::InstallArgs),
     /// Create a private package.json manifest.
@@ -202,6 +204,7 @@ impl Command {
             Self::Clean(_) => "clean",
             Self::License => "license",
             Self::Sandbox(_) => "sandbox",
+            Self::VerifyReleaseArchive(_) => "__verify-release-archive",
             Self::VerifyReleaseRecord(_) => "__verify-release-record",
             Self::PrepareReleaseInstall(_) => "__prepare-release-install",
             Self::Init(_) => "init",
@@ -264,6 +267,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
         Some(Command::Sandbox(args)) => sandbox::run(args),
+        Some(Command::VerifyReleaseArchive(args)) => release_verification::verify_archive(args),
         Some(Command::VerifyReleaseRecord(args)) => release_verification::run(args),
         Some(Command::PrepareReleaseInstall(args)) => release_verification::prepare_install(args),
         None => {

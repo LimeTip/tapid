@@ -22,6 +22,13 @@ Unix extraction normalizes regular files to `0644` or `0755`, preserves only the
 
 `validate_tree` applies portable archive bounds to generated filesystem outputs and rejects symlinks, special files, noncanonical paths, and reserved store metadata. Canonical tree hashing streams regular-file contents while preserving the established digest framing.
 
+`validate_executable_archive` inspects release tar.gz bytes without extraction or
+execution. It requires one original regular member named exactly `tapid` or
+`tapid.exe`, as chosen by the caller, within the existing archive limits. It
+rejects extension headers, extra members, unsafe names, empty executables, and
+members concealed after zero blocks or in concatenated gzip streams. This stricter
+release contract does not change generic package extraction or upgrade callers.
+
 `canonical_tree_digest_without_root_entry` hashes an explicitly filtered tree view. The caller must omit the same single root entry from its private copy. Dependency-tool preparation uses this for generated npm `.bin` shims; ordinary archive and store verification continue to use the complete canonical tree digest. Links elsewhere remain rejected.
 
 Git commit tar archives may contain one global PAX header with a full hexadecimal
