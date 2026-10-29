@@ -169,7 +169,11 @@ establish the private mount namespace's permissions. The CLI invocation probe
 installs an offline package through the verified install path and invokes its
 Node-backed bin by command name before the existing outside-secret controls.
 After a failed reference build, a separate diagnostic reuses the build script's
-ManagedTree policy, selected runtime and memory-statistics option. It records
+ManagedTree policy, selected runtime and memory-statistics option. The selected
+Node executes an inline program, without loading a generated project file or
+reading a project report file. A tagged JSON record is read from a descriptor-checked
+regular diagnostic log capped at 32 KiB; malformed, missing, duplicate or oversized
+records remain diagnostic errors. It records
 runtime/search paths, executable modes and accessibility, and loading results
 for `next --version` by command name and absolute shim path. Application output
 and unrelated environment values are not retained. Observations are limited to 16 KiB and

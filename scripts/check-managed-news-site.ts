@@ -100,7 +100,9 @@ for (const command of ['next', shim]) {
   const result = cp.spawnSync(command, ['--version'], { stdio: 'ignore', timeout: 10000 });
   report.attempts.push({ command, status: result.status, signal: result.signal, error: result.error ? code(result.error) : null });
 }
-fs.writeFileSync('.tmp/tool-diagnostic.json', JSON.stringify(report));
+const record = JSON.stringify(report);
+if (Buffer.byteLength(record) > 16384) throw new Error('diagnostic observations exceed bound');
+console.log('TAPID_TOOL_DIAGNOSTIC_V1 ' + record);
 `;
 
 export async function runManagedNewsSite(options: Options) {
@@ -204,21 +206,26 @@ export async function runManagedNewsSite(options: Options) {
       try {
         manifestBytes = readFileSync(manifestPath);
         const manifest = JSON.parse(manifestBytes.toString());
-        manifest.scripts = { ...manifest.scripts, build: 'node .tmp/tool-diagnostic.cjs' };
-        writeFileSync(join(project, '.tmp/tool-diagnostic.cjs'), toolDiagnostic);
+        // POSIX single quotes preserve every program byte, including shell metacharacters.
+        const quoted = "'" + toolDiagnostic.replaceAll("'", "'\"'\"'") + "'";
+        manifest.scripts = { ...manifest.scripts, build: `node -e ${quoted}` };
         writeFileSync(manifestPath, JSON.stringify(manifest));
         const args = [...runArgs('build'), '--allow-process-memory-stats'];
         args[args.indexOf('--result-file') + 1] = join(evidence, 'diagnostic.json');
         await command('diagnostic', args);
         summary.diagnostic.receipt = checkedResult(join(evidence, 'diagnostic.json'), 'Exited(0)');
-        const fd = openSync(join(project, '.tmp/tool-diagnostic.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const fd = openSync(join(evidence, 'diagnostic.log'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         try {
           const metadata = fstatSync(fd);
-          assert.ok(metadata.isFile() && metadata.size <= 16384, 'diagnostic observations exceed bound or are not regular');
-          const bytes = Buffer.alloc(16385);
+          assert.ok(metadata.isFile() && metadata.size <= 32768, 'diagnostic observations exceed bound or are not regular');
+          const bytes = Buffer.alloc(32769);
           const count = readSync(fd, bytes, 0, bytes.length, 0);
-          assert.ok(count <= 16384, 'diagnostic observations exceed bound');
-          summary.diagnostic.observations = JSON.parse(bytes.subarray(0, count).toString());
+          assert.ok(count <= 32768, 'diagnostic log exceeds bound');
+          const records = bytes.subarray(0, count).toString().split('\n').filter(line => line.startsWith('TAPID_TOOL_DIAGNOSTIC_V1 '));
+          assert.equal(records.length, 1, 'diagnostic record missing or duplicated');
+          const record = records[0].slice('TAPID_TOOL_DIAGNOSTIC_V1 '.length);
+          assert.ok(Buffer.byteLength(record) <= 16384, 'diagnostic observations exceed bound');
+          summary.diagnostic.observations = JSON.parse(record);
         } finally { closeSync(fd); }
       } catch (diagnosticError) {
         summary.diagnostic.error = String(diagnosticError);

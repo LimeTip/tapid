@@ -27,15 +27,20 @@ if (args[0] === 'install') {
  } else fs.symlinkSync('../next/cli.js', project + '/node_modules/.bin/next');
  process.exit(0);
 }
-const diagnostic = fs.existsSync(project + '/.tmp/tool-diagnostic.cjs');
-if (diagnostic) fs.writeFileSync(project + '/.tmp/tool-diagnostic.json', JSON.stringify({runtime:process.execPath, paths:[{error:'ENOENT'}], attempts:[{error:'EACCES'}]}));
-if (diagnostic && mode === 'diagnostic-large') fs.writeFileSync(project + '/.tmp/tool-diagnostic.json', 'x'.repeat(20000));
-if (diagnostic && mode === 'diagnostic-unavailable') fs.unlinkSync(project + '/.tmp/tool-diagnostic.json');
+const script = JSON.parse(fs.readFileSync(project + '/package.json')).scripts?.build || '';
+const diagnostic = script.startsWith('node -e ');
+if (fs.existsSync(project + '/.tmp/tool-diagnostic.cjs')) process.exit(46);
+if (diagnostic && mode !== 'diagnostic-real') {
+ const record = mode === 'diagnostic-large' ? 'x'.repeat(20000) : mode === 'diagnostic-malformed' ? '{' : JSON.stringify({runtime:process.execPath, paths:[{error:'ENOENT'}], attempts:[{error:'EACCES'}]});
+ console.log('unrelated output {not observations}');
+ if (mode === 'diagnostic-duplicate') console.log('TAPID_TOOL_DIAGNOSTIC_V1 {}');
+ if (mode !== 'diagnostic-unavailable') console.log('TAPID_TOOL_DIAGNOSTIC_V1 ' + record);
+}
 if (diagnostic && mode === 'diagnostic-real') {
- const result = require('node:child_process').spawnSync(process.execPath, [project + '/.tmp/tool-diagnostic.cjs'], {cwd:project, env:{PATH:require('node:path').dirname(process.execPath)}});
+ const result = require('node:child_process').spawnSync('/bin/sh', ['-c', script], {shell:false, cwd:project, env:{PATH:require('node:path').dirname(process.execPath)}, stdio:'inherit'});
  if (result.status !== 0) process.exit(45);
 }
-if (!diagnostic && ['build-failure', 'outside-bin', 'diagnostic-large', 'diagnostic-unavailable', 'diagnostic-real'].includes(mode) && args[1] === 'build') process.exit(37);
+if (!diagnostic && ['build-failure', 'outside-bin', 'diagnostic-large', 'diagnostic-unavailable', 'diagnostic-malformed', 'diagnostic-duplicate', 'diagnostic-real'].includes(mode) && args[1] === 'build') process.exit(37);
 const result = args[args.indexOf('--result-file') + 1];
 function receipt(termination) {
  fs.writeFileSync(result, JSON.stringify({outcome:'completed', receipt:{assurance:'ManagedTree', termination, requested:{filesystem_read:true}, enforced:{filesystem_read:true}, completion:{cleanup_confidence:mode === 'bad-cleanup' ? 'NoCleanupGuarantee' : 'KernelOwnedComplete'}}}));
@@ -177,22 +182,26 @@ test("failed build retains contained diagnostics without accepting diagnostic su
   assert.equal(readFileSync(join(report.project, "package.json"), "utf8"), JSON.stringify({mode:"build-failure"}));
 }));
 
-for (const mode of ['diagnostic-large', 'diagnostic-unavailable']) {
+for (const mode of ['diagnostic-large', 'diagnostic-unavailable', 'diagnostic-malformed', 'diagnostic-duplicate']) {
   test(`${mode} preserves primary failure with bounded diagnostic error`, () => temporary(async path => {
     const options = await fixture(path, mode);
     await assert.rejects(runManagedNewsSite(options), /build.*37/);
     const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
     assert.equal(report.status, 'failed');
     assert.equal(report.diagnostic.observations, undefined);
-    assert.match(report.diagnostic.error, mode === 'diagnostic-large' ? /bound/ : /ENOENT/);
+    assert.match(report.diagnostic.error, mode === 'diagnostic-large' ? /bound/ : mode === 'diagnostic-malformed' ? /JSON/ : /missing/);
   }));
 }
 
 test('generated diagnostic observes execution errors without retaining child output', () => temporary(async path => {
-  const options = await fixture(path, 'diagnostic-real');
+  const literalPath = join(path, "literal '$() ` ; space");
+  mkdirSync(literalPath);
+  const options = await fixture(literalPath, 'diagnostic-real');
   await assert.rejects(runManagedNewsSite(options), /build.*37/);
   const report = JSON.parse(readFileSync(join(options.evidence, 'summary.json'), 'utf8'));
   assert.equal(report.diagnostic.error, undefined);
+  assert.equal(existsSync(join(report.project, '.tmp/tool-diagnostic.cjs')), false);
+  assert.equal(existsSync(join(report.project, '.tmp/tool-diagnostic.json')), false);
   const observations = report.diagnostic.observations;
   assert.equal(observations.runtime, process.execPath);
   assert.equal(observations.attempts.length, 2);
