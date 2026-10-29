@@ -8,7 +8,7 @@ assignees: ""
 
 # Release evidence: vX.Y.Z
 
-Use this checklist with [the release runbook](../../docs/release-distribution.md). Record immutable IDs and exact command output; do not paste sensitive authentication material.
+Use this checklist with [the release runbook](../../docs/release-automation.md). Record immutable IDs and exact command output; do not paste sensitive authentication material.
 
 ## Scope and source
 
@@ -39,7 +39,12 @@ Use this checklist with [the release runbook](../../docs/release-distribution.md
 | <!-- exact asset name --> | <!-- numeric ID --> | <!-- numeric size --> | <!-- verified digest/result --> |
 
 - Release notes read-back: <!-- exact reviewed file/body comparison and URL -->
-- Independent GitHub publication approval: <!-- approver, timestamp, and approved release ID -->
+- Candidate authorization: <!-- one stable-release approval for the whole tested candidate -->
+- Authorization actor: <!-- independent reviewer login and authoritative timestamp if available -->
+- Authoritative review/deployment reference: <!-- GitHub review history and protected job/deployment URLs -->
+- Coordinator run ID/attempt: <!-- numeric run ID, attempt, and URL -->
+- Unsigned candidate fingerprint: <!-- SHA-256 binding source, tag object, notes, plan, and ten unsigned assets -->
+- Consolidated ledger: <!-- artifact URL for tapid-release-evidence-v1 -->
 - Public release read-back: <!-- public ID, tag, draft/prerelease state, and asset set -->
 
 ## Public smoke evidence
@@ -54,7 +59,6 @@ Use this checklist with [the release runbook](../../docs/release-distribution.md
 
 - crates.io dry-run plan: <!-- command/output and dependency-ordered package/version set -->
 - Trusted Publisher verification: <!-- workflow, repository, environment, and successful verification -->
-- Independent crates.io approval: <!-- approver, timestamp, and protected-environment approval state -->
 - crates.io workflow run: <!-- numeric run ID, URL, and tagged commit -->
 - Published package/version set: <!-- exact package@version entries and registry read-back -->
 - Clean locked cargo-install command/output: <!-- isolated Cargo home/target, command, version output, and help result -->
@@ -68,4 +72,4 @@ Use this checklist with [the release runbook](../../docs/release-distribution.md
 ## Verification sign-off
 
 - [ ] All fields above are complete, independently read back, and tied to the stated product version.
-- [ ] GitHub publication and crates.io publication were approved independently.
+- [ ] One independent candidate authorization governed signing, GitHub promotion, and crates.io publication; all downstream checks passed.
