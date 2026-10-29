@@ -492,8 +492,9 @@ pub(crate) fn imported_workspace_manifests(
                         continue;
                     }
                     return Err(format!(
-                        "/packages/{}: node_modules: remove the unmanaged member or ancestor node_modules tree before importing or replaying workspace selections",
-                        source.path().replace('/', "~1")
+                        "/packages/{}: unsupported member or ancestor node_modules at {}; preserve this tree at an unused backup location outside active dependency lookup paths before importing or replaying workspace selections; retain package-lock.json and see docs/npm-lockfile-import.md",
+                        source.path().replace('/', "~1"),
+                        ancestor.join("node_modules").display()
                     ).into());
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

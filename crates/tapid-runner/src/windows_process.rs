@@ -1,5 +1,6 @@
 #![cfg(windows)]
 use super::*;
+use crate::execution::platform_backend::trace_windows_stage;
 use crate::execution::windows_cancellation::WindowsCancellation;
 
 struct ProcThreadAttributeList {
@@ -275,8 +276,11 @@ impl WindowsOutputCapture {
     }
 
     pub fn finish(self) -> Result<(Vec<u8>, Vec<u8>), ExecutionError> {
+        trace_windows_stage("capture: join stdout");
         let stdout = join_capture_reader(self.stdout)?;
+        trace_windows_stage("capture: join stderr");
         let stderr = join_capture_reader(self.stderr)?;
+        trace_windows_stage("capture: complete");
         Ok((stdout, stderr))
     }
 }
@@ -620,6 +624,7 @@ impl WindowsSuspendedChild {
         let started = Instant::now();
         loop {
             if cancellation.is_some_and(WindowsCancellation::is_cancelled) {
+                trace_windows_stage("wait: cancellation observed");
                 self.terminate_job_and_reap(job)?;
                 return Ok(WindowsChildTermination::Cancelled);
             }
@@ -644,6 +649,7 @@ impl WindowsSuspendedChild {
                     }
                     loop {
                         if cancellation.is_some_and(WindowsCancellation::is_cancelled) {
+                            trace_windows_stage("wait: cancellation observed after root exit");
                             self.terminate_job_and_reap(job)?;
                             return Ok(WindowsChildTermination::Cancelled);
                         }
@@ -678,7 +684,9 @@ impl WindowsSuspendedChild {
     }
 
     fn terminate_job_and_reap(&mut self, job: &WindowsJob) -> Result<(), ExecutionError> {
+        trace_windows_stage("terminate: Job termination start");
         let termination = job.terminate_all();
+        trace_windows_stage("terminate: Job termination returned");
         if termination.is_err() {
             // SAFETY: fallback root termination keeps the owned process from escaping if Job Object
             // termination fails; the failure is still surfaced after the root process is reaped.
@@ -687,8 +695,10 @@ impl WindowsSuspendedChild {
         // SAFETY: wait for the root process to signal, then poll the kernel-maintained active
         // process count. Job object handles are not signaled merely because members exit.
         let root_reaped = unsafe { WaitForSingleObject(self.process, 5_000) } == WAIT_OBJECT_0;
+        trace_windows_stage("terminate: root wait returned");
         self.exited = root_reaped;
         let tree_reaped = job.wait_until_empty(5_000).is_ok();
+        trace_windows_stage("terminate: Job empty wait returned");
         if !root_reaped || !tree_reaped {
             return Err(unsupported_job(
                 "reap child process tree after Job Object termination",
