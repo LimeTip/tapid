@@ -8564,12 +8564,16 @@ fn copied_git_archives_use_the_same_safe_extraction_and_bin_lane() {
 
 #[test]
 fn copied_file_tarballs_reject_hostile_entries_without_replacing_the_project() {
-    for (path, kind) in [("../escape", b'0'), ("package/link", b'2')] {
+    for (path, kind, size) in [
+        ("../escape", b'0', 0),
+        ("package/link", b'2', 0),
+        ("package/large", b'0', 536_870_913),
+    ] {
         let project = tapid_test_support::TempProject::new("file-hostile").unwrap();
         let mut header = [0u8; 512];
         header[..path.len()].copy_from_slice(path.as_bytes());
         header[100..108].copy_from_slice(b"0000644\0");
-        header[124..136].copy_from_slice(b"00000000000\0");
+        header[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
         header[148..156].fill(b' ');
         header[156] = kind;
         header[157..169].copy_from_slice(b"../../escape");
@@ -8580,6 +8584,14 @@ fn copied_file_tarballs_reject_hostile_entries_without_replacing_the_project() {
         let bytes = [header.as_slice(), &[0u8; 1024]].concat();
         project.write("vendor/hostile.tar", &bytes).unwrap();
         project.write("package.json", br#"{"name":"demo","version":"1.0.0","dependencies":{"local":"file:vendor/hostile.tar"}}"#).unwrap();
+        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        let previous_lock = prior_empty_lock();
+        project
+            .write("tapid.lock", previous_lock.as_bytes())
+            .unwrap();
+        project
+            .write(".tapid-managed", b"tapid-managed-v1\n")
+            .unwrap();
         project
             .write("node_modules/keep", b"previous install")
             .unwrap();
@@ -8590,11 +8602,33 @@ fn copied_file_tarballs_reject_hostile_entries_without_replacing_the_project() {
         );
         assert!(!install.status.success());
         assert!(String::from_utf8_lossy(&install.stderr).contains("ARCHIVE_INVALID"));
+        if size > 0 {
+            assert!(
+                String::from_utf8_lossy(&install.stderr).contains("too large (536870913 bytes)")
+            );
+        }
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            previous_lock.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join(".tapid-managed")).unwrap(),
+            b"tapid-managed-v1\n"
+        );
         assert_eq!(
             fs::read(project.path().join("node_modules/keep")).unwrap(),
             b"previous install"
         );
-        assert!(!project.path().join("tapid.lock").exists());
+        for namespace in ["trees", ".staging"] {
+            let directory = store.join(namespace);
+            if directory.exists() {
+                assert_eq!(fs::read_dir(directory).unwrap().count(), 0);
+            }
+        }
         assert!(!project.path().join("escape").exists());
     }
 }

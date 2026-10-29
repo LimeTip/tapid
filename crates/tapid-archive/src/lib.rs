@@ -114,6 +114,13 @@ fn validate_initial_metadata(
         ArchiveFormat::Tar => Box::new(Cursor::new(bytes)),
         ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes))),
     };
+    validate_initial_metadata_reader(reader, limits)
+}
+
+fn validate_initial_metadata_reader(
+    reader: impl Read,
+    limits: ValidationLimits,
+) -> Result<(), ExtractError> {
     let mut archive = tar::Archive::new(reader.take(PARSER_METADATA_LIMIT));
     for item in archive.entries()?.raw(true) {
         // Defer malformed/truncated metadata and an exhausted preflight budget
@@ -158,6 +165,13 @@ fn validate_archive(
         ArchiveFormat::Tar => Box::new(Cursor::new(bytes)),
         ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes))),
     };
+    validate_archive_reader(reader, limits)
+}
+
+fn validate_archive_reader(
+    reader: impl Read,
+    limits: ValidationLimits,
+) -> Result<(), ExtractError> {
     let remaining = Cell::new(PARSER_METADATA_LIMIT);
     let mut archive = tar::Archive::new(ParserBudgetReader {
         reader,
@@ -856,6 +870,9 @@ fn symlink_target_escapes(link: &str, target: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod resource_tests;
 
 #[cfg(test)]
 mod tests {
