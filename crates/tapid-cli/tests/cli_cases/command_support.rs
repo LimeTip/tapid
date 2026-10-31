@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::{ffi::OsStr, path::Path, process::Command};
 use tapid_test_support::{TempHome, TempProject};
 
 /// Keep the project and its command environment alive for the whole scenario.
@@ -17,6 +17,15 @@ impl CliFixture {
 
     pub fn command(&self, args: &[&str]) -> Command {
         command_in_home(self.project.path(), self.home.path(), args, true)
+    }
+}
+
+pub(super) fn coverage_profile_path(profile: &OsStr, parent: &Path) -> std::path::PathBuf {
+    let profile = Path::new(profile);
+    if profile.is_absolute() {
+        profile.to_owned()
+    } else {
+        parent.join(profile)
     }
 }
 
@@ -39,5 +48,12 @@ pub(super) fn command_in_home(
         .env("USERPROFILE", home)
         .env("XDG_CACHE_HOME", home)
         .env("LOCALAPPDATA", home);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        let parent = std::env::current_dir().expect("test process current directory");
+        command.env(
+            "LLVM_PROFILE_FILE",
+            coverage_profile_path(&profile, &parent),
+        );
+    }
     command
 }

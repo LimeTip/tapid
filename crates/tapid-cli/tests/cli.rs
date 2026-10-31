@@ -33,6 +33,85 @@ mod tool_tests;
 mod workspace_acceptance;
 
 #[test]
+fn relative_coverage_profile_is_anchored_to_the_parent_directory() {
+    let parent = std::env::current_dir().unwrap();
+    let relative = OsStr::new("coverage-%p.profraw");
+    assert_eq!(
+        command_support::coverage_profile_path(relative, &parent),
+        parent.join(relative)
+    );
+}
+
+#[test]
+fn completions_generate_static_bash_script_without_project_mutation() {
+    let project = tapid_test_support::TempProject::new("completions").unwrap();
+    project.write("package.json", b"not json").unwrap();
+    let before = fs::read_dir(project.path()).unwrap().count();
+    let output = isolated_command(project.path(), &["completions", "bash"], true)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let script = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        script.contains("_tapid"),
+        "missing bash completion function"
+    );
+    assert!(
+        script.contains("install"),
+        "missing maintained nested commands"
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), before);
+}
+
+#[test]
+fn completions_support_only_documented_shells_and_reject_unknown_values() {
+    let project = tapid_test_support::TempProject::new("completion-shells").unwrap();
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        let output = isolated_command(project.path(), &["completions", shell], true)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{shell}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("install"),
+            "{shell}"
+        );
+    }
+    let invalid = isolated_command(project.path(), &["completions", "nushell"], true)
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid value"));
+}
+
+#[test]
+fn completions_reject_json_mode_with_the_standard_protocol_error() {
+    let project = tapid_test_support::TempProject::new("completion-json").unwrap();
+    let output = isolated_command(project.path(), &["--json", "completions", "bash"], true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
+}
+
+#[test]
+fn completions_report_stdout_write_failures() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["completions", "bash"])
+        .stdout(std::process::Stdio::from(writer))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot write shell completions"));
+}
+
+#[test]
 fn run_help_lists_portable_invocation_permission_flags() {
     let project = tapid_test_support::TempProject::new("run-permission-help").unwrap();
     let output = isolated_command(project.path(), &["run", "--help"], true)

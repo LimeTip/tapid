@@ -108,6 +108,8 @@ Dependency hooks remain denied without exact checked-in approval. Online install
 
 ## Standalone CLI tools
 
+See the [shell completions guide](../../docs/shell-completions.md) to generate static completions for Bash, Elvish, Fish, PowerShell, or Zsh. Generation writes to stdout and never edits shell profiles.
+
 Install a tool without creating a project:
 
 ```text

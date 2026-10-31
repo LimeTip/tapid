@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 tapid-lockfile = { version = "0.0.13", path = "../tapid-lockfile" }
 tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
