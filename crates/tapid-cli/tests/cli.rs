@@ -106,6 +106,20 @@ fn completions_reject_json_mode_with_the_standard_protocol_error() {
 }
 
 #[test]
+fn completions_report_stdout_write_failures() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tapid"))
+        .args(["completions", "bash"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot write shell completions"));
+}
+
+#[test]
 fn run_help_lists_portable_invocation_permission_flags() {
     let project = tapid_test_support::TempProject::new("run-permission-help").unwrap();
     let output = isolated_command(project.path(), &["run", "--help"], true)
