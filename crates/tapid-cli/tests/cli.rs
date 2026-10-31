@@ -68,10 +68,7 @@ fn completions_generate_static_bash_script_without_project_mutation() {
 fn completions_support_only_documented_shells_and_reject_unknown_values() {
     let project = tapid_test_support::TempProject::new("completion-shells").unwrap();
     for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-            .args(["completions", shell])
-            .current_dir(project.path())
-            .env_clear()
+        let output = isolated_command(project.path(), &["completions", shell], true)
             .output()
             .unwrap();
         assert!(output.status.success(), "{shell}: {output:?}");
@@ -80,10 +77,7 @@ fn completions_support_only_documented_shells_and_reject_unknown_values() {
             "{shell}"
         );
     }
-    let invalid = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .args(["completions", "nushell"])
-        .current_dir(project.path())
-        .env_clear()
+    let invalid = isolated_command(project.path(), &["completions", "nushell"], true)
         .output()
         .unwrap();
     assert!(!invalid.status.success());
@@ -93,10 +87,7 @@ fn completions_support_only_documented_shells_and_reject_unknown_values() {
 #[test]
 fn completions_reject_json_mode_with_the_standard_protocol_error() {
     let project = tapid_test_support::TempProject::new("completion-json").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
-        .args(["--json", "completions", "bash"])
-        .current_dir(project.path())
-        .env_clear()
+    let output = isolated_command(project.path(), &["--json", "completions", "bash"], true)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -107,13 +98,14 @@ fn completions_reject_json_mode_with_the_standard_protocol_error() {
 
 #[test]
 fn completions_report_stdout_write_failures() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tapid"))
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let child = Command::new(env!("CARGO_BIN_EXE_tapid"))
         .args(["completions", "bash"])
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(writer))
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    drop(child.stdout.take());
     let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot write shell completions"));
