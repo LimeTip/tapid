@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 
 mod error;
+mod inspection;
 mod model;
 mod npm_import;
 mod profile;
@@ -13,6 +14,11 @@ mod validation;
 mod tests;
 
 pub use error::LockfileError;
+pub use inspection::{
+    GraphAvailability, GraphComparison, GraphCoverage, GraphEvidenceChange, GraphInspection,
+    GraphInstance, GraphRelationship, GraphRelationshipChange, GraphScope, GraphSnapshot,
+    SnapshotError,
+};
 pub use model::{
     DerivedHookOutput, LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile,
     LockfilePackageKey, LockfilePackageSource, RegistryIntegrityProvenance,
