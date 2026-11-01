@@ -34,6 +34,12 @@ If execution is still denied, inspect the worker mount/security policy before
 attributing the failure to executable permissions. This configuration does not
 supply native containment prerequisites or establish native platform support.
 
+Keep validation inside the isolated worker, without host credentials or an
+unsandboxed host fallback. Check both mount options and worker execution policy
+when generated fixtures cannot launch; a passing host run cannot prove the
+worker configuration. Linux results do not establish native macOS or Windows
+containment behavior.
+
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,

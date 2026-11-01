@@ -7308,6 +7308,8 @@ fn install_refuses_to_replace_unmarked_node_modules() {
     .unwrap();
     fs::create_dir(dir.join("node_modules")).unwrap();
     fs::write(dir.join("node_modules").join("KEEP"), "user data").unwrap();
+    fs::write(dir.join("package-lock.json"), b"saved npm lock").unwrap();
+    let saved_lock = fs::read(dir.join("tapid.lock")).unwrap();
     let output = run(&dir, &["install", "--offline"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -7316,6 +7318,15 @@ fn install_refuses_to_replace_unmarked_node_modules() {
         fs::read_to_string(dir.join("node_modules").join("KEEP")).unwrap(),
         "user data"
     );
+    assert!(stderr.contains("unused backup location"), "{stderr}");
+    assert!(!stderr.contains("create .tapid-managed"), "{stderr}");
+    assert_eq!(fs::read(dir.join("package.json")).unwrap(), raw.as_bytes());
+    assert_eq!(fs::read(dir.join("tapid.lock")).unwrap(), saved_lock);
+    assert_eq!(
+        fs::read(dir.join("package-lock.json")).unwrap(),
+        b"saved npm lock"
+    );
+    assert!(!dir.join(".tapid-managed").exists());
     cleanup(dir);
 }
 
