@@ -252,11 +252,25 @@ mutation, missing/replaced execution bindings, source-link retargeting, ordering
 backend identity changes and tool-count bounds. Unix handles do not exclude host
 writes; this preserves the existing Linux trusted-host assumptions.
 
-This is declared-tool coupling, not qualification of the Windows inventory.
+Prepared identity version 2 also includes an ordered runtime-candidate inventory
+and loader-configuration domain. Each candidate retains its canonical resolution
+and bytes or an explicit absence state. Inspection is bounded to 64 paths,
+4096 bytes per path/configuration and 16 MiB aggregate contents. Special files,
+unresolved links and inspection errors reject preparation. Absence inspection
+requires an existing directory parent. Recipe identity use and
+prelaunch validation reinspect candidates and reject changed bytes, resolution or
+absence. Linux preparation selects its existing `/etc/ld.so.cache` input; other
+system-directory assumptions remain unchanged. Portable controls exercise earlier
+candidate introduction, secondary-file mutation, ordering, configuration changes,
+request revalidation, clone retention and rejected inventories. Native filesystem
+races after inspection remain outside this observation contract; execution does
+not consume the retained byte copies as a private loader tree.
+
+This is input observation and coupling, not qualification of the Windows inventory.
 Windows preparation still rejects before inspecting declared tools or looking up
-authenticated output. Ordered runtime locations, candidate absence states,
-loader configuration, registry/broker enforcement and a complete retained dynamic
-input set remain unimplemented. The existing native Windows lane must evaluate
+authenticated output. Windows runtime-location selection and loader configuration,
+registry/broker enforcement and a complete enforced dynamic input set remain
+unimplemented. The existing native Windows lane must evaluate
 the authority fixtures before a supported configuration can be selected. No
 Windows authentication or separate project-script acceptance claim is added.
 

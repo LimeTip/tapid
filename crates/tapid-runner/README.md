@@ -9,12 +9,23 @@ bytes, missing tools, and execution snapshots with different names or digests.
 Clones retain file handles, including Windows write/delete exclusion pins.
 Unix held handles do not prevent host writes or pathname races.
 
+Preparation also retains bounded runtime-candidate observations: ordered paths,
+present file bytes or absence, canonical resolution, and loader configuration.
+The Linux backend currently selects `/etc/ld.so.cache`; identity use and request
+validation reject changes to that cache after preparation. Candidate inspection
+rejects special files, unresolved links, inspection errors and more than 64
+candidates or 16 MiB of aggregate contents. Absent leaves require an inspectable
+directory parent. Clones share retained bytes. These observations
+neither grant filesystem access nor direct loader resolution to the retained
+copies, and do not prevent concurrent host changes after validation.
+
 The system identity retains the existing Linux contract and is reused within one
 installation. This interface does not establish a complete Windows runtime input
 set: Windows preparation rejects before tool inspection or derived-output lookup.
 Registry, ARAP, broker, profile and dynamic-loader authority remain unresolved;
 explicit unsafe overrides still produce no authenticated outputs. The new
-identity domain intentionally invalidates recipes made with the older CLI hash.
+identity domain intentionally invalidates recipes made with earlier prepared
+identities and the older CLI hash.
 
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/tapid-runner)](https://crates.io/crates/tapid-runner)
