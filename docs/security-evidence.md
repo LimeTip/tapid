@@ -259,3 +259,62 @@ reusing `tapid-signatures` contextual signing and caller-owned keyrings. Existin
 version-only scope and the service/replay model, so it is not relabeled as a security
 result. `tapid-policy` continues to own policy decisions. No new policy or CLI provider
 rules are added. Future CLI and Web adapters compose these capabilities.
+
+## Security report contract v2
+
+[ADR 0012](adr/0012-classified-evidence-contract.md) extends the closed v1
+contract using `tapid-security-v2`. V1 types, verifier and frozen fixtures remain
+supported with their original meanings. V2 uses `SecurityRequest::validate_v2`,
+`SecurityResultV2` and `verify_security_evidence_v2`. The envelope subject, result
+version and request version must all select v2. Do not downgrade v2 requests to v1
+or interpret v1 summaries or report IDs as classification or fix metadata.
+
+V2 retains the exact subject, audience, check, scope, times, source revision and
+sequence fields. Registry-version lookup uses `check.kind = "advisory"` and
+`scope = "package_version"`; its coverage identifiers are `advisory` and
+`reported_malware`. Each may be requested independently. A graph audit needs both
+before claiming complete registry-version report coverage. A public registry
+origin does not establish that its package identity may be disclosed publicly.
+This wire contract grants no permission to submit private inventories or paths.
+
+Each v2 finding requires:
+
+- `id`: stable issuer-owned report identity.
+- `revision`: nonempty opaque immutable report revision. This is distinct from the
+  per-exact-request monotonic envelope sequence and is never ordered lexically.
+- `classification`: `advisory` or `reported_malware`, never inferred from text.
+- `state`: `active` or `withdrawn`.
+- `summary`, optional `severity` (null/omitted means unknown), and `fixes`.
+  Each fix contains an exact canonical package `version` at the subject's existing
+  origin and actual name. An empty list means no fix information is supplied,
+  rather than proving there is no fix. Fixes are information, not a resolution or
+  compatibility guarantee. Each report has at most 128 fixes.
+
+Report IDs are unique within a response. An active registry-version report must
+belong to both requested and completed classification coverage. Artifact checks
+retain a real existing digest, `artifact_bytes` scope and scanner-defined coverage;
+registry-version reports never imply archive inspection. All v1 bounds, strict
+parsing, contextual signatures, trust expiry, freshness and replay checks apply.
+
+Withdrawn reports are retained only in `invalid_evidence` results, with explicit
+limitations, empty completed coverage and no active reports. Their new report
+revision and higher envelope sequence preserve history without treating withdrawal
+as a no-known-findings result. Callers must durably advance the sequence/digest floor
+before using any result, including withdrawals. A prior active envelope is then
+rejected as replay. The pure verifier does not persist that floor itself and cannot
+know about a withdrawal it has not received. Equal-sequence equivocation is rejected.
+
+The generic result storage shares metadata validation between v1 and v2; the
+version-specific finding schemas remain closed. A verified v2 result still needs
+status and policy evaluation. This slice adds no live service, cache, account
+requirement or audit CLI. Production issuer provisioning, hosted compatibility,
+privacy/cache policy and transport remain prerequisites for later activation.
+
+The checked-in [v2 fixture](../crates/tapid-attestations/tests/fixtures/advisory-v2.json)
+and independent v2 consumer agree on report identity/revision, classification and
+fix metadata; the frozen v1 schema rejects it. These fixtures do not prove deployed
+Web compatibility. Run:
+
+```text
+node --experimental-strip-types scripts/dev.ts test -p tapid-attestations --test security_evidence_v2 --locked
+```

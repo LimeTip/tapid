@@ -10,3 +10,19 @@
 Explainable policy planning primitives. Evidence is typed as `declared`, `inferred`, `observed`, `enforced`, or explicitly ambiguous; policy decisions are `allow`, `warn`, `prompt`, or `deny` with stable reason codes and deterministic JSON serialization.
 
 This crate makes no execution or containment claim. Unattended operation fails closed when evidence would require an interactive decision.
+
+Audit policy uses `evaluate_audit` on verified v2 reports. The default
+`AuditThreshold::Any` fails for every active advisory or reported-malware finding.
+Explicit advisory floors are low, moderate, high and critical (inclusive).
+Unrecognized or missing severity always meets the threshold, as does active
+reported malware. Withdrawn reports do not trigger a finding decision.
+
+`AuditOutcome::Incomplete` takes precedence over findings when collection is
+incomplete. The caller must establish current verified evidence and complete
+coverage; an empty iterator alone cannot establish a clean audit. Policy does not
+perform signature verification, retrieval, authorization or persistence, and does
+not discard reports below threshold from the caller's output.
+
+`AuditOutcome::exit_code()` maps below-threshold, findings and incomplete results
+to 0, 1 and 3 respectively. Invalid invocation/configuration uses CLI exit 2
+before policy evaluation.

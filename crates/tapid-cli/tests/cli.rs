@@ -27,6 +27,9 @@ mod run_permission_tests;
 #[path = "cli_cases/status.rs"]
 mod status_tests;
 
+#[path = "cli_cases/audit.rs"]
+mod audit_tests;
+
 #[path = "cli_cases/tools.rs"]
 mod tool_tests;
 

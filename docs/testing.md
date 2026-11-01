@@ -58,6 +58,19 @@ The wrapper selects `<git-common-dir>/target/dev` using Git's canonical common d
 
 An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
 
+Cargo defaults to one compilation job through `.cargo/config.toml`, so isolated
+validation commands also use bounded compilation concurrency without an extra
+environment setup step. Larger machines can override this with `CARGO_BUILD_JOBS`
+or `--jobs`. For memory-constrained isolated workers, keep `CARGO_BUILD_JOBS=1` in the worker
+environment for the entire validation command. Multiple concurrent compiler
+processes can increase peak memory use. If a compiler exits with
+`SIGKILL` without a Rust diagnostic, inspect worker memory limits and competing
+builds before treating it as a source failure; the signal alone does not establish
+the cause. Retry the unchanged validation lane with one build job, preserving all
+features, targets and checks. This limits compilation concurrency, not test
+coverage or libtest concurrency. If a single compiler still exceeds the worker's
+limit, provision more worker memory. An interrupted build is not passing evidence.
+
 Windows native no-network execution tests require the administrator-installed guard. Install it once with `tapid sandbox install` from an administrator terminal, then run tests as the ordinary user; missing setup fails closed. Explicit network grants use the standard-user broker independently. The Windows CI test job installs the guard before native tests and uninstalls it afterward. Its separate `guard_owned_namespace_removal` control runs with `--ignored` under administrator rights against unique metadata-only WFP GUIDs, testing rollback and idempotent removal without creating filters or touching the production namespace.
 
 ## Focused development lane

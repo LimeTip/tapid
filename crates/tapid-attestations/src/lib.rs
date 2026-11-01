@@ -194,5 +194,6 @@ mod tests {
 
 mod security;
 pub use security::{
-    EvidenceFreshness, SecurityTrust, VerifiedSecurityEvidence, verify_security_evidence,
+    EvidenceFreshness, SecurityTrust, VerifiedSecurityEvidence, VerifiedSecurityEvidenceV2,
+    verify_security_evidence, verify_security_evidence_v2,
 };

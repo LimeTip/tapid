@@ -69,7 +69,8 @@ mod tests {
 mod security;
 pub use security::{
     AccountAuthorization, EvidenceAudience, EvidencePublicationRequest, MAX_SECURITY_BYTES,
-    SECURITY_CONTRACT_V1, SecurityCheck, SecurityErrorResponse, SecurityFinding,
-    SecurityPermission, SecurityPlatform, SecurityReason, SecurityRequest, SecurityResult,
-    SecurityScope, SecurityServiceError, SecurityStatus, SecuritySubject,
+    ReportClassification, ReportState, SECURITY_CONTRACT_V1, SECURITY_CONTRACT_V2, SecurityCheck,
+    SecurityErrorResponse, SecurityFinding, SecurityFindingV2, SecurityFix, SecurityPermission,
+    SecurityPlatform, SecurityReason, SecurityRequest, SecurityResult, SecurityResultClaims,
+    SecurityResultV2, SecurityScope, SecurityServiceError, SecurityStatus, SecuritySubject,
 };

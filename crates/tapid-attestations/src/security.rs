@@ -1,7 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use tapid_protocol::{
-    MAX_SECURITY_BYTES, SECURITY_CONTRACT_V1, SecurityCheck, SecurityReason, SecurityRequest,
-    SecurityResult,
+    MAX_SECURITY_BYTES, SECURITY_CONTRACT_V1, SECURITY_CONTRACT_V2, SecurityCheck, SecurityFinding,
+    SecurityFindingV2, SecurityReason, SecurityRequest, SecurityResult, SecurityResultClaims,
+    SecurityResultV2,
 };
 use tapid_signatures::{KeyRing, TrustEnvelope};
 
@@ -26,13 +27,13 @@ pub struct EvidenceFreshness<'a> {
 /// Only this returned type represents accepted issuer evidence. Authenticity does
 /// not establish scanner accuracy or safety. Revalidate cached bytes on every use.
 #[derive(Debug)]
-pub struct VerifiedSecurityEvidence {
-    result: SecurityResult,
+pub struct VerifiedSecurityEvidence<F = SecurityFinding> {
+    result: SecurityResultClaims<F>,
     envelope_digest: String,
 }
 
-impl VerifiedSecurityEvidence {
-    pub fn result(&self) -> &SecurityResult {
+impl<F> VerifiedSecurityEvidence<F> {
+    pub fn result(&self) -> &SecurityResultClaims<F> {
         &self.result
     }
     pub fn envelope_digest(&self) -> &str {
@@ -44,11 +45,11 @@ impl VerifiedSecurityEvidence {
 // generic TrustEnvelope intentionally remains a separate compatibility contract.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SecurityEnvelope {
+struct SecurityEnvelope<F> {
     version: String,
     subject: String,
     artifact_digest: String,
-    claims: SecurityResult,
+    claims: SecurityResultClaims<F>,
     signature: SecuritySignature,
 }
 
@@ -71,18 +72,57 @@ pub fn verify_security_evidence(
     trust: &SecurityTrust<'_>,
     freshness: &EvidenceFreshness<'_>,
 ) -> Result<VerifiedSecurityEvidence, SecurityReason> {
+    verify_evidence(
+        bytes,
+        request,
+        trust,
+        freshness,
+        SECURITY_CONTRACT_V1,
+        SecurityResult::validate,
+    )
+}
+
+pub type VerifiedSecurityEvidenceV2 = VerifiedSecurityEvidence<SecurityFindingV2>;
+
+/// Verifies the separately negotiated v2 schema without downgrading report metadata.
+pub fn verify_security_evidence_v2(
+    bytes: &[u8],
+    request: &SecurityRequest,
+    trust: &SecurityTrust<'_>,
+    freshness: &EvidenceFreshness<'_>,
+) -> Result<VerifiedSecurityEvidenceV2, SecurityReason> {
+    verify_evidence(
+        bytes,
+        request,
+        trust,
+        freshness,
+        SECURITY_CONTRACT_V2,
+        SecurityResultV2::validate,
+    )
+}
+
+fn verify_evidence<F: DeserializeOwned>(
+    bytes: &[u8],
+    request: &SecurityRequest,
+    trust: &SecurityTrust<'_>,
+    freshness: &EvidenceFreshness<'_>,
+    contract: &str,
+    validate: fn(&SecurityResultClaims<F>) -> Result<(), SecurityReason>,
+) -> Result<VerifiedSecurityEvidence<F>, SecurityReason> {
     if bytes.len() > MAX_SECURITY_BYTES {
         return Err(SecurityReason::InputTooLarge);
     }
-    request.validate()?;
-    let parsed: SecurityEnvelope =
+    if contract == SECURITY_CONTRACT_V1 {
+        request.validate()?;
+    } else {
+        request.validate_v2()?;
+    }
+    let parsed: SecurityEnvelope<F> =
         serde_json::from_slice(bytes).map_err(|_| SecurityReason::Malformed)?;
-    if parsed.version != tapid_signatures::ENVELOPE_VERSION
-        || parsed.subject != SECURITY_CONTRACT_V1
-    {
+    if parsed.version != tapid_signatures::ENVELOPE_VERSION || parsed.subject != contract {
         return Err(SecurityReason::InvalidEnvelope);
     }
-    parsed.claims.validate()?;
+    validate(&parsed.claims)?;
     let signature = tapid_signatures::DetachedSignature {
         algorithm: parsed.signature.algorithm,
         key_id: parsed.signature.key_id,

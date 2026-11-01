@@ -17,6 +17,7 @@ members = [
     "crates/tapid-protocol",
     "crates/tapid-signatures",
     "crates/tapid-attestations",
+    "crates/tapid-security-provider",
     "crates/tapid-transparency",
     "crates/tapid-release-client",
 ]

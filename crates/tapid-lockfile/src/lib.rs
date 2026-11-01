@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 
 mod error;
+mod graph;
 mod inspection;
 mod model;
 mod npm_import;
@@ -12,6 +13,10 @@ mod validation;
 mod tests;
 
 pub use error::LockfileError;
+pub use graph::{
+    LockedGraph, LockedGraphEdge, LockedGraphPath, LockedGraphPaths, LockedGraphRoot,
+    LockedGraphStep, ReachableLockedGraph,
+};
 pub use inspection::{
     GraphAvailability, GraphComparison, GraphCoverage, GraphEvidenceChange, GraphInspection,
     GraphInstance, GraphRelationship, GraphRelationshipChange, GraphScope, GraphSnapshot,

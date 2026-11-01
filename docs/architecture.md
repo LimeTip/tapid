@@ -31,6 +31,7 @@ crates/
 ├── tapid-protocol
 ├── tapid-signatures
 ├── tapid-attestations
+├── tapid-security-provider
 ├── tapid-transparency
 └── tapid-test-support
 ```
@@ -86,10 +87,19 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-store`: local verified content-addressed storage, offline reuse, quarantine, leases, and conservative garbage collection. It is not the online Tapid Registry.
 - `tapid-linker`: deterministic project materialization, `node_modules` layout, links, junctions, shims, and activation.
 - `tapid-policy`: evidence evaluation, approval decisions, stable reason codes, and lifecycle policy. It is pure where possible.
+  Audit thresholds consume the classified v2 report DTOs from `tapid-protocol`;
+  evidence verification and collection completeness remain caller prerequisites.
 - `tapid-runner`: controlled process and executable invocation, environment handling, output and time limits, and script execution policy enforcement.
 - `tapid-publish`: package packing, publication preparation, staging, and promotion workflows.
 - `tapid-signatures`: signing and signature verification primitives.
 - `tapid-attestations`: artifact-bound provenance, audit claims and authenticated package-security evidence verification.
+- `tapid-security-provider`: explicitly authorized raw-stream retrieval through
+  the shared v2 verifier, with Unix and Windows owner-only durable replay floors stored
+  separately from evictable evidence. An explicit HTTPS query adapter enforces
+  exact inventory consent, configured credential selection, no redirects and
+  request/collection deadlines. CLI activation, production trust provisioning
+  and cache lifecycle remain separate; this foundation does not establish complete
+  audit coverage.
 - `tapid-transparency`: append-only transparency records and verification foundations.
 - `tapid-test-support`: fixtures, fake registries, adversarial inputs, and shared test utilities. Production crates must not depend on it.
 

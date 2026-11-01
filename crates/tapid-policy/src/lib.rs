@@ -1,6 +1,9 @@
 use serde::Serialize;
 use std::fmt;
 
+mod audit;
+pub use audit::{AuditOutcome, AuditThreshold, evaluate_audit};
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
