@@ -139,6 +139,7 @@ The package-management toolchain also includes:
 
 - `init`, `install`/`i`, `add`, `remove`, and `update` for project manifests and dependencies.
 - `ci` to install the exact graph in `tapid.lock`, downloading missing verified packages without resolving versions again.
+- `info <PACKAGE>` to inspect bounded npm version/tag history and registry-declared peers, engines, deprecation and executable names before selecting a version. Supports read-only metadata snapshots, explicit Node comparison, and [JSON continuations](docs/json-results.md#registry-selection-with-info).
 - `outdated` to compare locked versions with registry metadata, `prune` to remove unreachable managed packages, and `why <PACKAGE>` to trace why a locked package is reachable (including `--json` output).
 - A content-addressed local store and lockfile replay for offline installs, with transactional activation of managed `node_modules`.
 - Safe archive extraction and integrity checks, plus generated package `bin` shims. Dependency lifecycle scripts are denied by default; [exact checked-in approvals](docs/dependency-lifecycle.md) can produce verified derived trees through Linux ManagedTree.

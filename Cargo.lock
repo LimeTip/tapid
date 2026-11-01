@@ -1605,6 +1605,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tapid-core",
  "tapid-test-support",
  "time",

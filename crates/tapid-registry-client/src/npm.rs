@@ -14,6 +14,8 @@ const NPM_FULL_METADATA_ACCEPT: &str = "application/json";
 
 mod inspection;
 pub use inspection::NpmPackageEvidence;
+mod inventory;
+pub use inventory::{NpmInventory, NpmPeerRequirement, NpmTagTarget, NpmVersionFacts};
 
 /// Read-only npm metadata and artifact client over an injected transport.
 pub struct NpmRegistry<T> {

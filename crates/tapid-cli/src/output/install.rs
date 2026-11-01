@@ -164,6 +164,10 @@ impl Reporter {
             | ErrorKind::RegistryCredentialMissing
             | ErrorKind::RegistryMetadata
             | ErrorKind::RegistryMetadataUnavailable
+            | ErrorKind::RegistrySelection
+            | ErrorKind::RegistryContinuation
+            | ErrorKind::RegistryContinuationStale
+            | ErrorKind::RegistryResultLimit
             | ErrorKind::RegistryTransport => "registry access",
             ErrorKind::Resolution | ErrorKind::PeerDependency => "dependency resolution",
             ErrorKind::Integrity | ErrorKind::Archive => "artifact verification",

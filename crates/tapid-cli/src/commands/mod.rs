@@ -4,6 +4,7 @@ use std::process::ExitCode;
 mod cache;
 mod ci;
 mod explain;
+mod info;
 pub(crate) mod init;
 pub(crate) mod install;
 mod license;
@@ -76,6 +77,12 @@ pub(crate) enum Command {
         after_help = "Examples:\n  tapid explain react@19.0.0\n  tapid explain @example/pkg@1.2.3 --artifact-file package.tgz\n  tapid --json explain react@19.0.0"
     )]
     Explain(explain::Args),
+    /// Inspect npm registry versions and declarations without installing.
+    #[command(
+        long_about = "Inspect npm registry versions, tags, peer and runtime requirements, deprecation and executable names. Bare names select the literal latest tag; exact versions and tags never fall back. Ranges use Tapid's semver rules. Reads tapid.toml routing only, without manifests, lockfiles, recovery, installs, hooks or writes. Registry declarations are unverified and do not establish project compatibility or safety. Each live page downloads full metadata (at most 32 MiB). Snapshots disable network and credential lookup; --offline requires a snapshot. JSR, aliases, Git, file and workspace sources are unsupported.",
+        after_help = "Examples:\n  tapid info react --json\n  tapid info 'react@^19' --node-version 22.0.0 --json\n  tapid info @example/pkg --registry-metadata metadata.json --offline --json"
+    )]
+    Info(info::Args),
     /// Inspect or safely clear the published package cache.
     Cache(cache::Args),
     /// Preview package-cache removal. Pass --yes to delete published cache entries.
@@ -198,6 +205,7 @@ impl Command {
             Self::Tool(_) => "tool",
             Self::ToolExec(_) => "__tool-exec",
             Self::Explain(_) => "explain",
+            Self::Info(_) => "info",
             Self::Cache(_) => "cache",
             Self::Clean(_) => "clean",
             Self::License => "license",
@@ -238,6 +246,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Clean(_)
                     | Command::Install(_)
                     | Command::Explain(_)
+                    | Command::Info(_)
                     | Command::Add(_)
                     | Command::Remove(_)
                     | Command::Update(_)
@@ -260,6 +269,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Tool(args)) => tool::run(args, json),
         Some(Command::ToolExec(args)) => tool::execute(args),
         Some(Command::Explain(args)) => explain::run(args, json),
+        Some(Command::Info(args)) => info::run(args, json),
         Some(Command::Cache(args)) => cache::run(args, json),
         Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
