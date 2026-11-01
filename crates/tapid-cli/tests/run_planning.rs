@@ -589,8 +589,12 @@ fn cli_receipt_reports_assurance_authority_and_completion_without_duplicate_outp
     .unwrap();
     let mut receipts = Vec::new();
     for machine in [false, true] {
+        let home = tapid_test_support::TempHome::new("run-planning-configuration").unwrap();
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tapid"));
         command
+            .env("HOME", home.path())
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .args(["run", "dev", "--project-dir"])
             .arg(&project)
             .arg("--node-runtime")
@@ -708,8 +712,12 @@ fn cli_launch_failure_is_nonzero_without_receipt_and_cleans_reserved_directory()
     let temporary = project.join("private-tmp");
     fs::create_dir(&temporary).unwrap();
     for machine in [false, true] {
+        let home = tapid_test_support::TempHome::new("run-planning-configuration").unwrap();
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tapid"));
         command
+            .env("HOME", home.path())
+            .env("APPDATA", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .args(["run", "dev", "--project-dir"])
             .arg(&project)
             .arg("--node-runtime")

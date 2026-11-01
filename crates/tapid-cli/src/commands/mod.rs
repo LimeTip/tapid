@@ -33,6 +33,9 @@ pub(crate) struct Cli {
     /// Emit a versioned JSON result for supported package commands.
     #[arg(long, global = true)]
     pub(crate) json: bool,
+    /// Registry/network configuration file, relative to the invocation directory.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub(crate) config: Option<std::path::PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
@@ -223,7 +226,11 @@ impl Command {
 }
 
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
-pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
+pub(crate) fn dispatch(
+    command: Option<Command>,
+    json: bool,
+    config: Option<&std::path::Path>,
+) -> ExitCode {
     if json
         && !matches!(
             command,
@@ -254,12 +261,48 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             1,
         );
     }
+    let selected = if matches!(
+        &command,
+        Some(
+            Command::Status(_)
+                | Command::Tool(_)
+                | Command::Explain(_)
+                | Command::ImportPackageLock(_)
+                | Command::Run(_)
+                | Command::Install(_)
+                | Command::Ci(_)
+                | Command::Add(_)
+                | Command::Remove(_)
+                | Command::Update(_)
+                | Command::Outdated(_)
+                | Command::Prune(_)
+                | Command::Why(_)
+        )
+    ) {
+        crate::registry::ConfigSelection::discover(config)
+    } else {
+        Ok(crate::registry::ConfigSelection::default())
+    };
+    let selection = match selected {
+        Ok(selection) => selection,
+        Err(error) => {
+            if json {
+                return crate::output::json::protocol_error(
+                    command.as_ref().map_or("none", Command::operation),
+                    "REGISTRY_CONFIGURATION_INVALID",
+                    1,
+                );
+            }
+            eprintln!("error: {error}");
+            return ExitCode::from(1);
+        }
+    };
     match command {
-        Some(Command::Status(args)) => status::run(args, json),
+        Some(Command::Status(args)) => status::run(args, json, &selection),
 
-        Some(Command::Tool(args)) => tool::run(args, json),
+        Some(Command::Tool(args)) => tool::run(args, json, &selection),
         Some(Command::ToolExec(args)) => tool::execute(args),
-        Some(Command::Explain(args)) => explain::run(args, json),
+        Some(Command::Explain(args)) => explain::run(args, json, &selection),
         Some(Command::Cache(args)) => cache::run(args, json),
         Some(Command::Clean(args)) => cache::clean(args, json),
         Some(Command::License) => license::run(),
@@ -271,19 +314,19 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(Command::Init(args)) => init::run(args, json),
-        Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
+        Some(Command::ImportPackageLock(args)) => npm_import::run(args, json, &selection),
         Some(Command::Manifest(args)) => manifest::run(args, json),
         Some(Command::Lock(args)) => lock::run(args, json),
-        Some(Command::Run(args)) => run::run(args),
+        Some(Command::Run(args)) => run::run(args, &selection),
 
-        Some(Command::Install(args)) => install::run(args, json),
-        Some(Command::Ci(args)) => ci::run(args, json),
-        Some(Command::Add(args)) => lifecycle::add(args, json),
-        Some(Command::Remove(args)) => lifecycle::remove(args, json),
-        Some(Command::Update(args)) => lifecycle::update(args, json),
-        Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
-        Some(Command::Prune(args)) => lifecycle::prune(args, json),
-        Some(Command::Why(args)) => why::run(args, json),
+        Some(Command::Install(args)) => install::run(args, json, &selection),
+        Some(Command::Ci(args)) => ci::run(args, json, &selection),
+        Some(Command::Add(args)) => lifecycle::add(args, json, &selection),
+        Some(Command::Remove(args)) => lifecycle::remove(args, json, &selection),
+        Some(Command::Update(args)) => lifecycle::update(args, json, &selection),
+        Some(Command::Outdated(args)) => lifecycle::outdated(args, json, &selection),
+        Some(Command::Prune(args)) => lifecycle::prune(args, json, &selection),
+        Some(Command::Why(args)) => why::run(args, json, &selection),
         Some(Command::Upgrade(args)) => upgrade::run(args),
     }
 }

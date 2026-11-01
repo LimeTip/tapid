@@ -72,6 +72,7 @@ pub(crate) enum Action<'a> {
     Remove(&'a str),
 }
 pub(crate) struct Options<'a> {
+    pub registry_config: &'a crate::registry::RegistryConfig,
     pub tools_dir: Option<&'a Path>,
     pub store_dir: Option<&'a Path>,
     pub registry_fixture: Option<&'a Path>,
@@ -136,7 +137,7 @@ fn stage(
         manifest.to_json().as_bytes(),
         false,
     )?;
-    let report = install::run(
+    let report = install::run_with_execution(
         install::InstallRequest {
             project_dir: &environment,
             target_manifest_path: Path::new("package.json"),
@@ -146,6 +147,8 @@ fn stage(
             registry_fixture: options.registry_fixture,
             allow_unverified_registry_artifacts: false,
         },
+        super::ExecutionOverrides::default(),
+        install::RegistryConfiguration::Snapshot(options.registry_config),
         progress,
     )
     .map_err(|failure| *failure.error)?;

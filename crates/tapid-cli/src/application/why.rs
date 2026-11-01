@@ -72,6 +72,7 @@ pub(crate) fn explain(
     project_dir: &Path,
     workspace: Option<&str>,
     package: &str,
+    configuration: &crate::registry::ConfigSelection,
 ) -> Result<WhyReport, OperationalError> {
     let requested = package
         .parse::<tapid_core::PackageName>()
@@ -101,8 +102,11 @@ pub(crate) fn explain(
     lock.validate_replay(&root_digest)
         .map_err(|error| OperationalError::from(error).at_manifest(&root_manifest_path))?;
 
+    let config = configuration
+        .load(Some(&selection.root_dir))
+        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let roots = if selection.manifest_path == root_manifest_path {
-        direct_roots(&lock, &selection.manifest, &selection.root_dir)?
+        direct_roots(&lock, &selection.manifest, &config)?
     } else {
         workspace_roots(
             &lock,
@@ -173,7 +177,7 @@ pub(crate) fn explain(
 fn direct_roots(
     lock: &Lockfile,
     manifest: &PackageManifest,
-    project_dir: &Path,
+    config: &crate::registry::RegistryConfig,
 ) -> Result<Vec<Root>, OperationalError> {
     let kinds = direct_dependency_kinds(manifest);
     let typed_keys = lock
@@ -188,13 +192,11 @@ fn direct_roots(
                 .map(|(key, _)| key),
         )
         .collect::<Vec<_>>();
-    let config = crate::registry::RegistryConfig::load(project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
     let roots = crate::application::replay::replay_root_keys_with_config(
         lock,
         manifest,
         &typed_keys,
-        &config,
+        config,
     )
     .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
     if !lock.root_bindings().is_empty() {

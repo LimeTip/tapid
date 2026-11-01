@@ -3,6 +3,9 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    /// Inspect user and explicit registry/network configuration without a project.
+    #[arg(long, conflicts_with_all = ["project_dir", "workspace"])]
+    pub(crate) standalone: bool,
     /// Workspace root containing package.json and tapid.lock.
     #[arg(long, value_name = "PATH", default_value = ".")]
     pub(crate) project_dir: PathBuf,
@@ -13,15 +16,31 @@ pub(crate) struct Args {
 
 /// Render the offline report as sanitized human text or a single JSON envelope.
 /// Return failure for blockers or truncation without installing or attempting recovery.
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
-    let report = crate::application::status::inspect(&args.project_dir, args.workspace.as_deref());
+pub(crate) fn run(
+    args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
+    let report = if args.standalone {
+        crate::application::status::inspect_standalone(configuration)
+    } else {
+        crate::application::status::inspect(
+            &args.project_dir,
+            args.workspace.as_deref(),
+            configuration,
+        )
+    };
     if json {
         return crate::output::json::status_result(&report);
     }
-    println!(
-        "Project: {}",
-        crate::output::json::text(report.project.display()).0
-    );
+    if args.standalone {
+        println!("Configuration scope: standalone");
+    } else {
+        println!(
+            "Project: {}",
+            crate::output::json::text(report.project.display()).0
+        );
+    }
     println!("Local assessment: {}", report.assessment);
     println!(
         "Workspace selection: {}",

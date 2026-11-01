@@ -239,6 +239,7 @@ pub(crate) struct InstallRequest<'a> {
     pub(crate) allow_unverified_registry_artifacts: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn run(
     request: InstallRequest<'_>,
     report_replay_progress: impl FnMut(Progress),
@@ -246,13 +247,20 @@ pub(crate) fn run(
     run_with_execution(
         request,
         super::dependency_scripts::ExecutionOverrides::default(),
+        RegistryConfiguration::Selected(&Default::default()),
         report_replay_progress,
     )
+}
+
+pub(crate) enum RegistryConfiguration<'a> {
+    Selected(&'a crate::registry::ConfigSelection),
+    Snapshot(&'a crate::registry::RegistryConfig),
 }
 
 pub(crate) fn run_with_execution(
     request: InstallRequest<'_>,
     overrides: super::dependency_scripts::ExecutionOverrides,
+    registry_config: RegistryConfiguration<'_>,
     report_replay_progress: impl FnMut(Progress),
 ) -> Result<InstallReport, OperationFailure> {
     let InstallRequest {
@@ -274,7 +282,13 @@ pub(crate) fn run_with_execution(
             .warnings
             .push(Warning::UnverifiedRegistryArtifactsAllowed);
     }
-    match perform_install(&mut session, request, overrides, report_replay_progress) {
+    match perform_install(
+        &mut session,
+        request,
+        overrides,
+        registry_config,
+        report_replay_progress,
+    ) {
         Ok((package_count, replayed)) => Ok(InstallReport {
             candidate_exclusions: session.candidate_exclusions,
             package_count,
@@ -290,6 +304,7 @@ fn perform_install(
     session: &mut InstallSession,
     request: InstallRequest<'_>,
     overrides: super::dependency_scripts::ExecutionOverrides,
+    registry_config: RegistryConfiguration<'_>,
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
     let InstallRequest {
@@ -368,10 +383,20 @@ fn perform_install(
             "target package.json must be contained beneath workspace root",
         ));
     }
+    let owned_config;
+    let registry_config = match registry_config {
+        RegistryConfiguration::Snapshot(config) => config,
+        RegistryConfiguration::Selected(selection) => {
+            owned_config = selection
+                .load(Some(&project_dir))
+                .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
+            &owned_config
+        }
+    };
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
-    online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
+    online::validate_manifest_roots(&project_dir, &preflight_manifest, registry_config)?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated.updated)?;
+        online::validate_manifest_roots(&project_dir, updated.updated, registry_config)?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
@@ -388,7 +413,7 @@ fn perform_install(
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate)?;
+        online::validate_manifest_roots(&project_dir, &candidate, registry_config)?;
     }
     let lock_path = project_dir.join("tapid.lock");
     // Preserve preflight rejection without activating anything. Pending recovery
@@ -535,12 +560,10 @@ fn perform_install(
         matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
     let replay_existing = if preserve && update.is_none() {
         if let Some(lock) = &previous_lock {
-            let registry_config = crate::registry::RegistryConfig::load(&project_dir)
-                .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
             super::replay::can_replay_online(
                 &project_dir,
                 lock,
-                &registry_config,
+                registry_config,
                 &lifecycle_policy,
             )? && replayable
                 && !overrides.enabled()
@@ -554,8 +577,6 @@ fn perform_install(
         session.outcome.lifecycle.as_mut().unwrap().reason = Some("imported_lock");
     }
     if imported.is_some() || !offline && !frozen && !replay_existing {
-        let registry_config = crate::registry::RegistryConfig::load(&project_dir)
-            .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {
             candidate_exclusions,
             mut lock,
@@ -573,7 +594,7 @@ fn perform_install(
                 &store,
                 offline,
                 registry_fixture,
-                &registry_config,
+                registry_config,
             )?
         } else {
             online::resolve_and_fetch_with_lock(
@@ -582,7 +603,7 @@ fn perform_install(
                 &store,
                 registry_fixture,
                 allow_unverified_registry_artifacts,
-                &registry_config,
+                registry_config,
                 if preserve {
                     previous_lock.as_ref()
                 } else {
@@ -766,9 +787,7 @@ fn perform_install(
                 .at_manifest(&project_dir.join("package.json"))
                 .context(format!("invalid lockfile {}", lock_path.display()))
         })?;
-    let registry_config = crate::registry::RegistryConfig::load(&project_dir)
-        .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-    let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+    let workspace = online::workspace_materialization(&project_dir, registry_config)?;
     if !online::workspace_matches_lock(&workspace, &lock) {
         return Err(
             "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
@@ -778,14 +797,14 @@ fn perform_install(
     let workspace_registry_dependencies = online::resolved_workspace_registry_dependencies(
         &root_manifest,
         &workspace,
-        &registry_config,
+        registry_config,
     )?;
     super::replay::validate_workspace_dependency_edges(
         &workspace,
         &workspace_registry_dependencies,
         &lock,
     )?;
-    crate::application::replay::validate_root_bindings(&lock, &root_manifest, &registry_config)?;
+    crate::application::replay::validate_root_bindings(&lock, &root_manifest, registry_config)?;
     session
         .outcome
         .lifecycle
@@ -822,7 +841,7 @@ fn perform_install(
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
     online::validate_locked_files(&project_dir, &lock)?;
-    if !online::validate_locked_routes(&lock, &registry_config)? {
+    if !online::validate_locked_routes(&lock, registry_config)? {
         return Err(OperationalError::new(
             ErrorKind::Lockfile,
             "locked packages target a different platform; regenerate tapid.lock with tapid update and review the resulting changes",
@@ -848,7 +867,7 @@ fn perform_install(
             &lock,
             &root_manifest,
             &store,
-            &registry_config,
+            registry_config,
             registry_fixture,
             &project_dir,
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
@@ -915,7 +934,7 @@ fn perform_install(
         && let Some(transaction) = online::hydrate_locked(
             &lock,
             &store,
-            &registry_config,
+            registry_config,
             registry_fixture,
             &project_dir,
         )?
@@ -936,7 +955,7 @@ fn perform_install(
         &lock,
         &root_manifest,
         &store,
-        &registry_config,
+        registry_config,
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;

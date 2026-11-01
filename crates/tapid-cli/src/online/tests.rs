@@ -419,6 +419,40 @@ url='https://packages.acme.example'
 }
 
 #[test]
+fn routing_rejects_missing_selected_ca_before_caching_transport() {
+    let project = tapid_test_support::TempProject::new("routing-missing-ca").unwrap();
+    project
+        .write("tapid.toml", b"[network]\nca-files = ['missing.pem']\n")
+        .unwrap();
+    let config = crate::registry::RegistryConfig::load(project.path()).unwrap();
+    for artifact in [false, true] {
+        let mut cache = BTreeMap::new();
+        let registry = NPM.parse().unwrap();
+        let name = "left-pad".parse().unwrap();
+        let result = if artifact {
+            artifact_transport_for_package(&mut cache, &config, &registry, &name, &[])
+        } else {
+            metadata_transport_for_package(&mut cache, &config, &registry, &name, &[])
+        };
+        assert!(
+            result.is_err(),
+            "selected CA must be validated before transport is cached"
+        );
+        assert!(cache.is_empty());
+    }
+    let ca = include_bytes!("../../../tapid-registry-client/tests/fixtures/local-test-ca.pem");
+    let root = project.write("missing.pem", ca).unwrap();
+    let config = crate::registry::RegistryConfig::load(project.path()).unwrap();
+    let registry = NPM.parse().unwrap();
+    let name = "left-pad".parse().unwrap();
+    let mut metadata = BTreeMap::new();
+    assert!(metadata_transport_for_package(&mut metadata, &config, &registry, &name, &[]).is_ok());
+    std::fs::remove_file(root).unwrap();
+    let mut artifacts = BTreeMap::new();
+    assert!(artifact_transport_for_package(&mut artifacts, &config, &registry, &name, &[]).is_ok());
+}
+
+#[test]
 fn same_origin_authenticated_and_public_routes_use_separate_transports() {
     let config = crate::registry::RegistryConfig::from_toml(
         "[registries.'@acme']\nurl='https://registry.npmjs.org'\ntoken-env='ACME_TOKEN'\n",
@@ -440,11 +474,17 @@ fn same_origin_authenticated_and_public_routes_use_separate_transports() {
             authenticated.clone(),
             &[NPM.to_owned()],
             artifact,
+            config.network_options().unwrap(),
         )
         .unwrap() as *const HttpsTransport;
-        let public_transport =
-            transport_for_route(&mut cache, public.clone(), &[NPM.to_owned()], artifact).unwrap()
-                as *const HttpsTransport;
+        let public_transport = transport_for_route(
+            &mut cache,
+            public.clone(),
+            &[NPM.to_owned()],
+            artifact,
+            config.network_options().unwrap(),
+        )
+        .unwrap() as *const HttpsTransport;
 
         assert_ne!(authenticated_transport, public_transport);
         assert_eq!(cache.len(), 2);

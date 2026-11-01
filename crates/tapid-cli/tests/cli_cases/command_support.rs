@@ -38,6 +38,8 @@ pub(super) fn command_in_home(
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_CACHE_HOME", home)
-        .env("LOCALAPPDATA", home);
+        .env("LOCALAPPDATA", home)
+        .env("APPDATA", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"));
     command
 }

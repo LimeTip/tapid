@@ -706,6 +706,65 @@ fn network_fixture_response_rejects_invalid_framing() {
     );
 }
 
+#[test]
+fn run_excludes_selected_and_shadowed_layer_credentials_before_spawn() {
+    let project = project();
+    project
+        .write(
+            "tapid.toml",
+            b"[registries.default]\nurl='https://project.example'\ntoken-env='PROJECT_SECRET'\n",
+        )
+        .unwrap();
+    let home = tapid_test_support::TempHome::new("layered-run-credentials").unwrap();
+    let user = if cfg!(target_os = "macos") {
+        home.path()
+            .join("Library/Application Support/tapid/config.toml")
+    } else if cfg!(windows) {
+        home.path().join("tapid/config.toml")
+    } else {
+        home.path().join(".config/tapid/config.toml")
+    };
+    fs::create_dir_all(user.parent().unwrap()).unwrap();
+    fs::write(
+        &user,
+        b"[registries.default]\nurl='https://user.example'\ntoken-env='USER_SECRET'\n",
+    )
+    .unwrap();
+    project
+        .write(
+            "explicit.toml",
+            b"[registries.default]\nurl='https://explicit.example'\ntoken-env='EXPLICIT_SECRET'\n",
+        )
+        .unwrap();
+    for name in ["USER_SECRET", "PROJECT_SECRET", "EXPLICIT_SECRET"] {
+        let output = isolated_command(
+            project.path(),
+            &[
+                "--config",
+                "explicit.toml",
+                "run",
+                "probe",
+                "--allow-env",
+                name,
+            ],
+            true,
+        )
+        .env("HOME", home.path())
+        .env("APPDATA", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env(name, "layered-secret-sentinel")
+        .output()
+        .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("registry credential environment variables cannot be passed to scripts"),
+            "{name}: {error}"
+        );
+        assert!(!error.contains("layered-secret-sentinel"));
+        assert!(output.stdout.is_empty());
+    }
+}
 #[cfg(any(windows, target_os = "linux"))]
 #[path = "run_result_interruptions.rs"]
 mod result_interruptions;

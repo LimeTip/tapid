@@ -18,8 +18,12 @@ pub(crate) struct Args {
 }
 
 /// Replay native locked selections and suppress all progress when returning JSON.
-pub(crate) fn run(args: Args, json: bool) -> ExitCode {
-    let result = crate::application::install::run(
+pub(crate) fn run(
+    args: Args,
+    json: bool,
+    configuration: &crate::registry::ConfigSelection,
+) -> ExitCode {
+    let result = crate::application::install::run_with_execution(
         crate::application::install::InstallRequest {
             project_dir: &args.project_dir,
             target_manifest_path: std::path::Path::new("package.json"),
@@ -33,6 +37,8 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             registry_fixture: args.registry_fixture.as_deref(),
             allow_unverified_registry_artifacts: false,
         },
+        crate::application::ExecutionOverrides::default(),
+        crate::application::install::RegistryConfiguration::Selected(configuration),
         |event| match event {
             crate::application::install::Progress::Replay(completed, total) if !json => {
                 eprintln!("Locked install progress: {completed}/{total}")

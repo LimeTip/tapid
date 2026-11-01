@@ -39,7 +39,7 @@ pub(crate) fn run() -> ExitCode {
         Ok(cli)
     });
     match parsed {
-        Ok(cli) => commands::dispatch(cli.command, cli.json),
+        Ok(cli) => commands::dispatch(cli.command, cli.json, cli.config.as_deref()),
         Err(error) if json_requested => match error.kind() {
             clap::error::ErrorKind::DisplayHelp => crate::output::json::information(
                 "help",

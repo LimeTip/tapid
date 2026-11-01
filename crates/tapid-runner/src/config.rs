@@ -343,6 +343,9 @@ struct ConfigDocument {
     run: RunSection,
     #[serde(default, rename = "registries")]
     _registries: Option<toml::Value>,
+    // Registry transport configuration is validated by its owning CLI capability.
+    #[serde(default, rename = "network")]
+    _network: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -653,6 +656,21 @@ mod tests {
 
         let malformed = RunConfig::parse_toml("[run.defaults]\nnetwork = \"yes\"").unwrap_err();
         assert_eq!(malformed.category(), ConfigErrorCategory::Malformed);
+    }
+
+    #[test]
+    fn network_table_preserves_project_run_policy() {
+        let input = "[network]\nproxy='direct'\nca-files=['corporate.pem']\n[run.scripts.dev]\nnetwork=false\nenvironment=['BUILD_MODE']\n";
+        let config = RunConfig::parse_toml(input).unwrap();
+        let profile = config.exact_profile("dev").unwrap();
+        assert!(!profile.network());
+        assert_eq!(profile.environment(), &["BUILD_MODE"]);
+        assert_eq!(
+            RunConfig::parse_toml(&format!("{input}unknown=true\n"))
+                .unwrap_err()
+                .category(),
+            ConfigErrorCategory::UnknownKey,
+        );
     }
 
     #[test]

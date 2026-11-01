@@ -1,7 +1,7 @@
 use crate::FetchMode;
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum MetadataError {
     InvalidRegistry(String),
     InvalidPackageName(String),
@@ -16,6 +16,29 @@ pub enum MetadataError {
     DuplicateVersion(String),
     HttpStatus(u16),
     UnsupportedContentType(String),
+}
+// Payloads originate in untrusted metadata and may contain credential-bearing
+// URLs or response text. Keep structured fields available to callers, but never
+// interpolate them into diagnostics (including nested Debug implementations).
+impl fmt::Debug for MetadataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let category = match self {
+            Self::InvalidRegistry(_) => "InvalidRegistry",
+            Self::InvalidPackageName(_) => "InvalidPackageName",
+            Self::InvalidVersion(_) => "InvalidVersion",
+            Self::InvalidIntegrity(_) => "InvalidIntegrity",
+            Self::InvalidArtifact(_) => "InvalidArtifact",
+            Self::InvalidDependency(_) => "InvalidDependency",
+            Self::UnsupportedIntegrity(_) => "UnsupportedIntegrity",
+            Self::InvalidJson(_) => "InvalidJson",
+            Self::MissingField(_) => "MissingField",
+            Self::ConflictingField(_) => "ConflictingField",
+            Self::DuplicateVersion(_) => "DuplicateVersion",
+            Self::UnsupportedContentType(_) => "UnsupportedContentType",
+            Self::HttpStatus(status) => return f.debug_tuple("HttpStatus").field(status).finish(),
+        };
+        f.write_str(category)
+    }
 }
 impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -67,3 +90,33 @@ impl fmt::Display for RegistryClientError {
     }
 }
 impl std::error::Error for RegistryClientError {}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_error_rendering_does_not_expose_untrusted_payloads() {
+        for error in [
+            MetadataError::InvalidRegistry(
+                "https://user:metadata-secret-sentinel@registry.test".into(),
+            ),
+            MetadataError::InvalidArtifact(
+                "https://user:metadata-secret-sentinel@registry.test/archive".into(),
+            ),
+            MetadataError::InvalidJson("remote metadata-secret-sentinel response".into()),
+            MetadataError::MissingField("versions.metadata-secret-sentinel".into()),
+            MetadataError::UnsupportedContentType("metadata-secret-sentinel".into()),
+            MetadataError::InvalidDependency("metadata-secret-sentinel".into()),
+        ] {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains("metadata-secret-sentinel"), "{rendered}");
+            let wrapped = RegistryClientError::Metadata(error);
+            assert!(!format!("{wrapped:?} {wrapped}").contains("metadata-secret-sentinel"));
+        }
+        assert_eq!(
+            MetadataError::HttpStatus(401).to_string(),
+            "HttpStatus(401)"
+        );
+    }
+}
