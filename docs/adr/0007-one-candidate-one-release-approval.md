@@ -13,3 +13,14 @@ Approval binds source, reviewed notes, archive bytes, generated installers, and 
 We considered retaining separate signing, GitHub publication, and crates.io approvals. Those pauses review the same candidate repeatedly and impose coordination work on a small team. One approval is justified only because the workflow exposes the complete candidate beforehand and retains automatic verification before each irreversible publication step. Public smoke still occurs after GitHub publication, so a failed public check can leave a public release while blocking crates.io; recovery preserves the original bytes and may require a new patch release.
 
 The [operator guide](../release-automation.md) defines setup, the routine flow, and recovery. The remaining standalone key check, draft verification, and public smoke workflows are diagnostic and manual recovery tools; they are not the normal release entrypoint.
+
+Authorization evidence is collected after the protected gate and before signing,
+using the workflow review history and attempt-specific job identity. GitHub does
+not supply an approval timestamp or attempt in review history. Initial collection
+therefore requires the first attempt and one unambiguous independent review;
+within-run reuse requires the immutable first-attempt receipt from that run and
+an unchanged candidate fingerprint. New manual recovery runs require fresh
+approval. Missing or ambiguous provenance fails closed. The receipt records the
+gate; it cannot replace or approve the protected deployment. The read-only final
+completion ledger reports incomplete outcomes without relaxing publication
+prerequisites. See the operator guide for retention and cancellation limits.

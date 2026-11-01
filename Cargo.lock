@@ -1554,6 +1554,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "tapid-core",
  "tapid-manifest",
  "tapid-resolver",
