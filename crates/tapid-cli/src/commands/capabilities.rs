@@ -74,6 +74,8 @@ const COVERAGE: &[(&str, &str, &str)] = &[
     ("manifest", "parent", "stdout_envelope"),
     ("manifest validate", "inspection", "stdout_envelope"),
     ("lock", "parent", "stdout_envelope"),
+    ("lock inspect", "inspection", "stdout_envelope"),
+    ("lock compare", "inspection", "stdout_envelope"),
     ("lock verify", "inspection", "stdout_envelope"),
     ("cache", "cache_inspection", "stdout_envelope"),
     ("cache info", "cache_inspection", "stdout_envelope"),

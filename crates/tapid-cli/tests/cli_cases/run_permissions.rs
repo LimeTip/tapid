@@ -1234,3 +1234,7 @@ fn run_preflight_reports_non_utf8_missing_project() {
     }
     assert_eq!(fs::read_dir(owner.path()).unwrap().count(), 1);
 }
+
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "run_result_interruptions.rs"]
+mod result_interruptions;
