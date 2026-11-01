@@ -79,3 +79,26 @@ If a single compiler is still killed, retain worker memory/cgroup and OOM
 diagnostics and increase the isolated worker's memory allocation before retrying.
 No successful retry or source-matched validation receipt is claimed here.
 Native sandbox/XPC controls and macOS 26 evidence remain separate requirements.
+
+### Second engine run: mitigation was not applied
+
+The next supplied engine run again passed formatting and stopped in Clippy,
+this time with both `libc` and `syn` compiler processes killed by SIGKILL.
+The emitted `libc` command still contains `-C debuginfo=2`; the log also reports
+waiting for other jobs after a compiler failure. Thus this is not evidence that
+the reduced-memory command above failed: the configured command shown in the
+handoff still lacks its environment prefix. No test assertion ran or identified
+a source defect. OOM remains unconfirmed without worker diagnostics.
+
+The engine must apply the four variables above to its actual isolated execution,
+not only retain them in this document. Capture the effective values and worker
+memory limit before compilation, and retain cgroup `memory.events` (or equivalent
+worker OOM diagnostics) afterward. If SIGKILL persists with one job, increase the
+isolated worker memory rather than changing containment tests or advisory policy.
+Do not infer success from this proposed retry.
+
+Current read-only inspection still finds the configured image absent locally;
+an available differently pinned image is not a permitted substitute. No host
+tests, replacement worker, engine configuration mutation or successful validation
+receipt were created. The missing-image and compiler-kill observations belong
+to different execution environments and must not be conflated.
