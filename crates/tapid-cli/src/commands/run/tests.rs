@@ -115,3 +115,46 @@ fn result_file_delivery_errors_are_reported_without_a_complete_record() {
     assert!(result::write(&mut read_only, &Err(RunFailure::ScriptMissing), None).is_err());
     assert!(fs::read(path).unwrap().is_empty());
 }
+
+#[test]
+fn result_file_delivery_failure_diagnoses_before_preserving_completed_child_exit() {
+    const HELPER: &str = "TAPID_DELIVERY_FAILURE_EXIT";
+    if let Ok(code) = std::env::var(HELPER) {
+        let code = code.parse::<i32>().unwrap();
+        let owner = tapid_test_support::TempProject::new("delivery-failure").unwrap();
+        let path = owner.write("result.json", b"").unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        // Keep the actual writer failure control; no public fault-injection flag.
+        let delivery = result::write(&mut file, &Err(RunFailure::ScriptMissing), None);
+        assert!(delivery.is_err());
+        assert!(fs::read(path).unwrap().is_empty());
+        drop(file);
+        drop(owner);
+        let status = render_after_result_delivery(delivery, &mut io::stderr(), || {
+            termination_exit_code(&tapid_runner::Termination::Exited(code))
+        });
+        // Unix returns ExitCode; Windows exits inside the same renderer used by run().
+        assert_eq!(status, ExitCode::from(code as u8));
+        std::process::exit(code);
+    }
+    for code in [0, 37] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::run::tests::result_file_delivery_failure_diagnoses_before_preserving_completed_child_exit",
+                "--nocapture",
+            ])
+            .env(HELPER, code.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr
+                .matches("error: cannot write run result file:")
+                .count(),
+            1,
+            "{stderr}"
+        );
+    }
+}
