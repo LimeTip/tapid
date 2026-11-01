@@ -8,6 +8,8 @@ pub(crate) struct LifecycleReport {
     pub(crate) coverage: &'static str,
     pub(crate) reason: Option<&'static str>,
     pub(crate) selected_packages: Option<usize>,
+    pub(crate) explicitly_selected_packages: Option<usize>,
+    pub(crate) impacted_packages: Option<usize>,
     pub(crate) inspected_packages: usize,
     pub(crate) packages: Vec<LifecyclePackage>,
     pub(crate) omitted_packages: usize,
@@ -20,6 +22,8 @@ pub(crate) struct LifecycleReport {
 pub(crate) struct LifecyclePackage {
     pub(crate) identity: LifecycleIdentity,
     pub(crate) discovery: &'static str,
+    pub(crate) rebuild_role: Option<&'static str>,
+    pub(crate) force_requested: bool,
     pub(crate) hooks: Vec<LifecycleHook>,
     pub(crate) omitted_hooks: usize,
 }
@@ -36,6 +40,8 @@ impl LifecycleReport {
             coverage: "not_performed",
             reason: Some("before_discovery"),
             selected_packages: None,
+            explicitly_selected_packages: None,
+            impacted_packages: None,
             inspected_packages: 0,
             packages: Vec::new(),
             omitted_packages: 0,
@@ -59,6 +65,8 @@ impl LifecycleReport {
         self.packages.push(LifecyclePackage {
             identity,
             discovery: "not_performed",
+            rebuild_role: None,
+            force_requested: false,
             hooks: Vec::new(),
             omitted_hooks: 0,
         });

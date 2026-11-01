@@ -4,6 +4,61 @@ use std::{path::PathBuf, process::ExitCode};
 use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
+pub(crate) struct RebuildArgs {
+    /// Package names, accepted only when unique in the lock.
+    #[arg(value_name = "PACKAGE")]
+    pub(crate) packages: Vec<String>,
+    /// Exact serialized package key from tapid.lock. Repeat for multiple instances.
+    #[arg(long, value_name = "LOCK_KEY")]
+    pub(crate) instance: Vec<String>,
+    /// Execute selected approved hooks even when authenticated outputs match.
+    #[arg(long)]
+    pub(crate) force: bool,
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
+pub(crate) fn rebuild(args: RebuildArgs, json: bool) -> ExitCode {
+    let result = (|| {
+        if args.packages.is_empty() && args.instance.is_empty() {
+            return Err(OperationFailure::unchanged(
+                &args.common.project_dir,
+                OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "rebuild requires at least one package or --instance selector",
+                ),
+            ));
+        }
+        let selection = crate::application::lifecycle::resolve_workspace(
+            &args.common.project_dir,
+            args.common.workspace.as_deref(),
+        )
+        .map_err(|e| OperationFailure::unchanged(&args.common.project_dir, e))?;
+        let request = crate::application::install::RebuildRequest {
+            packages: &args.packages,
+            instances: &args.instance,
+            force: args.force,
+        };
+        crate::application::install::run(
+            crate::application::install::InstallRequest {
+                project_dir: &selection.root_dir,
+                target_manifest_path: &selection.manifest_path,
+                mutation: crate::application::install::ManifestMutation::None,
+                store_root: args.common.store_dir.as_deref(),
+                mode: crate::application::install::InstallMode::Rebuild(request),
+                registry_fixture: args.common.registry_fixture.as_deref(),
+                allow_unverified_registry_artifacts: args
+                    .common
+                    .allow_unverified_registry_artifacts,
+            },
+            |event| crate::output::report_progress(event, json),
+        )
+        .map(LifecycleReport::Installed)
+    })();
+    report(result, json, "rebuild", "Rebuilt dependency outputs")
+}
+
+#[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
     #[arg(long)]
@@ -400,6 +455,12 @@ fn report(
             }
             crate::output::report_warnings(&report.outcome.warnings);
             println!("{action} ({} package(s))", report.package_count);
+            if operation == "rebuild" {
+                for line in crate::output::install::Reporter::lifecycle_lines(&report.outcome) {
+                    println!("{line}");
+                }
+            }
+
             ExitCode::SUCCESS
         }
         Err(error) => crate::output::json::failure_or_human(&error, operation, json),

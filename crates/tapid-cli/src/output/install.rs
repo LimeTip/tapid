@@ -126,9 +126,27 @@ impl Reporter {
         }
     }
 
-    fn lifecycle_lines(outcome: &crate::application::outcome::OperationOutcome) -> Vec<String> {
+    pub(crate) fn lifecycle_lines(
+        outcome: &crate::application::outcome::OperationOutcome,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(report) = &outcome.lifecycle {
+            if let Some(selected) = report.explicitly_selected_packages {
+                lines.push(format!(
+                    "Rebuild: {selected} explicit instance(s), {} impacted instance(s).",
+                    report.impacted_packages.unwrap_or(0)
+                ));
+                for package in &report.packages {
+                    if let Some(role) = package.rebuild_role {
+                        let (identity, _) = super::json::text(&package.identity);
+                        lines.push(format!(
+                            "Rebuild {role}: {identity}; force requested: {}.",
+                            package.force_requested
+                        ));
+                    }
+                }
+            }
+
             lines.push(format!("Dependency lifecycle: {} hook(s) executed, {} authenticated output(s) reused, {} hook(s) skipped.", report.executed, report.reused, report.skipped));
             for package in &report.packages {
                 for hook in &package.hooks {

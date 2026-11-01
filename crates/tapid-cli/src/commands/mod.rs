@@ -157,6 +157,8 @@ pub(crate) enum Command {
   tapid update --latest --save-exact react"
     )]
     Update(lifecycle::UpdateArgs),
+    /// Rebuild approved outputs of explicitly selected unchanged locked instances.
+    Rebuild(lifecycle::RebuildArgs),
     /// Compare declared and locked dependencies with registry versions.
     #[command(
         long_about = "Report each direct dependency's declared requirement, locked version, newest compatible version, and newest available version. Show the SemVer change, direct lockfile pin impact if each version is selected, and whether the available version requires changing the declared range.\n\nLockfile impact compares direct versions only. Transitive changes and whether an update resolves successfully require full dependency resolution. SemVer change labels do not establish API compatibility.\n\nRequires package.json and tapid.lock. Reads live registry metadata unless --offline or --registry-fixture is supplied. --offline without a fixture reports registry versions and impact as unknown; local workspace versions remain available. Available means the highest published SemVer, including prereleases, rather than the latest dist-tag. Does not modify the manifest, lockfile, store, or node_modules. Pending interrupted transactions require recovery through tapid install before inspection.\n\n--store-dir and --allow-unverified-registry-artifacts have no effect on this command.",
@@ -214,6 +216,7 @@ impl Command {
             Self::Add(_) => "add",
             Self::Remove(_) => "remove",
             Self::Update(_) => "update",
+            Self::Rebuild(_) => "rebuild",
             Self::Outdated(_) => "outdated",
             Self::Prune(_) => "prune",
             Self::Why(_) => "why",
@@ -241,6 +244,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Add(_)
                     | Command::Remove(_)
                     | Command::Update(_)
+                    | Command::Rebuild(_)
                     | Command::Outdated(_)
                     | Command::Prune(_)
                     | Command::Why(_)
@@ -281,6 +285,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Add(args)) => lifecycle::add(args, json),
         Some(Command::Remove(args)) => lifecycle::remove(args, json),
         Some(Command::Update(args)) => lifecycle::update(args, json),
+        Some(Command::Rebuild(args)) => lifecycle::rebuild(args, json),
         Some(Command::Outdated(args)) => lifecycle::outdated(args, json),
         Some(Command::Prune(args)) => lifecycle::prune(args, json),
         Some(Command::Why(args)) => why::run(args, json),
