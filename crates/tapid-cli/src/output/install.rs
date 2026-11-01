@@ -1,6 +1,6 @@
 //! Human install output uses the application's progress and settled outcome.
 use crate::application::{
-    install::{InstallReport, Progress},
+    install::{InstallReport, Progress, SelectionComparison},
     outcome::{ChangeState, ErrorKind, OperationFailure, RetryAdvice, Warning},
 };
 use std::{
@@ -97,12 +97,8 @@ impl Reporter {
         for line in Self::lifecycle_lines(&report.outcome) {
             println!("{line}");
         }
-        if let Some(changes) = &report.package_changes {
-            println!(
-                "Lock selections: {} added, {} changed, {} reused, {} removed",
-                changes.added, changes.changed, changes.reused, changes.removed
-            );
-        }
+        selection_summary(&report.package_changes);
+
         let mut files = report
             .outcome
             .changed_files
@@ -208,6 +204,18 @@ impl Reporter {
             _ => return,
         };
         eprintln!("{hint}");
+    }
+}
+
+pub(crate) fn selection_summary(comparison: &SelectionComparison) {
+    match comparison {
+        SelectionComparison::Available(changes) => println!(
+            "Lock selections: {} added, {} changed, {} reused, {} removed",
+            changes.added, changes.changed, changes.reused, changes.removed
+        ),
+        SelectionComparison::Unavailable(reason) => {
+            println!("Lock selections: unavailable ({reason})")
+        }
     }
 }
 
