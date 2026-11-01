@@ -1,0 +1,175 @@
+{
+  "assessment": "blocked",
+  "blockers": [
+    {
+      "action": {
+        "description": "Review native resolution or the npm lock import guide before creating a lockfile.",
+        "id": "select_lockfile_workflow",
+        "parameters": {
+          "field": null,
+          "path": "/private/example/project/tapid.lock"
+        }
+      },
+      "code": "LOCKFILE_MISSING",
+      "location": "/private/example/project/tapid.lock",
+      "operations": [
+        "imported_replay"
+      ]
+    }
+  ],
+  "capabilities": {
+    "experimental": true,
+    "lock_schemas": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "package_manager": "local_preflight_only",
+    "registry_routing": "experimental",
+    "runner": "not_assessed",
+    "spec_forms": [
+      "semver",
+      "npm_dist_tag",
+      "npm_alias",
+      "jsr_semver",
+      "workspace:*",
+      "workspace:^",
+      "workspace:~",
+      "file_tarball",
+      "git+https"
+    ],
+    "workspace_linking": "supported_not_verified",
+    "workspace_selection": "exact_member_name"
+  },
+  "checks_not_performed": [
+    "atomic_snapshot_or_concurrent_writer_exclusion",
+    "installed_tree_integrity_and_lock_correspondence",
+    "workspace_links",
+    "shared_store_contents_and_recovery",
+    "registry_access_and_credentials",
+    "dependency_resolution_and_transitive_compatibility",
+    "artifact_bytes_and_copied_sources",
+    "lifecycle_approvals_and_derived_outputs",
+    "runner_runtime_policy_and_platform_assurance",
+    "package_engine_and_target_platform_requirements"
+  ],
+  "installation": [
+    {
+      "path": "/private/example/project/node_modules",
+      "state": "absent"
+    }
+  ],
+  "lifecycle": {
+    "approvals_and_derived_outputs": "unchecked",
+    "backend_and_toolchain_prerequisites": "unchecked",
+    "completeness": "incomplete",
+    "dependency_source_discovery": "unchecked",
+    "enforcement": "not_established",
+    "manifest_declarations": [
+      {
+        "evidence": "local_observation",
+        "hooks": [],
+        "path": "/private/example/project/package.json",
+        "scope": "declared_scripts_only",
+        "source": "project_manifest"
+      }
+    ],
+    "recorded_derived_hooks": []
+  },
+  "manifest_lock_agreement": "unknown",
+  "migration_guide": "https://github.com/LimeTip/tapid/blob/main/docs/npm-lockfile-import.md",
+  "operations": {
+    "dependency_mutation": {
+      "evidence": "deferred_check",
+      "maturity": "experimental",
+      "scope": "local_manifest_rules",
+      "support": "unchecked"
+    },
+    "imported_replay": {
+      "evidence": "deferred_check",
+      "maturity": "experimental",
+      "scope": "manifest_receipts_only",
+      "support": "unchecked"
+    },
+    "native_resolution": {
+      "evidence": "deferred_check",
+      "maturity": "experimental",
+      "scope": "local_manifest_rules",
+      "support": "unchecked"
+    },
+    "npm_import": {
+      "evidence": "deferred_check",
+      "maturity": "experimental",
+      "scope": "npm_graph_and_root_manifest_only",
+      "support": "unchecked"
+    }
+  },
+  "recovery": "none_detected",
+  "recovery_guidance": null,
+  "registries": {
+    "credential_environment_names": [],
+    "credentials": "not_read",
+    "default_origin": "https://registry.npmjs.org",
+    "jsr_origin": "https://jsr.io",
+    "origins": [],
+    "routes": []
+  },
+  "snapshot": {
+    "changes_detected": false,
+    "consistency": "not_atomic",
+    "files": [
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/.tapid-lifecycle-journal.json"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/.tapid-lifecycle-journal.lifecycle.bak"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/.tapid-managed"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/node_modules"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/package-lock.json"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "sha256-fee412776ee7d466e425de58510ba8d794ec7091437d22a4f1955bdfd40a9291",
+        "path": "/private/example/project/package.json"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/tapid.lock"
+      },
+      {
+        "changed_on_recheck": false,
+        "identity": "missing",
+        "path": "/private/example/project/tapid.toml"
+      }
+    ]
+  },
+  "truncated": false,
+  "verification_depth": "local_metadata_and_ownership_only",
+  "workspace": {
+    "linking": "not_verified",
+    "manifest": "/private/example/project/package.json",
+    "members": [],
+    "selected": null
+  }
+}

@@ -1,0 +1,644 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:run-receipt:v1",
+  "title": "Tapid legacy run receipt v1 (untrusted stderr channel)",
+  "type": "object",
+  "$ref": "#/$defs/receipt",
+  "properties": {
+    "policy_inputs": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "source",
+            "configuration",
+            "invocation",
+            "effective"
+          ],
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "configuration": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/policy"
+                }
+              ]
+            },
+            "invocation": {
+              "$ref": "#/$defs/permissions"
+            },
+            "effective": {
+              "$ref": "#/$defs/policy"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "strings": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "string"
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "required": [
+        "read",
+        "write",
+        "environment",
+        "network",
+        "subprocess"
+      ],
+      "properties": {
+        "read": {
+          "$ref": "#/$defs/strings"
+        },
+        "write": {
+          "$ref": "#/$defs/strings"
+        },
+        "environment": {
+          "$ref": "#/$defs/strings"
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "subprocess": {
+          "type": "boolean"
+        }
+      }
+    },
+    "policy": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/permissions"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "assurance",
+        "limits"
+      ],
+      "properties": {
+        "assurance": {
+          "enum": [
+            "Restricted",
+            "ManagedTree"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "timeout_seconds",
+            "max_output_bytes",
+            "max_processes",
+            "max_memory_bytes"
+          ],
+          "properties": {
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_output_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_processes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_memory_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "required": [
+        "filesystem_read",
+        "filesystem_write",
+        "network",
+        "environment_sanitization",
+        "descriptor_hygiene",
+        "subprocess_restriction",
+        "descendant_authority_propagation",
+        "descendant_lifecycle",
+        "process_tree_membership",
+        "complete_cleanup",
+        "timeout",
+        "output",
+        "process_count",
+        "memory"
+      ],
+      "properties": {
+        "filesystem_read": {
+          "type": "boolean"
+        },
+        "filesystem_write": {
+          "type": "boolean"
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "environment_sanitization": {
+          "type": "boolean"
+        },
+        "descriptor_hygiene": {
+          "type": "boolean"
+        },
+        "subprocess_restriction": {
+          "type": "boolean"
+        },
+        "descendant_authority_propagation": {
+          "type": "boolean"
+        },
+        "descendant_lifecycle": {
+          "type": "boolean"
+        },
+        "process_tree_membership": {
+          "type": "boolean"
+        },
+        "complete_cleanup": {
+          "type": "boolean"
+        },
+        "timeout": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "boolean"
+        },
+        "process_count": {
+          "type": "boolean"
+        },
+        "memory": {
+          "type": "boolean"
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "dimension",
+          "scope",
+          "mechanism",
+          "limitations"
+        ],
+        "properties": {
+          "dimension": {
+            "enum": [
+              "FilesystemRead",
+              "FilesystemWrite",
+              "Network",
+              "EnvironmentSanitization",
+              "DescriptorHygiene",
+              "SubprocessRestriction",
+              "DescendantAuthorityPropagation",
+              "DescendantLifecycle",
+              "ProcessTreeMembership",
+              "CompleteCleanup",
+              "Timeout",
+              "Output",
+              "ProcessCount",
+              "Memory"
+            ]
+          },
+          "scope": {
+            "enum": [
+              "LaunchProcess",
+              "DescendantTree",
+              "ManagedTree"
+            ]
+          },
+          "mechanism": {
+            "type": "string"
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "completion": {
+      "type": "object",
+      "required": [
+        "confirmed",
+        "evidence",
+        "cleanup_confidence"
+      ],
+      "properties": {
+        "confirmed": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "cleanup_confidence": {
+          "enum": [
+            "NotGuaranteed",
+            "BestEffortObserved",
+            "KernelOwnedComplete"
+          ]
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "assurance",
+        "backend",
+        "requested",
+        "declared",
+        "observed",
+        "enforced",
+        "declared_evidence",
+        "observed_evidence",
+        "established_evidence",
+        "effective_filesystem",
+        "configured_limits",
+        "termination",
+        "completion",
+        "executable_resolution"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "assurance": {
+          "enum": [
+            "Restricted",
+            "ManagedTree"
+          ]
+        },
+        "backend": {
+          "type": "object",
+          "required": [
+            "name",
+            "version",
+            "deprecation"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "deprecation": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        "requested": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "declared": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "observed": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "enforced": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "declared_evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "observed_evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "established_evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "effective_filesystem": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "native_path",
+              "access",
+              "kind",
+              "source",
+              "binding"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "native_path": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "encoding",
+                      "units"
+                    ],
+                    "properties": {
+                      "encoding": {
+                        "const": "unix-bytes"
+                      },
+                      "units": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 255
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "encoding",
+                      "units"
+                    ],
+                    "properties": {
+                      "encoding": {
+                        "const": "windows-utf16"
+                      },
+                      "units": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 65535
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "encoding",
+                      "units"
+                    ],
+                    "properties": {
+                      "encoding": {
+                        "const": "display"
+                      },
+                      "units": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              },
+              "access": {
+                "enum": [
+                  "ReadData",
+                  "ReadMetadata",
+                  "Read",
+                  "Write"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "ExactDirectory",
+                  "CharacterDevice",
+                  "ExactFile",
+                  "DirectorySubtree"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "ProjectPolicy",
+                  "BackendRuntime"
+                ]
+              },
+              "binding": {
+                "enum": [
+                  "NativeObject",
+                  "CanonicalPath"
+                ]
+              }
+            }
+          }
+        },
+        "configured_limits": {
+          "type": "object",
+          "required": [
+            "timeout_seconds",
+            "max_output_bytes",
+            "max_processes",
+            "max_memory_bytes"
+          ],
+          "properties": {
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_output_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_processes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_memory_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          }
+        },
+        "termination": {
+          "type": "string",
+          "pattern": "^(Exited\\(-?[0-9]+\\)|Signaled\\(-?[0-9]+\\)|TimedOut|OutputLimitExceeded|ProcessLimitExceeded|MemoryLimitExceeded|Cancelled)$"
+        },
+        "completion": {
+          "$ref": "#/$defs/completion"
+        },
+        "executable_resolution": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "path",
+                "path_order",
+                "caller_path_inherited",
+                "reserved_node"
+              ],
+              "properties": {
+                "path": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                },
+                "path_order": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 255
+                    }
+                  }
+                },
+                "caller_path_inherited": {
+                  "type": "boolean"
+                },
+                "reserved_node": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "command",
+                        "private_path",
+                        "trusted_runtime",
+                        "device",
+                        "inode",
+                        "mechanism",
+                        "identity_checks",
+                        "cleanup_observed",
+                        "limitations"
+                      ],
+                      "properties": {
+                        "command": {
+                          "type": "string"
+                        },
+                        "private_path": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        },
+                        "trusted_runtime": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        },
+                        "device": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "inode": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "mechanism": {
+                          "type": "string"
+                        },
+                        "identity_checks": {
+                          "type": "string"
+                        },
+                        "cleanup_observed": {
+                          "type": "boolean"
+                        },
+                        "limitations": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "policy_inputs": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "source",
+                "configuration",
+                "invocation",
+                "effective"
+              ],
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "configuration": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/policy"
+                    }
+                  ]
+                },
+                "invocation": {
+                  "$ref": "#/$defs/permissions"
+                },
+                "effective": {
+                  "$ref": "#/$defs/policy"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

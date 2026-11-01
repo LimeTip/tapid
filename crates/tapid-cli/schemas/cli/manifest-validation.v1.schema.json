@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tapid:manifest-validation:v1",
+  "title": "Tapid manifest validation success payload v1",
+  "description": "Success data only. Failures use tapid.envelope.v1 with null data. Parsing does not establish project compatibility.",
+  "type": "object",
+  "required": [
+    "action",
+    "valid"
+  ],
+  "properties": {
+    "action": {
+      "const": "validate"
+    },
+    "valid": {
+      "const": true
+    }
+  }
+}

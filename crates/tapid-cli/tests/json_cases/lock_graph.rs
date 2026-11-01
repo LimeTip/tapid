@@ -3,6 +3,28 @@ use super::*;
 #[test]
 fn explicit_graph_snapshots_are_inspected_compared_and_paged_without_project_state() {
     let project = TempProject::new("json-lock-graph").unwrap();
+    let (output, discovery) = invoke(&project, &["--json", "capabilities"]);
+    assert!(output.status.success(), "{discovery}");
+    for path in ["lock inspect", "lock compare"] {
+        let command = discovery["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["path"] == path)
+            .unwrap();
+        let mode = &command["modes"][0];
+        assert_eq!(mode["json"], "stdout_envelope");
+        assert_eq!(mode["schema_coverage"], "envelope_only");
+        for effect in [
+            "project_writes_possible",
+            "store_writes_possible",
+            "other_writes_possible",
+            "network_possible",
+            "child_execution_possible",
+        ] {
+            assert_eq!(mode["effects"][effect], false, "{path}: {effect}");
+        }
+    }
     let mut lock = tapid_lockfile::Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
     let package = tapid_lockfile::LockedPackage::new_with_provenance(
         "https://registry.example.test",

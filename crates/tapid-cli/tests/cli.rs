@@ -1,3 +1,5 @@
+#[path = "cli_cases/capabilities.rs"]
+mod capabilities_tests;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256, Sha512};
 use std::{

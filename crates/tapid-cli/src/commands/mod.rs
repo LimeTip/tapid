@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod cache;
+mod capabilities;
 mod ci;
 mod explain;
 pub(crate) mod init;
@@ -55,6 +56,8 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Discover installed-binary command structure and static effects offline.
+    Capabilities(capabilities::Args),
     /// Inspect local project readiness without installing or recovering.
     #[command(
         long_about = "Inspect project/workspace selection, manifest and lock agreement, installation ownership, pending project recovery, registry configuration, and local compatibility blockers. Offline and read-only. Does not verify installed trees, inspect the shared store, assess runner assurance, or exclude concurrent writers. Exit 0 means no local blockers were found; complete compatibility remains unchecked.",
@@ -193,6 +196,7 @@ pub(crate) enum Command {
 impl Command {
     fn operation(&self) -> &'static str {
         match self {
+            Self::Capabilities(_) => "capabilities",
             Self::Status(_) => "status",
 
             Self::Tool(_) => "tool",
@@ -225,10 +229,12 @@ impl Command {
 /// Routes a parsed command to its handler, or prints usage guidance when no command is given.
 pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
     if json
+        && !matches!(&command, Some(Command::Run(args)) if args.preflight)
         && !matches!(
             command,
             Some(
-                Command::Status(_)
+                Command::Capabilities(_)
+                    | Command::Status(_)
                     | Command::Ci(_)
                     | Command::Manifest(_)
                     | Command::Lock(_)
@@ -255,6 +261,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         );
     }
     match command {
+        Some(Command::Capabilities(args)) => capabilities::run(args, json),
         Some(Command::Status(args)) => status::run(args, json),
 
         Some(Command::Tool(args)) => tool::run(args, json),
@@ -274,7 +281,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::ImportPackageLock(args)) => npm_import::run(args, json),
         Some(Command::Manifest(args)) => manifest::run(args, json),
         Some(Command::Lock(args)) => lock::run(args, json),
-        Some(Command::Run(args)) => run::run(args),
+        Some(Command::Run(args)) => run::run(args, json),
 
         Some(Command::Install(args)) => install::run(args, json),
         Some(Command::Ci(args)) => ci::run(args, json),

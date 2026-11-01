@@ -627,6 +627,19 @@ fn cli_receipt_reports_assurance_authority_and_completion_without_duplicate_outp
         } else {
             serde_json::from_str(text.split_once("sandbox receipt: ").unwrap().1.trim()).unwrap()
         };
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../schemas/cli/run-receipt.v1.schema.json"))
+                .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(
+            validator.is_valid(&value),
+            "{}",
+            validator
+                .iter_errors(&value)
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["assurance"], "Restricted");
         let private = value["executable_resolution"]["reserved_node"]["private_path"]

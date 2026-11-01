@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "operation": "run",
+  "outcome": "prelaunch_failure",
+  "error": {
+    "code": "MANIFEST_INVALID",
+    "completion": null
+  },
+  "policy_inputs": null,
+  "receipt": null
+}

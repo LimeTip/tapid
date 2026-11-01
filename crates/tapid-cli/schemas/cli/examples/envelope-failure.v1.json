@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "operation": "capabilities",
+  "outcome": "failure",
+  "project": null,
+  "project_path": null,
+  "changes": {
+    "state": "unchanged",
+    "files": [],
+    "paths": []
+  },
+  "truncated_fields": [],
+  "warnings": [],
+  "warning_details": [],
+  "warning_details_complete": true,
+  "warning_details_omitted": 0,
+  "lifecycle": null,
+  "errors": [
+    {
+      "code": "SCHEMA_UNKNOWN"
+    }
+  ],
+  "retry": null,
+  "data": null
+}

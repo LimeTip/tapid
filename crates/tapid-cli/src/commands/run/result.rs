@@ -24,7 +24,7 @@ pub(super) enum RunFailure {
 }
 
 impl RunFailure {
-    fn code(&self) -> &'static str {
+    pub(super) fn code(&self) -> &'static str {
         match self {
             Self::ProjectUnavailable => "PROJECT_UNAVAILABLE",
             Self::WorkspaceInvalid => "WORKSPACE_INVALID",

@@ -233,6 +233,29 @@ impl ExecutionRequest {
         &self.policy
     }
 
+    /// Reports only side-effect-free backend exclusions. This never probes the
+    /// host, opens a service, or establishes enforcement for this request.
+    pub fn static_platform_blocker(&self) -> Option<super::StaticPlatformBlocker> {
+        #[cfg(target_os = "macos")]
+        {
+            if self.policy.assurance() != AssuranceLevel::Restricted {
+                return Some(super::StaticPlatformBlocker::Assurance);
+            }
+            let limits = self.policy.limits();
+            if limits.timeout_seconds().is_some()
+                || limits.max_output_bytes().is_some()
+                || limits.max_processes().is_some()
+                || limits.max_memory_bytes().is_some()
+            {
+                return Some(super::StaticPlatformBlocker::Limits);
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        return Some(super::StaticPlatformBlocker::Platform);
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        None
+    }
+
     /// Whether the caller explicitly requested process-memory statistics through isolated procfs.
     pub fn allow_process_memory_stats(&self) -> bool {
         self.allow_process_memory_stats

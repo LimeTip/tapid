@@ -66,6 +66,35 @@ pub const MAX_EXECUTABLE_SEARCH_PATH_UNITS: usize = 4_096;
 /// Maximum serialized executable search path, including separators and its terminating NUL.
 pub const MAX_EXECUTABLE_SEARCH_PATHS_UNITS: usize = 32_767;
 
+/// A request rejected by the compiled backend without inspecting the host or
+/// launching a probe. Absence of a blocker is not containment support evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaticPlatformBlocker {
+    Platform,
+    Assurance,
+    Limits,
+}
+
+impl StaticPlatformBlocker {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Platform => "PLATFORM_UNSUPPORTED",
+            Self::Assurance => "PLATFORM_ASSURANCE_UNSUPPORTED",
+            Self::Limits => "PLATFORM_LIMITS_UNSUPPORTED",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Platform => "no platform execution backend is implemented",
+            Self::Assurance => "native macOS ManagedTree containment is unsupported",
+            Self::Limits => {
+                "native macOS Restricted cannot enforce configured timeout, output, process-count, or memory limits"
+            }
+        }
+    }
+}
+
 /// Identity and lifecycle status of a containment backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendIdentity {

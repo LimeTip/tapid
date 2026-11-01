@@ -55,9 +55,11 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     println!("Registry configuration: {}", report.registries);
     for blocker in &report.blockers {
         println!(
-            "Blocker {}: {}",
+            "Blocker {}: {}\n  Next: {} ({})",
             blocker.code,
-            crate::output::json::text(&blocker.location).0
+            crate::output::json::text(&blocker.location).0,
+            blocker.action.description,
+            blocker.action.id,
         );
     }
     if report.truncated {
@@ -73,6 +75,9 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
         );
     }
     println!("Experimental capabilities: {}", report.capabilities);
+    println!("Operation assessments: {}", report.operations);
+    println!("Lifecycle evidence: {}", report.lifecycle);
+    println!("Migration guide: {}", report.migration_guide);
     println!("Checks not performed:");
     for check in &report.checks_not_performed {
         println!("  {check}");
