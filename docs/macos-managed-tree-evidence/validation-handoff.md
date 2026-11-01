@@ -39,3 +39,43 @@ Next: restore the pinned engine image, obtain current-source portable validation
 and run the documented native positive/adversarial matrix in the isolated macOS
 test environment. Keep the strict gate and the distinction between diagnostic
 observations and enforcement guarantees throughout.
+
+## Compiler SIGKILL recovery
+
+The subsequent engine-provided isolated Linux run reached Clippy compilation
+and stopped while compiling `syn` 3.0.5: `rustc` exited on signal 9 (SIGKILL).
+Formatting completed before that command; the test and architecture commands
+after Clippy did not run. This is not a compiler diagnostic or a failing test
+assertion. Memory exhaustion is a plausible cause, not an established OOM
+diagnosis: the supplied log has no kernel OOM record.
+
+Fresh read-only Docker inspection on 2026-11-02 reports 2,054,770,688 bytes
+of daemon memory. The pinned image remains absent from this local daemon.
+The engine's supplied run is evidence of its own worker execution; it does
+not establish that this local daemon has the worker image. Do not repeat an
+unmodified parallel build or run repository tests on the host.
+
+Retry the complete configured lane in the engine's private worker with these
+environment variables applied to the entire command:
+
+```sh
+export CARGO_BUILD_JOBS=1
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0
+export CARGO_PROFILE_TEST_DEBUG=0
+node --experimental-strip-types scripts/dev.ts fmt --all --check &&
+node --experimental-strip-types scripts/dev.ts clippy --workspace --all-targets --all-features --locked -- -D warnings &&
+node --experimental-strip-types scripts/dev.ts test --workspace --all-features --locked &&
+node --experimental-strip-types scripts/dev.ts test --manifest-path tests/integration/Cargo.toml --locked &&
+node --experimental-strip-types tools/check_architecture.ts
+```
+
+The wrapper preserves these environment variables. Serial compilation lowers
+peak concurrent compiler memory; disabling incremental output and debug symbols
+reduces artifact overhead. These settings preserve debug assertions, test scope,
+features, locked dependencies and warnings-as-errors. They are worker settings,
+not a change to repository-wide developer build defaults or advisory policy.
+If a single compiler is still killed, retain worker memory/cgroup and OOM
+diagnostics and increase the isolated worker's memory allocation before retrying.
+No successful retry or source-matched validation receipt is claimed here.
+Native sandbox/XPC controls and macOS 26 evidence remain separate requirements.
