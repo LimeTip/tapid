@@ -435,6 +435,7 @@ fn windows_ctrl_c_cancels_execution_and_restores_project_dacl() {
             "--test-threads=1",
         ])
         .env(HELPER_ENV, "1")
+        .env("TAPID_WINDOWS_STAGE_TRACE", "1")
         .creation_flags(CREATE_NEW_CONSOLE)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -740,6 +741,12 @@ fn windows_ctrl_c_helper(network: bool) {
         .join()
         .unwrap_or_else(|panic| panic!("execution worker panicked: {panic:?}"));
     assert_eq!(outcome.termination(), &Termination::Cancelled);
+    if let Some(endpoint) = endpoint {
+        assert!(
+            std::net::TcpStream::connect_timeout(&endpoint, Duration::from_millis(100)).is_err(),
+            "cancelled execution must no longer serve its network endpoint"
+        );
+    }
     if network {
         assert!(String::from_utf8_lossy(outcome.stdout()).contains("NETWORK_LISTENING"));
         assert!(
