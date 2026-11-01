@@ -79,7 +79,7 @@ A shared type belongs in `tapid-core` only when it is a stable domain value with
 - `tapid-cli`: command parsing, terminal and machine output, exit behavior, prompts, and user-facing orchestration.
 - `tapid-manifest`: parsing and validation of supported `package.json` fields. It uses `tapid-core` primitives and does not own CLI behavior or project mutation.
 - `tapid-lockfile`: lockfile model, versioning, and canonical serialization. It remains independent of terminal presentation and registry transport.
-- `tapid-resolver`: deterministic dependency graph resolution and peer-dependency context handling.
+- `tapid-resolver`: deterministic dependency graph resolution, pure manifest dependency interpretation, and peer-dependency context handling. It depends on `tapid-manifest` for section-preserving declarations; callers supply workspace facts and exact registry selectors. Discovery, lock-record assembly, artifact preparation, and transaction coordination stay in the CLI. Replay shares declarations while retaining recorded-graph validation; see [ADR 0012](adr/0012-shared-dependency-interpretation.md).
 - `tapid-registry-client`: registry transport, metadata retrieval, origin routing, and authentication seams. It is distinct from the future Tapid Registry service.
 - `tapid-protocol`: shared wire and interface contract types that clients and services can use without depending on the CLI or local store.
 - `tapid-archive`: package archive validation, safe paths, extraction rules, and artifact integrity handling.

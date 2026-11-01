@@ -10,7 +10,7 @@ use tapid_linker::{
     VerifiedTreeReference,
 };
 use tapid_lockfile::Lockfile;
-use tapid_manifest::{DependencyKind, PackageManifest};
+use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
 fn replay_progress_checkpoint(completed: usize, total: usize) -> bool {
@@ -402,17 +402,18 @@ pub(crate) fn replay_root_keys_with_config(
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<Vec<String>, String> {
     if !lock.root_bindings().is_empty() {
-        let required_names = manifest
-            .dependencies()
-            .keys()
-            .chain(manifest.dev_dependencies().keys())
-            .map(|name| crate::online::dep_parts(name).map(|(_, package)| package))
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-        let optional_names = manifest
-            .optional_dependencies()
-            .keys()
-            .map(|name| crate::online::dep_parts(name).map(|(_, package)| package))
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let membership =
+            tapid_resolver::root_membership(manifest, tapid_resolver::dependency_parts)?;
+        let required_names = membership
+            .required
+            .into_iter()
+            .map(|(_, package)| package)
+            .collect::<std::collections::BTreeSet<_>>();
+        let optional_names = membership
+            .optional
+            .into_iter()
+            .map(|(_, package)| package)
+            .collect::<std::collections::BTreeSet<_>>();
         let mut declarations =
             BTreeMap::<tapid_core::PackageName, Vec<tapid_resolver::Dependency>>::new();
         for dependency in crate::online::manifest_roots(manifest)? {
@@ -617,20 +618,13 @@ fn optional_only_root_identities_with_config(
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<std::collections::BTreeSet<(tapid_core::RegistryOrigin, tapid_core::PackageName)>, String>
 {
-    let mut required = std::collections::BTreeSet::new();
-    for map in [manifest.dependencies(), manifest.dev_dependencies()] {
-        for name in map.keys() {
-            required.insert(registry_config.identity_for_spec(name)?);
-        }
-    }
-    let mut optional = std::collections::BTreeSet::new();
-    for name in manifest.optional_dependencies().keys() {
-        let identity = registry_config.identity_for_spec(name)?;
-        if !required.contains(&identity) {
-            optional.insert(identity);
-        }
-    }
-    Ok(optional)
+    let membership =
+        tapid_resolver::root_membership(manifest, |name| registry_config.identity_for_spec(name))?;
+    Ok(membership
+        .optional
+        .difference(&membership.required)
+        .cloned()
+        .collect())
 }
 
 #[cfg(test)]
@@ -656,23 +650,9 @@ fn replay_root_identities_with_config(
     >,
     String,
 > {
-    let mut identities = std::collections::BTreeMap::new();
-    for (kind, map) in manifest.dependency_sections() {
-        if kind == DependencyKind::PeerDependencies {
-            continue;
-        }
-        for (name, requirement) in map {
-            let (registry, package) = registry_config.identity_for_spec(name)?;
-            if requirement.starts_with("workspace:") {
-                continue;
-            }
-            identities
-                .entry((registry, package))
-                .or_insert_with(Vec::new)
-                .push(requirement.parse().map_err(|error| format!("{error:?}"))?);
-        }
-    }
-    Ok(identities)
+    tapid_resolver::legacy_root_requirements(manifest, |name| {
+        registry_config.identity_for_spec(name)
+    })
 }
 
 pub(crate) fn replay_root_matches(

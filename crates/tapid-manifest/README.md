@@ -42,3 +42,9 @@ UTF-8 source to a borrowed callback. Snapshot consumers can fingerprint those by
 before a later filesystem read. Discovery discards the source after each member;
 the shared workspace model retains only parsed manifests. Callback observations
 are partial if discovery fails.
+
+`dependency_declarations` is a borrowed view over `dependency_sections`. Each
+entry retains its section, original name spelling, and raw specification, including
+names declared in multiple sections. Installation requirement interpretation is
+owned by `tapid-resolver`; parsing manifests does not enforce installation-only
+override restrictions.

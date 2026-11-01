@@ -1312,6 +1312,7 @@ version = "0.0.8"
 dependencies = [
  "semver",
  "tapid-core",
+ "tapid-manifest",
  "tapid-registry-client",
 ]
 

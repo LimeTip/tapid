@@ -10,6 +10,7 @@ repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 [dependencies]
+tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 tapid-registry-client = { version = "0.0.7", path = "../tapid-registry-client" }
 semver = "1"

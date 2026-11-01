@@ -83,7 +83,10 @@ pub(super) fn saved_manifest(
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
         let (_, local) = dep_parts(&mutation.name)?;
         let actual = requirement.package_name(&local);
-        let registry = registry_for_requirement(config, &mutation.name, &requirement)?;
+        let registry =
+            tapid_resolver::declaration_registry(&mutation.name, &requirement, |name| {
+                dependency_identity(config, name).map(|(registry, _)| registry)
+            })?;
         let selected = resolution
             .root_bindings
             .get(&(registry.clone(), local.clone()))

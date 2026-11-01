@@ -408,7 +408,7 @@ impl OutdatedEntry {
                 _ => "changed",
             }
         };
-        let manifest = match crate::online::workspace_requirement(&self.declared, &target) {
+        let manifest = match tapid_resolver::workspace_requirement(&self.declared, &target) {
             Ok(requirement) if requirement.matches(&target) => "unchanged",
             Ok(_) => "changed",
             Err(_) => "unknown",
@@ -577,7 +577,7 @@ fn outdated_entries(
         let identity = identity.clone();
         let declared = declared.clone();
         if let Some(local_version) = local_workspace_versions.get(&identity) {
-            let requirement = crate::online::workspace_requirement(&declared, local_version)?;
+            let requirement = tapid_resolver::workspace_requirement(&declared, local_version)?;
             let compatible = requirement.matches(local_version);
             let locked_version = lock
                 .workspace_packages()

@@ -24,13 +24,15 @@ use resolution::{
     parse_registry_requirement, resolve_with_fetch, resolve_with_fetch_routed,
     resolve_with_overrides,
 };
-pub(crate) use resolution::{manifest_overrides, manifest_roots};
+pub(crate) use tapid_resolver::{
+    dependency_parts as dep_parts, manifest_overrides, manifest_roots, register_local_root_identity,
+};
 
 mod routing;
+use routing::artifact_transport_for_package;
 pub(crate) use routing::metadata_transport_for_package;
 #[cfg(test)]
 use routing::transport_for_route;
-use routing::{artifact_transport_for_package, registry_for_requirement};
 
 mod platform;
 pub(crate) use platform::current_libc;
@@ -219,29 +221,6 @@ pub(crate) fn root_digest(project: &Path) -> Result<String, String> {
     Ok(digest(&data).to_string())
 }
 
-pub(crate) fn workspace_requirement(
-    dependency: &str,
-    version: &PackageVersion,
-) -> Result<Requirement, String> {
-    let range = if let Some(protocol) = dependency.strip_prefix("workspace:") {
-        match protocol {
-            "*" => "*".to_owned(),
-            "^" => format!("^{version}"),
-            "~" => format!("~{version}"),
-            _ => {
-                return Err(format!(
-                    "unsupported workspace protocol '{dependency}'; supported compatibility forms are workspace:*, workspace:^, and workspace:~"
-                ));
-            }
-        }
-    } else {
-        dependency.to_owned()
-    };
-    range
-        .parse::<Requirement>()
-        .map_err(|error| format!("invalid workspace dependency range '{dependency}': {error}"))
-}
-
 #[derive(Clone)]
 pub(crate) struct WorkspaceRegistryDependency {
     pub member_key: String,
@@ -397,6 +376,10 @@ pub(crate) fn workspace_materialization_from_discovered(
         });
         members.insert(member.name().to_owned(), (source, version));
     }
+    let facts = members
+        .iter()
+        .map(|(name, (_, version))| (name.clone(), version.clone()))
+        .collect();
     for member in workspace.members() {
         let manifest = replacement
             .filter(|(path, _)| *path == member.path())
@@ -404,126 +387,49 @@ pub(crate) fn workspace_materialization_from_discovered(
         let package_index = *locked_by_name
             .get(member.name())
             .ok_or("workspace member has no lockfile identity")?;
-        for (name, range) in manifest.peer_dependencies() {
-            let (requirement, provider) = if let Some((source, version)) = members.get(name) {
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
-                        "workspace member peer dependency '{}@{}' in '{}' does not match local provider version {}",
-                        name,
-                        range,
-                        member.name(),
-                        version
-                    ).into());
-                }
-                (
-                    requirement,
-                    WorkspacePeerProvider::Workspace {
-                        key: LockfilePackageKey::workspace(source.clone()).to_string(),
-                        version: version.clone(),
-                    },
-                )
-            } else {
-                if range.starts_with("workspace:") {
-                    return Err(format!(
-                        "workspace peer dependency '{}' in member '{}' has no local workspace provider; refusing registry fallback",
-                        name,
-                        member.name()
-                    ).into());
-                }
-                let (registry, package) = dependency_identity(registry_config, name)?;
-                if copied::declaration(range)
-                    .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                    .is_some()
-                {
-                    return Err(format!(
-                        "copied dependency '{name}' in a workspace member is unsupported; declare copied artifacts at the project root"
-                    ).into());
-                }
-                let requirement = range.parse::<Requirement>().map_err(|error| {
-                    format!(
-                        "invalid workspace member peer dependency '{name}' range '{range}': {error}"
-                    )
-                })?;
-                (
-                    requirement,
-                    WorkspacePeerProvider::Registry {
-                        registry: registry.into(),
-                        package,
-                    },
-                )
-            };
-            peer_dependencies.push(WorkspacePeerDependency {
-                member_key: locked[package_index].key(),
-                manifest_name: name.clone(),
-                requirement,
-                provider,
-            });
-        }
-        for dependency_map in [
-            manifest.dependencies(),
-            manifest.dev_dependencies(),
-            manifest.optional_dependencies(),
-        ] {
-            for (name, range) in dependency_map {
-                let Some((source, version)) = members.get(name) else {
-                    if range.starts_with("workspace:") {
-                        return Err(format!(
-                            "workspace dependency '{}' in member '{}' has no local workspace target; refusing registry fallback",
-                            name,
-                            member.name()
-                        ).into());
+        let interpreted = tapid_resolver::interpret_workspace_member(manifest, &facts, |name| {
+            dependency_identity(registry_config, name).map(|(registry, _)| registry)
+        })?;
+        for dependency in interpreted {
+            let name = dependency.declaration.name;
+            if dependency.declaration.kind == tapid_manifest::DependencyKind::PeerDependencies {
+                let provider = match dependency.target {
+                    tapid_resolver::DeclarationTarget::Workspace => {
+                        let (source, version) = &members[name];
+                        WorkspacePeerProvider::Workspace {
+                            key: LockfilePackageKey::workspace(source.clone()).to_string(),
+                            version: version.clone(),
+                        }
                     }
-                    if copied::declaration(range)
-                        .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                        .is_some()
-                    {
-                        return Err(format!(
-                            "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
-                        ).into());
+                    tapid_resolver::DeclarationTarget::Registry { registry, package } => {
+                        WorkspacePeerProvider::Registry { registry, package }
                     }
-                    let requirement = range.parse::<Requirement>().map_err(|error| {
-                        format!(
-                            "invalid workspace member dependency '{name}' range '{range}': {error}"
-                        )
-                    })?;
-                    let (manifest_registry, local_package) = dep_parts(name)?;
-                    if manifest_registry.to_string() == JSR && requirement.is_alias() {
-                        return Err(format!(
-                            "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                        )
-                        .into());
-                    }
-                    if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
-                        return Err(format!(
-                            "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
-                        ).into());
-                    }
-                    let package = requirement.package_name(&local_package).clone();
-                    let registry = registry_for_requirement(registry_config, name, &requirement)?;
-                    registry_dependencies.push(WorkspaceRegistryDependency {
-                        member_key: locked[package_index].key(),
-                        manifest_name: local_package.to_string(),
-                        registry,
-                        package,
-                        requirement,
-                    });
-                    continue;
                 };
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
-                        "workspace dependency '{}@{}' in member '{}' does not match local member version {}",
-                        name,
-                        range,
-                        member.name(),
-                        version
-                    ).into());
+                peer_dependencies.push(WorkspacePeerDependency {
+                    member_key: locked[package_index].key(),
+                    manifest_name: name.to_owned(),
+                    requirement: dependency.requirement,
+                    provider,
+                });
+            } else {
+                match dependency.target {
+                    tapid_resolver::DeclarationTarget::Workspace => {
+                        let source = &members[name].0;
+                        let target = LockfilePackageKey::workspace(source.clone()).to_string();
+                        locked[package_index]
+                            .add_dependency(name, &target)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    tapid_resolver::DeclarationTarget::Registry { registry, package } => {
+                        registry_dependencies.push(WorkspaceRegistryDependency {
+                            member_key: locked[package_index].key(),
+                            manifest_name: dependency.local_name.to_string(),
+                            registry,
+                            package,
+                            requirement: dependency.requirement,
+                        });
+                    }
                 }
-                let target = LockfilePackageKey::workspace(source.clone()).to_string();
-                locked[package_index]
-                    .add_dependency(name, &target)
-                    .map_err(|error| error.to_string())?;
             }
         }
     }
@@ -548,46 +454,23 @@ fn validate_workspace_peer_providers(
         let WorkspacePeerProvider::Registry { registry, package } = &peer.provider else {
             continue;
         };
-        if !direct_root_dependencies.contains(&(registry.clone(), package.clone()))
-            || !resolution.roots.iter().any(|root| {
-                root.registry == *registry
-                    && root.name == *package
-                    && records
-                        .get(&(
-                            root.registry.to_string(),
-                            root.name.to_string(),
-                            root.version.to_string(),
-                        ))
-                        .is_some_and(|record| {
-                            peer.requirement
-                                .matches_tagged_version(&root.version, &record.dist_tags)
-                        })
-            })
-        {
-            return Err(format!(
-                "workspace member peer dependency '{}' has no direct root provider satisfying {:?}",
-                peer.manifest_name, peer.requirement
-            ));
-        }
+        tapid_resolver::validate_workspace_registry_peer(
+            &peer.manifest_name,
+            &Dependency::new(registry.clone(), package.clone(), peer.requirement.clone()),
+            direct_root_dependencies,
+            resolution,
+            |root| {
+                records
+                    .get(&(
+                        root.registry.to_string(),
+                        root.name.to_string(),
+                        root.version.to_string(),
+                    ))
+                    .map(|record| &record.dist_tags)
+            },
+        )?;
     }
     Ok(())
-}
-
-pub(crate) fn dep_parts(name: &str) -> Result<(RegistryOrigin, PackageName), String> {
-    let (origin, raw) = if let Some(v) = name.strip_prefix("jsr:") {
-        (JSR, v)
-    } else if let Some(v) = name.strip_prefix("npm:") {
-        (NPM, v)
-    } else {
-        (NPM, name)
-    };
-    Ok((
-        origin
-            .parse()
-            .map_err(|e: tapid_core::DomainError| e.to_string())?,
-        raw.parse()
-            .map_err(|e: tapid_core::DomainError| e.to_string())?,
-    ))
 }
 
 fn dependency_identity(
@@ -749,151 +632,57 @@ struct WorkspaceRootResolution {
     overrides: BTreeMap<PackageName, Requirement>,
 }
 
-fn register_local_root_identity(
-    identities: &mut BTreeMap<PackageName, String>,
-    local_name: PackageName,
-    identity: String,
-) -> Result<(), String> {
-    if identities
-        .get(&local_name)
-        .is_some_and(|previous| previous != &identity)
-    {
-        return Err(format!(
-            "conflicting package identities for local dependency '{local_name}'"
-        ));
-    }
-    identities.insert(local_name, identity);
-    Ok(())
-}
-
 fn workspace_root_resolution(
     manifest: &PackageManifest,
     workspace: &WorkspaceMaterialization,
     registry_config: &crate::registry::RegistryConfig,
 ) -> Result<WorkspaceRootResolution, String> {
-    let overrides = manifest_overrides(manifest)?;
-    let mut roots = Vec::new();
-    let mut direct_root_identities = BTreeSet::new();
-    let mut registry_dependencies = Vec::with_capacity(workspace.registry_dependencies.len());
-    let mut local_root_identities = BTreeMap::new();
-    for (name, (source, _)) in &workspace.members {
-        let local_name = name
-            .parse::<PackageName>()
-            .map_err(|error| error.to_string())?;
-        register_local_root_identity(
-            &mut local_root_identities,
-            local_name,
-            format!("workspace:{}", source.path()),
-        )?;
-    }
+    let facts = workspace
+        .members
+        .iter()
+        .map(|(name, (_, version))| (name.clone(), version.clone()))
+        .collect();
+    let dependencies = workspace
+        .registry_dependencies
+        .iter()
+        .map(|dependency| {
+            Ok(Dependency::new(
+                dependency.registry.clone(),
+                dependency
+                    .manifest_name
+                    .parse::<PackageName>()
+                    .map_err(|error| error.to_string())?,
+                dependency.requirement.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let interpreted =
+        tapid_resolver::interpret_workspace_roots(manifest, &facts, &dependencies, |name| {
+            dependency_identity(registry_config, name).map(|(registry, _)| registry)
+        })?;
+    let registry_dependencies = workspace
+        .registry_dependencies
+        .iter()
+        .zip(interpreted.member_requirements)
+        .map(|(dependency, requirement)| {
+            let mut dependency = dependency.clone();
+            dependency.requirement = requirement;
+            dependency
+        })
+        .collect();
     let mut workspace_root_keys = workspace
         .locked
         .iter()
         .map(LockedWorkspacePackage::key)
         .collect::<Vec<_>>();
-    for (kind, map) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-    ] {
-        for (name, range) in map {
-            if let Some((source, version)) = workspace.members.get(name) {
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
-                        "workspace dependency '{name}@{range}' does not match local member version {version}"
-                    ));
-                }
-                let (_, package) = dependency_identity(registry_config, name)?;
-                if overrides
-                    .get(&package)
-                    .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
-                {
-                    return Err(format!(
-                        "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
-                    ));
-                }
-                let local_name = name
-                    .parse::<PackageName>()
-                    .map_err(|error| error.to_string())?;
-                register_local_root_identity(
-                    &mut local_root_identities,
-                    local_name,
-                    format!("workspace:{}", source.path()),
-                )?;
-                workspace_root_keys.push(LockfilePackageKey::workspace(source.clone()).to_string());
-                continue;
-            }
-            if range.starts_with("workspace:") {
-                return Err(format!(
-                    "workspace dependency '{name}@{range}' has no matching local workspace member; refusing registry fallback"
-                ));
-            }
-            if copied::declaration(range)
-                .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                .is_some()
-            {
-                continue;
-            }
-            let requirement = range.parse::<Requirement>().map_err(|error| {
-                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
-            })?;
-            let (manifest_registry, local_package) = dep_parts(name)?;
-            if manifest_registry.to_string() == JSR && requirement.is_alias() {
-                return Err(format!(
-                    "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                ));
-            }
-            let package = requirement.package_name(&local_package).clone();
-            let registry = registry_for_requirement(registry_config, name, &requirement)?;
-            register_local_root_identity(
-                &mut local_root_identities,
-                local_package.clone(),
-                format!("registry:{registry}|{package}"),
-            )?;
-            if overrides
-                .get(&package)
-                .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
-            {
-                return Err(format!(
-                    "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
-                ));
-            }
-            direct_root_identities.insert((registry.clone(), package.clone()));
-            roots.push(Dependency::new(registry, local_package, requirement));
-        }
-    }
-    for dependency in &workspace.registry_dependencies {
-        let (_, local_name) = dep_parts(&dependency.manifest_name)?;
-        register_local_root_identity(
-            &mut local_root_identities,
-            local_name,
-            format!("registry:{}|{}", dependency.registry, dependency.package),
-        )?;
-        let requirement = overrides
-            .get(&dependency.package)
-            .cloned()
-            .unwrap_or_else(|| dependency.requirement.clone());
-        roots.push(Dependency::new(
-            dependency.registry.clone(),
-            dependency
-                .manifest_name
-                .parse()
-                .map_err(|error: tapid_core::DomainError| error.to_string())?,
-            requirement.clone(),
-        ));
-        let mut resolved_dependency = dependency.clone();
-        resolved_dependency.requirement = requirement;
-        registry_dependencies.push(resolved_dependency);
-    }
     workspace_root_keys.sort();
     workspace_root_keys.dedup();
     Ok(WorkspaceRootResolution {
-        roots,
-        direct_root_identities,
+        roots: interpreted.roots,
+        direct_root_identities: interpreted.direct_root_identities,
         workspace_root_keys,
         registry_dependencies,
-        overrides,
+        overrides: interpreted.overrides,
     })
 }
 
