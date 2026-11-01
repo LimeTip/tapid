@@ -1,8 +1,13 @@
 use std::{path::Path, process::Command};
 
 pub fn compile_launcher(destination: &Path) {
-    let source =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/windows_node_launcher.rs");
+    compile_library("windows_node_launcher.rs", destination, &[]);
+}
+
+pub fn compile_library(source: &str, destination: &Path, arguments: &[&str]) {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(source);
     let mut compiler = Command::new("rustc");
     compiler
         .args([
@@ -17,7 +22,8 @@ pub fn compile_launcher(destination: &Path) {
         ])
         .arg(source)
         .arg("-o")
-        .arg(destination);
+        .arg(destination)
+        .args(arguments);
     if let Ok(flags) = std::env::var("RUSTFLAGS") {
         compiler.args(flags.split_whitespace());
     }

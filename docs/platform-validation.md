@@ -521,3 +521,27 @@ An additional negative control at commit `15c82f428ab742b00a177c2101861897abef01
 The post-8cf2c84 Windows implementation embeds a Cargo-built stock-Node compatibility DLL and delegates finite exact read-attributes-only ancestor handles without shared ACL mutation. Integrated Node 22/24 IPC, native realpath, default test isolation and grandchild controls pass on Home build 26200; the real news-site CLI build/test pass. Receipts now disclose component identity and delegated metadata grants. Broader Windows and exact-head CI acceptance remain separate; see the updated Windows scope and standard-Node design.
 
 Hosted Windows Server testing exposed a denied `NUL` open while libuv prepares ignored stdin. The adapter now reuses a pinned copy of Tapid's existing closed stdin pipe for that exact read-only stdio request. It verifies EOF before initialization and propagates the non-inherited handle to suspended descendants. Live pipes, ordinary opens, and null-device writes are excluded; no system device ACL or filesystem grant changes. A forced-denial regression checks the fallback locally; hosted acceptance remains required.
+
+### Secondary application DLL authority controls
+
+The existing nonignored AAP-denial and ARAP-inventory controls now compile an
+isolated Rust primary DLL with a real PE import from `tapid-secondary.dll`.
+The primary stays inside the approved project. A paired approved directory
+contains both libraries; the negative directory exposes only the secondary via
+its private AAP or ARAP ACL. Each load calls the primary export and checks the
+secondary's returned value, then releases the module before changing search
+state. A second approved secondary returns a different value. Host, root and
+descendant controls switch the secondary search location and switch back while
+keeping the primary fixed, checking the returned value on every load. Host
+success distinguishes a valid dependency chain from a missing or
+invalid PE image. Root and descendant approved loads must succeed; the parent
+requires exactly two approved observations and one result per process and
+operation. AAP secondary loads must fail (access denied or missing dependency);
+ARAP results remain characterization. Default loader state is restored after
+both successful and failed attempts.
+
+These controls do not bind secondary bytes into recipes or establish loader
+closure. Native Windows execution is required; cross-compilation does not
+establish their result. Side-by-side manifests, DLL-initialization process
+creation, arbitrary dynamic input resolution and complete runtime authority
+remain unresolved, and authenticated Windows dependency builds remain gated.

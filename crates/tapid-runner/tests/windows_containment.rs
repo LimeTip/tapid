@@ -384,6 +384,21 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
         )
         .unwrap();
     }
+    let primary = project.path().join("primary.dll");
+    let secondary = outside.path().join("tapid-secondary.dll");
+    let alternate_directory = project.path().join("alternate-secondary");
+    fs::create_dir(&alternate_directory).unwrap();
+    windows_node::compile_library("windows_secondary_library.rs", &secondary, &[]);
+    windows_node::compile_library(
+        "windows_secondary_library.rs",
+        &alternate_directory.join("tapid-secondary.dll"),
+        &["--cfg", "alternate_secondary"],
+    );
+    windows_node::compile_library("windows_primary_library.rs", &primary, &[]);
+    let approved_pair = project.path().join("approved-pair");
+    fs::create_dir(&approved_pair).unwrap();
+    fs::copy(&primary, approved_pair.join("primary.dll")).unwrap();
+    fs::copy(&secondary, approved_pair.join("tapid-secondary.dll")).unwrap();
     windows_acl::initialize_inheritance(project.path());
     windows_acl::initialize_inheritance(outside.path());
     let system32 =
@@ -412,11 +427,19 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
         ])
         .env("TAPID_TEST_MARKER", "ambient-target")
         .env("TAPID_TEST_LIBRARY", &undeclared_library)
+        .env("TAPID_TEST_PRIMARY", &primary)
+        .env("TAPID_TEST_SECONDARY_DIRECTORY", outside.path())
         .output()
         .unwrap();
     assert!(host_control.status.success(), "{host_control:?}");
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("undeclared-target-executed"));
     assert!(String::from_utf8_lossy(&host_control.stdout).contains("host-dynamic-library-valid"));
+    assert_eq!(
+        String::from_utf8_lossy(&host_control.stdout)
+            .matches("host-secondary-library-valid")
+            .count(),
+        1
+    );
     resolved_process_probe(&undeclared_executable).expect("host resolved-process positive control");
     // Use an executable outside the undeclared DLL directory: Windows searches
     // the application directory before SetDllDirectoryW. Otherwise this host
@@ -439,6 +462,12 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
     assert!(
         String::from_utf8_lossy(&host_order.stdout)
             .contains("dynamic-library-search-order:verified")
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&host_order.stdout)
+            .matches("secondary-library-search-order:verified")
+            .count(),
+        1
     );
     let baseline = project_dacl(outside.path());
     let root = fs::canonicalize(project.path()).unwrap();
@@ -501,6 +530,18 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
             .count(),
         2
     );
+    assert_eq!(
+        stdout
+            .matches("approved-secondary-library:verified")
+            .count(),
+        2
+    );
+    assert_eq!(
+        stdout
+            .matches("secondary-library-search-order:verified")
+            .count(),
+        2
+    );
     for mode in ["ambient-root", "ambient-child"] {
         for operation in [
             "read",
@@ -511,9 +552,15 @@ fn ambient_authority_probe(trustee: &str, grant: &str) {
             "resolved-load-library",
             "altered-search-library",
             "restricted-search-library",
+            "secondary-library",
         ] {
             let denied = format!("{trustee}:{mode}:{operation}:denied");
             let allowed = format!("{trustee}:{mode}:{operation}:allowed");
+            assert_eq!(
+                stdout.matches(&denied).count() + stdout.matches(&allowed).count(),
+                1,
+                "{stdout}"
+            );
             if trustee == "AAP" {
                 assert!(stdout.contains(&denied), "{stdout}");
                 assert!(!stdout.contains(&allowed), "{stdout}");
@@ -606,6 +653,30 @@ fn windows_ambient_read_probe_helper() {
             ProbeLoader::Extended(flags),
         )
         .expect("approved extended DLL load");
+    }
+    let approved_primary = fs::canonicalize("approved-pair/primary.dll").unwrap();
+    load_secondary_probe(&approved_primary, approved_primary.parent().unwrap(), 273)
+        .expect("approved primary and secondary must load");
+    probe_secondary_search_order(&fs::canonicalize(".").unwrap());
+    println!("approved-secondary-library:verified");
+    let secondary_directory = std::path::Path::new(&outside_executable).parent().unwrap();
+    match load_secondary_probe(
+        &fs::canonicalize("primary.dll").unwrap(),
+        secondary_directory,
+        273,
+    ) {
+        Ok(_) => {
+            assert_ne!(
+                trustee, "AAP",
+                "undeclared AAP secondary DLL must be denied"
+            );
+            println!("{trustee}:{mode}:secondary-library:allowed");
+        }
+        Err(error) => {
+            // Dependency resolution may report missing module instead of access denied.
+            assert!(matches!(error.raw_os_error(), Some(5 | 126)), "{error}");
+            println!("{trustee}:{mode}:secondary-library:denied");
+        }
     }
     let outside_library = fs::read_to_string("outside-library.txt").unwrap();
     let outside_library = std::path::Path::new(&outside_library);
@@ -797,6 +868,43 @@ fn load_searched_authority_probe_library(path: &std::path::Path) -> std::io::Res
     Ok(loaded)
 }
 
+// The primary is approved in both cases; only the secondary directory changes.
+// FreeLibrary releases both images before the next observation.
+fn load_secondary_probe(
+    primary: &std::path::Path,
+    directory: &std::path::Path,
+    expected: u32,
+) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetDllDirectoryW(path: *const u16) -> i32;
+    }
+    let directory: Vec<_> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: loader state is changed only in the isolated probe process.
+    if unsafe { SetDllDirectoryW(directory.as_ptr()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = load_authority_probe_library(primary, ProbeLoader::Secondary(expected));
+    // SAFETY: null restores default search state even after a failed load.
+    assert_ne!(unsafe { SetDllDirectoryW(std::ptr::null()) }, 0);
+    result
+}
+
+fn probe_secondary_search_order(root: &std::path::Path) {
+    // The same primary import must follow each changed secondary search location.
+    // Distinct return values detect a cached module or ignored search mutation.
+    for (directory, expected) in [
+        ("approved-pair", 273),
+        ("alternate-secondary", 274),
+        ("approved-pair", 273),
+    ] {
+        load_secondary_probe(&root.join("primary.dll"), &root.join(directory), expected)
+            .expect("approved secondary search mutation must select the expected bytes");
+    }
+    println!("secondary-library-search-order:verified");
+}
+
 // Each load releases its module before changing the search directory. Identical
 // basenames and exports ensure the assertion detects resolution, not PE validity.
 fn probe_library_search_order(root: &std::path::Path) {
@@ -811,6 +919,7 @@ fn probe_library_search_order(root: &std::path::Path) {
 #[derive(Clone, Copy)]
 enum ProbeLoader {
     Direct,
+    Secondary(u32),
     Resolved,
     Extended(u32),
 }
@@ -870,6 +979,15 @@ fn load_authority_probe_library(
     }
     // SAFETY: module remains loaded through symbol lookup; no N-API code is called.
     let export = unsafe { GetProcAddress(module, c"napi_register_module_v1".as_ptr().cast()) };
+    if let ProbeLoader::Secondary(expected) = loader {
+        assert!(!export.is_null(), "primary fixture export missing");
+        // SAFETY: only the isolated primary fixture uses this loader variant;
+        // its exported C function returns the value imported from the secondary.
+        let value = unsafe {
+            std::mem::transmute::<*const std::ffi::c_void, unsafe extern "C" fn() -> u32>(export)()
+        };
+        assert_eq!(value, expected, "secondary fixture export must execute");
+    }
     let mut loaded_path = vec![0_u16; 32_768];
     // SAFETY: module is live and the owned buffer has the advertised capacity.
     let length =
@@ -900,8 +1018,19 @@ fn load_authority_probe_library(
 #[test]
 fn windows_ambient_execution_target_helper() {
     if std::env::var("TAPID_TEST_MARKER").as_deref() == Ok("ambient-target") {
+        if let Some(primary) = std::env::var_os("TAPID_TEST_PRIMARY") {
+            let directory = std::env::var_os("TAPID_TEST_SECONDARY_DIRECTORY").unwrap();
+            load_secondary_probe(
+                std::path::Path::new(&primary),
+                std::path::Path::new(&directory),
+                273,
+            )
+            .expect("host primary with secondary dependency must load");
+            println!("host-secondary-library-valid");
+        }
         if let Some(root) = std::env::var_os("TAPID_TEST_SEARCH_ROOT") {
             probe_library_search_order(std::path::Path::new(&root));
+            probe_secondary_search_order(std::path::Path::new(&root));
         }
         if let Some(library) = std::env::var_os("TAPID_TEST_LIBRARY") {
             let library = PathBuf::from(library);
