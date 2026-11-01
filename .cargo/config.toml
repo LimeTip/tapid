@@ -2,3 +2,6 @@
 # scripts/dev.ts additionally shares artifacts across Git worktrees.
 [build]
 target-dir = "target"
+# Keep default compilation within memory-constrained validation workers.
+# CARGO_BUILD_JOBS or --jobs can override this on larger machines.
+jobs = 1

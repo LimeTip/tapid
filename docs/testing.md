@@ -58,9 +58,12 @@ The wrapper selects `<git-common-dir>/target/dev` using Git's canonical common d
 
 An explicit `CARGO_TARGET_DIR` takes precedence. Direct `cargo` commands use the root worktree's `target` directory for both workspaces through `.cargo/config.toml`, but do not share it across worktrees. Commands and documentation that need a binary should obtain the target path from `node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked` rather than assume `target/debug/tapid` after a wrapper build.
 
-For memory-constrained isolated workers, set `CARGO_BUILD_JOBS=1` in the worker
-environment for the entire validation command. Cargo otherwise builds multiple
-crates concurrently, which can increase peak memory use. If a compiler exits with
+Cargo defaults to one compilation job through `.cargo/config.toml`, so isolated
+validation commands also use bounded compilation concurrency without an extra
+environment setup step. Larger machines can override this with `CARGO_BUILD_JOBS`
+or `--jobs`. For memory-constrained isolated workers, keep `CARGO_BUILD_JOBS=1` in the worker
+environment for the entire validation command. Multiple concurrent compiler
+processes can increase peak memory use. If a compiler exits with
 `SIGKILL` without a Rust diagnostic, inspect worker memory limits and competing
 builds before treating it as a source failure; the signal alone does not establish
 the cause. Retry the unchanged validation lane with one build job, preserving all
