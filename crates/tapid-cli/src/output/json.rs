@@ -5,6 +5,8 @@ use crate::application::outcome::{
 mod cache;
 mod dependency;
 mod explain;
+mod lock_graph;
+pub(crate) use lock_graph::lock_graph;
 mod outdated;
 mod preview;
 mod tools;
