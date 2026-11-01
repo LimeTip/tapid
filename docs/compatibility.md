@@ -74,12 +74,47 @@ Local fixtures are runtime-derived and do not imply live registry or cross-platf
 
 ## npm workspaces
 
-Run commands from the workspace root, or pass `--project-dir <root>`. Tapid does
-not search ancestor directories for a workspace root. With no `--workspace`,
-commands select the root manifest or root script. `--workspace <name>` selects
-one member by its exact package name, including its scope. Paths, multiple
-selectors, and an implicit selection from the current member directory are not
-supported.
+Install, add, remove, update, prune, offline/frozen install, run, and their
+previews discover the owning project from the current directory. From
+`apps/news` or its descendants, these commands select the declared `news`
+member; from `packages/ui`, they select `@example/ui`. The root continues to
+own registry configuration, credentials, lockfile, store coordination,
+transactions, activation, overrides, and run policy. Selection changes only the
+mutation manifest or script cwd; installation still activates the full graph.
+
+Selection precedence is:
+
+1. Explicit `--project-dir PATH` targets exactly that directory, relative to the
+   invocation cwd. It disables ancestor discovery and location inference, even
+   for `--project-dir .`. An explicitly targeted member directory is treated as
+   an independent project; invalid explicit roots fail without fallback.
+2. `--workspace NAME` selects an exact declared package name, including its scope,
+   within the explicit or discovered owner. It overrides location inference.
+   Unknown names fail without searching another owner.
+3. Otherwise, canonical cwd ancestry is searched for the nearest manifest with a
+   workspace declaration. Member manifests do not stop the search. The nearest
+   workspace is independent of outer workspaces; invalid nearer manifests or
+   declarations fail rather than falling back. Without a workspace, the nearest
+   package is the standalone owner. Without any package, use `--project-dir`.
+4. Within that owner, the unique member containing canonical cwd is inferred.
+   The root and ordinary directories outside declared members select the root.
+   An intervening undeclared package fails with guidance to declare membership
+   or explicitly select a project/member. Multiple containing members require an
+   explicit exact-name selector; this cannot bypass topology validation.
+
+Containment uses path components, so `apps/newsletter` is not inside
+`apps/news`. Internal directory symlinks use their canonical targets. An alias
+resolving outside a workspace cannot establish membership by its lexical path.
+External member targets, manifest symlinks, nonregular/oversized manifests, and
+forbidden paths fail before mutation. Only absent manifests are skipped;
+malformed or unreadable ancestor manifests fail with their path. These checks
+retain existing pathname race limitations, rather than establishing a snapshot.
+
+Member scripts run from the selected member directory under root policy, with
+permission paths relative to the root. Trusted run result files must be outside
+the entire discovered root, including sibling members. Inspection commands
+(why, outdated, status, explain), ci, and import retain their exact-root behavior.
+Path selectors and multiple selectors remain unsupported.
 
 Root `workspaces` accepts a string, an array of strings, or an object whose
 `packages` field is a string or array. Patterns use relative directory paths
@@ -90,7 +125,8 @@ sorted by package name. Directories without a `package.json` entry are ignored;
 existing non-regular entries, including dangling manifest symlinks, are rejected. A
 missing directory traversed to expand `*` produces an error. Root and member
 manifest reads are limited to 32 MiB each; oversized manifests fail discovery
-before parsing.
+before parsing. Root-script execution additionally retains its 1 MiB selected
+manifest limit; member scripts use the workspace discovery limit.
 
 Recursive `**`, partial-component wildcards such as `ui*`, `?`, character
 classes, braces, negation, extglobs, and backslash escapes are rejected with a

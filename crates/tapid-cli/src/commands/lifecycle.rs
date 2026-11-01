@@ -91,14 +91,13 @@ pub(crate) struct CommonArgs {
     #[arg(
         long,
         value_name = "PATH",
-        default_value = ".",
-        help = "Project directory containing package.json and tapid.lock"
+        help = "Exact project root; mutations discover ancestors when omitted (outdated uses cwd)"
     )]
-    pub(crate) project_dir: PathBuf,
+    pub(crate) project_dir: Option<PathBuf>,
     #[arg(
         long,
         value_name = "NAME",
-        help = "Select workspace member by name; default is the manifest in --project-dir"
+        help = "Select workspace member by name (exact package name); overrides inferred selection"
     )]
     pub(crate) workspace: Option<String>,
     #[arg(
@@ -124,7 +123,10 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
     if args.packages.is_empty() {
         return crate::output::json::failure_or_human(
             &OperationFailure::unchanged(
-                &args.common.project_dir,
+                args.common
+                    .project_dir
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".")),
                 OperationalError::new(
                     ErrorKind::InvalidRequest,
                     "add requires at least one package",
@@ -165,7 +167,10 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
     if args.packages.is_empty() {
         return crate::output::json::failure_or_human(
             &OperationFailure::unchanged(
-                &args.common.project_dir,
+                args.common
+                    .project_dir
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".")),
                 OperationalError::new(
                     ErrorKind::InvalidRequest,
                     "remove requires at least one package",
@@ -184,11 +189,19 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
     use crate::application::lifecycle::{SavePolicy, UpdateRequest};
     let result = (|| {
-        let selection = crate::application::lifecycle::resolve_workspace(
-            &args.common.project_dir,
+        let selection = crate::application::lifecycle::resolve_invocation(
+            args.common.project_dir.as_deref(),
             args.common.workspace.as_deref(),
         )
-        .map_err(|error| OperationFailure::unchanged(&args.common.project_dir, error))?;
+        .map_err(|error| {
+            OperationFailure::unchanged(
+                args.common
+                    .project_dir
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".")),
+                error,
+            )
+        })?;
         let plan = crate::application::lifecycle::plan_update(
             &selection.manifest,
             &args.packages,
@@ -249,7 +262,10 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
 
 pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
     match crate::application::lifecycle::outdated_report(
-        &args.common.project_dir,
+        args.common
+            .project_dir
+            .as_deref()
+            .unwrap_or(std::path::Path::new(".")),
         args.common.workspace.as_deref(),
         args.common.registry_fixture.as_deref(),
         args.offline,
@@ -288,14 +304,20 @@ pub(crate) fn outdated(args: OutdatedArgs, json: bool) -> ExitCode {
 }
 
 pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
-    let selection = match crate::application::lifecycle::resolve_workspace(
-        &args.common.project_dir,
+    let selection = match crate::application::lifecycle::resolve_invocation(
+        args.common.project_dir.as_deref(),
         args.common.workspace.as_deref(),
     ) {
         Ok(selection) => selection,
         Err(error) => {
             return crate::output::json::failure_or_human(
-                &OperationFailure::unchanged(&args.common.project_dir, error),
+                &OperationFailure::unchanged(
+                    args.common
+                        .project_dir
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new(".")),
+                    error,
+                ),
                 "prune",
                 json,
             );
@@ -334,11 +356,19 @@ fn mutate_and_install(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
 ) -> Result<LifecycleReport, OperationFailure> {
-    let selection = crate::application::lifecycle::resolve_workspace(
-        &common.project_dir,
+    let selection = crate::application::lifecycle::resolve_invocation(
+        common.project_dir.as_deref(),
         common.workspace.as_deref(),
     )
-    .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
+    .map_err(|error| {
+        OperationFailure::unchanged(
+            common
+                .project_dir
+                .as_deref()
+                .unwrap_or(std::path::Path::new(".")),
+            error,
+        )
+    })?;
     let plan = planner(&selection.manifest)
         .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
     let mode = if refresh {
@@ -442,7 +472,7 @@ mod tests {
                 optional: false,
                 peer: true,
                 common: CommonArgs {
-                    project_dir: project.clone(),
+                    project_dir: Some(project.clone()),
                     workspace: None,
                     store_dir: Some(project.join("store")),
                     registry_fixture: Some(fixture),
@@ -453,7 +483,7 @@ mod tests {
         );
 
         assert_eq!(result, ExitCode::SUCCESS);
-        let manifest = crate::commands::manifest::read_manifest(&package).unwrap();
+        let manifest = crate::commands::manifest::read_manifest_typed(&package).unwrap();
         assert!(!manifest.dependencies().contains_key("react"));
         assert_eq!(
             manifest
@@ -498,7 +528,7 @@ mod stale_tests {
         let newer = br#"{"name":"app","version":"1.0.0","description":"another writer"}"#;
         let fixture = project.write("registry.json", br#"{"packages":[{"registry":"https://jsr.io","name":"@scope/placeholder","version":"1.0.0","artifact":"unused"}]}"#).unwrap();
         let common = CommonArgs {
-            project_dir: project.path().to_owned(),
+            project_dir: Some(project.path().to_owned()),
             workspace: None,
             store_dir: Some(project.path().join("store")),
             registry_fixture: Some(fixture),

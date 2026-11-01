@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn child_output_is_forwarded_to_its_matching_stream_without_text_conversion() {

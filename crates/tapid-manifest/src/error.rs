@@ -13,12 +13,15 @@ pub struct ManifestDiagnostic {
 #[derive(Debug)]
 pub enum WorkspaceError {
     Discovery(String),
+    Selection(String),
     DiscoveryLimitExceeded,
     ManifestRead {
         path: std::path::PathBuf,
         message: String,
     },
     Manifest {
+        /// True when parsing a declared member during owner validation.
+        member: bool,
         path: std::path::PathBuf,
         diagnostic: Box<ManifestDiagnostic>,
         error: Box<ManifestError>,
@@ -33,7 +36,7 @@ impl From<String> for WorkspaceError {
 impl fmt::Display for WorkspaceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Discovery(message) => f.write_str(message),
+            Self::Discovery(message) | Self::Selection(message) => f.write_str(message),
             Self::ManifestRead { message, .. } => f.write_str(message),
             Self::DiscoveryLimitExceeded => f.write_str("workspace discovery limit exceeded"),
             Self::Manifest { path, error, .. } => {
@@ -46,7 +49,10 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Manifest { error, .. } => Some(error.as_ref()),
-            Self::Discovery(_) | Self::DiscoveryLimitExceeded | Self::ManifestRead { .. } => None,
+            Self::Discovery(_)
+            | Self::Selection(_)
+            | Self::DiscoveryLimitExceeded
+            | Self::ManifestRead { .. } => None,
         }
     }
 }
