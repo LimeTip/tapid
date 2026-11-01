@@ -2,6 +2,8 @@ use super::*;
 use crate::application::lifecycle::UpdateRequest;
 
 pub(super) struct ResolvedGraph {
+    pub workspace_manifests: BTreeMap<String, PackageManifest>,
+    pub omissions: Vec<tapid_lockfile::AcceptedOmission>,
     pub candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub updated_manifest: Option<PackageManifest>,
     pub metadata_lookups: usize,
@@ -28,10 +30,11 @@ pub(super) fn resolve_package_graph(
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> Result<ResolvedGraph, OperationalError> {
     let WorkspaceRootResolution {
+        mut entry_points,
         mut roots,
         direct_root_identities: mut root_registry_identities,
         workspace_root_keys,
-        registry_dependencies: workspace_registry_dependencies,
+        registry_dependencies: mut workspace_registry_dependencies,
         overrides,
     } = workspace_root_resolution(manifest, &workspace, registry_config)?;
     let direct_local_names = manifest
@@ -42,6 +45,7 @@ pub(super) fn resolve_package_graph(
         .map(|name| dep_parts(name).map(|(_, name)| name))
         .collect::<Result<BTreeSet<_>, _>>()?;
     let WorkspaceMaterialization {
+        manifests: workspace_manifests,
         links: workspace_links,
         locked: workspace_locked,
         members: _,
@@ -111,8 +115,12 @@ pub(super) fn resolve_package_graph(
                     dependencies: p.dependencies.clone(),
                     peer_dependencies: p.peer_dependencies.clone(),
                     optional_peer_dependencies: p.optional_peer_dependencies.clone(),
-                    optional_dependencies: BTreeMap::new(),
-                    platform: PackagePlatform::unrestricted(),
+                    optional_dependencies: p.optional_dependencies.clone(),
+                    platform: PackagePlatform {
+                        os: p.os.clone(),
+                        cpu: p.cpu.clone(),
+                        libc: p.libc.clone(),
+                    },
                     fixture: true,
                 },
             );
@@ -129,6 +137,30 @@ pub(super) fn resolve_package_graph(
     let mut copied_records = BTreeMap::new();
     for (dependency, record) in copied_roots {
         root_registry_identities.insert((dependency.registry.clone(), record.name.clone()));
+        for (section, map) in [
+            (
+                tapid_resolver::EntryPointSection::Dependencies,
+                manifest.dependencies(),
+            ),
+            (
+                tapid_resolver::EntryPointSection::DevDependencies,
+                manifest.dev_dependencies(),
+            ),
+            (
+                tapid_resolver::EntryPointSection::OptionalDependencies,
+                manifest.optional_dependencies(),
+            ),
+        ] {
+            if map.contains_key(dependency.name.as_str()) {
+                entry_points.push((
+                    dependency.clone(),
+                    tapid_resolver::EntryPoint {
+                        workspace: None,
+                        section,
+                    },
+                ));
+            }
+        }
         roots.push(dependency);
         copied_records.insert(
             (
@@ -307,8 +339,142 @@ pub(super) fn resolve_package_graph(
             seed.extend(provider_records);
         }
     }
+    let mut omissions = Vec::new();
+    {
+        let required = entry_points
+            .iter()
+            .filter(|(_, entry)| {
+                entry.section != tapid_resolver::EntryPointSection::OptionalDependencies
+            })
+            .map(|(dependency, _)| {
+                (
+                    dependency.registry.clone(),
+                    dependency
+                        .requirement
+                        .package_name(&dependency.name)
+                        .clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let mut absent = BTreeSet::new();
+        for (dependency, entry) in &entry_points {
+            let actual = dependency.requirement.package_name(&dependency.name);
+            let identity = (dependency.registry.clone(), actual.clone());
+            if entry.section != tapid_resolver::EntryPointSection::OptionalDependencies
+                || required.contains(&identity)
+                || dependency.registry.registry().is_none()
+            {
+                continue;
+            }
+            // Preserve compatible locked roots outside an explicit refresh scope.
+            // Their existing artifact pin does not require packument availability.
+            if preferred
+                .roots
+                .get(&(
+                    dependency.registry.clone(),
+                    dependency.name.clone(),
+                    actual.clone(),
+                ))
+                .is_some_and(|version| {
+                    seed.iter().any(|record| {
+                        record.registry == dependency.registry
+                            && &record.name == actual
+                            && &record.version == version
+                            && dependency.requirement.matches_locked_version(version)
+                            && current_platform_matches(&record.platform)
+                    })
+                })
+            {
+                continue;
+            }
+            // Fetch errors remain fatal. Candidate eligibility uses the same typed
+            // normalization as resolution, without interpreting display strings.
+            let candidates = fetch_records(&dependency.registry, actual)?;
+            let matching = candidates
+                .iter()
+                .filter(|candidate| {
+                    dependency
+                        .requirement
+                        .matches_tagged_version(&candidate.version, &candidate.dist_tags)
+                })
+                .collect::<Vec<_>>();
+            let reason = if candidates.is_empty() {
+                Some(tapid_lockfile::OmissionReason::MetadataAbsent)
+            } else if !matching.is_empty()
+                && matching
+                    .iter()
+                    .all(|candidate| !current_platform_matches(&candidate.platform))
+            {
+                Some(tapid_lockfile::OmissionReason::IncompatiblePlatform)
+            } else if matching.iter().all(|candidate| {
+                let mut candidate = (*candidate).clone();
+                resolution::apply_overrides(&mut candidate, &overrides);
+                resolution::normalize_record(&candidate).is_err()
+            }) {
+                Some(tapid_lockfile::OmissionReason::NoUsableCandidate)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                absent.insert((
+                    entry.clone(),
+                    dependency.registry.clone(),
+                    dependency.name.clone(),
+                ));
+                omissions.push(tapid_lockfile::AcceptedOmission {
+                    original_requirement: None,
+                    origin: entry
+                        .workspace
+                        .as_ref()
+                        .map_or(tapid_lockfile::OmissionOrigin::Root, |key| {
+                            tapid_lockfile::OmissionOrigin::Workspace { key: key.clone() }
+                        }),
+                    name: dependency.name.to_string(),
+                    requirement: dependency.requirement.raw.clone(),
+                    registry: dependency.registry.to_string(),
+                    target: None,
+                    reason,
+                });
+            } else {
+                seed.extend(candidates);
+            }
+        }
+        entry_points.retain(|(dependency, entry)| {
+            !absent.contains(&(
+                entry.clone(),
+                dependency.registry.clone(),
+                dependency.name.clone(),
+            ))
+        });
+        roots = entry_points
+            .iter()
+            .map(|(dependency, _)| dependency.clone())
+            .collect();
+        workspace_registry_dependencies.retain(|dependency| {
+            !omissions.iter().any(|omission| {
+                omission.origin
+                    == tapid_lockfile::OmissionOrigin::Workspace {
+                        key: dependency.member_key.clone(),
+                    }
+                    && omission.name == dependency.manifest_name
+            })
+        });
+        root_registry_identities = entry_points
+            .iter()
+            .filter(|(_, entry)| entry.workspace.is_none())
+            .map(|(dependency, _)| {
+                (
+                    dependency.registry.clone(),
+                    dependency
+                        .requirement
+                        .package_name(&dependency.name)
+                        .clone(),
+                )
+            })
+            .collect();
+    }
     resolving.set(true);
-    let (resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
+    let (mut resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
         &overrides,
@@ -330,6 +496,43 @@ pub(super) fn resolve_package_graph(
         }
         error
     })?;
+    // Reattach manifest facts captured before root constraint deduplication.
+    let entry_bindings: BTreeSet<_> = entry_points
+        .iter()
+        .map(|(dependency, _)| (dependency.registry.clone(), dependency.name.clone()))
+        .collect();
+    resolution.declarations.retain(|edge| {
+        edge.parent.is_some()
+            || !entry_bindings.contains(&(edge.target.registry.clone(), edge.name.clone()))
+    });
+    for (dependency, entry_point) in entry_points {
+        let target = resolution
+            .root_bindings
+            .get(&(dependency.registry, dependency.name.clone()))
+            .ok_or_else(|| {
+                OperationalError::new(
+                    ErrorKind::Resolution,
+                    "missing selected entry-point binding",
+                )
+            })?;
+        resolution
+            .declarations
+            .push(tapid_resolver::ResolvedDeclaration {
+                parent: None,
+                entry_point: Some(entry_point.clone()),
+                name: dependency.name,
+                requirement: dependency.requirement,
+                target: target.clone(),
+                kind: if entry_point.section
+                    == tapid_resolver::EntryPointSection::OptionalDependencies
+                {
+                    tapid_resolver::DeclarationKind::Optional
+                } else {
+                    tapid_resolver::DeclarationKind::Required
+                },
+            });
+    }
+    resolution.declarations.sort();
     resolving.set(false);
     validate_workspace_peer_providers(
         &workspace_peer_dependencies,
@@ -350,6 +553,8 @@ pub(super) fn resolve_package_graph(
         })
         .transpose()?;
     Ok(ResolvedGraph {
+        workspace_manifests,
+        omissions,
         candidate_exclusions,
         updated_manifest,
         metadata_lookups,
@@ -383,6 +588,82 @@ pub(super) fn workspace_registry_target<'a>(
 mod tests {
     use super::*;
     use crate::application::lifecycle::{SavePolicy, plan_update};
+
+    #[test]
+    fn root_workspace_overlap_retains_required_and_optional_entry_points() {
+        for (workspace_required, optional_only) in [(false, false), (true, false), (true, true)] {
+            let project = tapid_test_support::TempProject::new("entry-overlap").unwrap();
+            let root = if workspace_required {
+                r#"{"name":"app","version":"1.0.0","workspaces":["member"],"optionalDependencies":{"shared":"1"}}"#
+            } else {
+                r#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1"},"optionalDependencies":{"shared":"1"}}"#
+            };
+            project.write("package.json", root.as_bytes()).unwrap();
+            if workspace_required {
+                let member = if optional_only {
+                    r#"{"name":"member","version":"1.0.0","optionalDependencies":{"shared":"1"}}"#
+                } else {
+                    r#"{"name":"member","version":"1.0.0","dependencies":{"shared":"1"}}"#
+                };
+                project
+                    .write("member/package.json", member.as_bytes())
+                    .unwrap();
+            }
+            let fixture = serde_json::json!({"packages":[{"registry":NPM,"name":"shared","version":"1.0.0","integrity":integrity(b"shared").to_string(),"artifact":"never-download"}]});
+            let fixture = project
+                .write("registry.json", fixture.to_string().as_bytes())
+                .unwrap();
+            let manifest = PackageManifest::parse(root).unwrap();
+            let config = crate::registry::RegistryConfig::default();
+            let mut graph = resolve_package_graph(
+                project.path(),
+                &manifest,
+                workspace_materialization(project.path(), &config).unwrap(),
+                Some(&fixture),
+                false,
+                &config,
+                None,
+                None,
+                |_| {},
+            )
+            .unwrap();
+            let entries = &graph.resolution.declarations;
+            assert_eq!(entries.len(), 2);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|edge| edge.kind == tapid_resolver::DeclarationKind::Optional)
+                    .count(),
+                if optional_only { 2 } else { 1 }
+            );
+            assert!(entries.iter().all(|edge| edge.entry_point.is_some()));
+            let failed = graph.resolution.selected.iter().cloned().collect();
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|edge| edge.entry_point.as_ref().unwrap().workspace.is_some())
+                    .count(),
+                usize::from(workspace_required)
+            );
+            for reverse in [false, true] {
+                if reverse {
+                    graph.resolution.declarations.reverse();
+                }
+                let result = graph.resolution.prune_unavailable(&failed);
+                if optional_only {
+                    let pruned = result.unwrap();
+                    assert!(pruned.resolution.selected.is_empty());
+                    assert_eq!(pruned.cuts.len(), 2);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(tapid_resolver::PruneError::RequiredDeclaration(_))
+                    ));
+                }
+            }
+            assert!(graph.resolution.prune_unavailable(&BTreeSet::new()).is_ok());
+        }
+    }
 
     #[test]
     fn peer_only_save_reuses_metadata_retrieved_for_a_transitive_dependency() {

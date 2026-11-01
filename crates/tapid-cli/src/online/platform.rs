@@ -1,6 +1,14 @@
 //! Host platform detection for package compatibility.
 use tapid_core::PackagePlatform;
 
+pub(crate) fn selection_target() -> tapid_lockfile::SelectionTarget {
+    tapid_lockfile::SelectionTarget {
+        os: std::env::consts::OS.into(),
+        cpu: std::env::consts::ARCH.into(),
+        libc: current_libc().map(str::to_owned),
+    }
+}
+
 pub(crate) fn current_libc() -> Option<&'static str> {
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     {

@@ -25,7 +25,10 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
             if json {
                 return crate::output::json::why_success(&report, &args.project_dir);
             }
-            if report.paths.is_empty() {
+            if report.paths.is_empty()
+                && report.omissions.is_empty()
+                && report.imported_omissions.is_empty()
+            {
                 if report.truncated {
                     println!(
                         "No complete path to '{}' was found before the search safety bound; this result is incomplete.",
@@ -37,7 +40,7 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                         report.package
                     );
                 }
-            } else {
+            } else if !report.paths.is_empty() {
                 println!("Dependency paths to {}:", report.package);
                 for (index, path) in report.paths.iter().enumerate() {
                     let mut line = String::from("project root");
@@ -51,11 +54,70 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                 for warning in &report.warnings {
                     println!("warning: {warning}");
                 }
-                if report.truncated {
-                    println!("Additional paths were omitted or traversal reached a safety bound.");
-                }
             }
-            if report.paths.is_empty() && !report.truncated {
+            if let Some(selection) = &report.selection {
+                let (os, _) = crate::output::json::text(&selection.target.os);
+                let (cpu, _) = crate::output::json::text(&selection.target.cpu);
+                let (libc, _) = crate::output::json::text(
+                    selection.target.libc.as_deref().unwrap_or("unspecified"),
+                );
+                let profile = match selection.profile {
+                    tapid_lockfile::SelectionProfile::Development => "development",
+                    tapid_lockfile::SelectionProfile::Production => "production",
+                };
+                println!("Recorded selection: {os}/{cpu}, libc={libc}, profile={profile}.");
+            }
+            for omission in &report.omissions {
+                let (name, _) = crate::output::json::text(&omission.name);
+                let (requirement, _) = crate::output::json::text(&omission.requirement);
+                let reason = match omission.reason {
+                    tapid_lockfile::OmissionReason::MetadataAbsent => "metadata absent",
+                    tapid_lockfile::OmissionReason::NoUsableCandidate => "no usable candidate",
+                    tapid_lockfile::OmissionReason::IncompatiblePlatform => "incompatible platform",
+                    tapid_lockfile::OmissionReason::ImportedPlacementAbsent => {
+                        "imported placement absent"
+                    }
+                };
+                let origin = match &omission.origin {
+                    tapid_lockfile::OmissionOrigin::Root => "project root".to_owned(),
+                    tapid_lockfile::OmissionOrigin::Workspace { key }
+                    | tapid_lockfile::OmissionOrigin::Package { key } => display_key(key),
+                };
+                let (origin, _) = crate::output::json::text(origin);
+                println!(
+                    "Optional dependency {name}@{requirement} from {origin} omitted: {reason} (recorded selection)."
+                );
+            }
+            for omission in &report.imported_omissions {
+                let (name, _) = crate::output::json::text(&omission.name);
+                let (requirement, _) = crate::output::json::text(&omission.requirement);
+                let origin = if omission.declaring_placement.is_empty() {
+                    "project root"
+                } else {
+                    &omission.declaring_placement
+                };
+                let (origin, _) = crate::output::json::text(origin);
+                let reason = match omission.reason {
+                    tapid_lockfile::OmissionReason::IncompatiblePlatform => "incompatible platform",
+                    tapid_lockfile::OmissionReason::ImportedPlacementAbsent => {
+                        "imported placement absent"
+                    }
+                    _ => unreachable!("validated imported omission reason"),
+                };
+                println!(
+                    "Optional dependency {name}@{requirement} from {origin} omitted: {reason} (recorded selection)."
+                );
+            }
+            if report.truncated {
+                println!(
+                    "Additional paths or omission records were omitted, or traversal reached a safety bound."
+                );
+            }
+            if report.paths.is_empty()
+                && report.omissions.is_empty()
+                && report.imported_omissions.is_empty()
+                && !report.truncated
+            {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS

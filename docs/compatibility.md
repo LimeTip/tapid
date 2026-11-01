@@ -252,3 +252,37 @@ Copied declarations in workspace members or published package dependency maps,
 live directory dependencies, Git preparation hooks, and approved copied-package
 lifecycle execution are outside this contract. Copied sources do not fall back
 to registry resolution. See [ADR 0009](adr/0009-immutable-copied-dependency-sources.md).
+
+## Bounded optional-failure comparison
+
+The explicit development oracle `optional_failure_stages_match_pinned_npm_baseline`
+in `crates/tapid-cli/tests/npm_import.rs` requires npm **10.9.9**. It uses isolated
+projects, homes, configuration and caches, local archives and `--offline`; it
+never queries a registry. Enable it by setting `TAPID_NPM_OPTIONAL_ORACLE` to the
+npm executable when running that test through `scripts/dev.ts`. Without that
+variable the oracle does not execute. A different npm version fails the oracle
+rather than silently updating the baseline.
+
+```sh
+TAPID_NPM_OPTIONAL_ORACLE="$(command -v npm)" node --experimental-strip-types scripts/dev.ts test -p tapid --test npm_import --all-features --locked optional_failure_stages_match_pinned_npm_baseline
+```
+
+| Stage in pinned local fixture | npm required | npm optional | Tapid selected optional package |
+| --- | --- | --- | --- |
+| Missing local archive | Abort (`ENOENT`) | Omit | Abort |
+| Malformed archive | Abort (`TAR_BAD_ARCHIVE`) | Omit | Abort |
+| Integrity mismatch | Abort (`EINTEGRITY`) | Omit | Abort |
+| Incompatible OS | Abort (`EBADPLATFORM`) | Omit | Omit when optional-only |
+
+The artifact-failure differences are deliberate: an optional edge does not
+relax Tapid's artifact verification or turn an incomplete download into an
+accepted graph cut. Tapid's required/optional rollback fixture checks artifact
+read failures, malformed archives, archive limits and integrity mismatches.
+Its transaction recovery fixture also checks optional additions at the five
+existing pre-commit and commit-decision crash checkpoints. The hook-failure
+fixture checks both required and optional packages, including exact approval on
+Unix with the explicit unsafe execution override; that control verifies rollback
+and reporting, not native containment. These are bounded fixture results, not
+complete npm compatibility or native platform acceptance. The local archive
+absence case is not evidence of registry metadata absence, authentication,
+transport failure or npm's network retry policy.

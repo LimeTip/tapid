@@ -80,6 +80,7 @@ pub(crate) fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, T
 enum AttemptOutcome {
     Complete(HttpResponse),
     Retry(String, Option<Duration>),
+    RetryStatus(u16, Option<Duration>),
     Fatal(TransportError),
 }
 
@@ -91,6 +92,15 @@ fn execute_bounded_get(
         match operation() {
             AttemptOutcome::Complete(response) => return Ok(response),
             AttemptOutcome::Fatal(error) => return Err(error),
+            AttemptOutcome::RetryStatus(_, delay) if attempt < MAX_GET_ATTEMPTS => {
+                wait(attempt, delay)
+            }
+            AttemptOutcome::RetryStatus(status, _) => {
+                return Err(TransportError::HttpStatusExhausted {
+                    status,
+                    attempts: attempt,
+                });
+            }
             AttemptOutcome::Retry(_reason, delay) if attempt < MAX_GET_ATTEMPTS => {
                 wait(attempt, delay)
             }
@@ -388,8 +398,8 @@ impl HttpsTransport {
                 };
                 let status = response.status().as_u16();
                 if should_retry_status(status) {
-                    return AttemptOutcome::Retry(
-                        format!("HTTP status {status}"),
+                    return AttemptOutcome::RetryStatus(
+                        status,
                         retry_after_delay(status, response.headers()),
                     );
                 }
@@ -608,6 +618,39 @@ mod tests {
             headers.accept.as_deref(),
             Some("application/vnd.npm.install-v1+json")
         );
+    }
+
+    #[test]
+    fn artifact_download_preserves_exhausted_server_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("https://{}", listener.local_addr().unwrap());
+        let servers = (0..3)
+            .map(|_| {
+                serve_one_tls_response(
+                    listener.try_clone().unwrap(),
+                    local_tls_server_config(),
+                    "503 Service Unavailable",
+                    String::new(),
+                    Vec::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let transport = local_authenticated_transport(std::slice::from_ref(&origin), Vec::new());
+
+        let result = crate::download_artifact(&transport, &format!("{origin}/native.tgz"));
+
+        for server in servers {
+            server.join().unwrap();
+        }
+        assert!(matches!(
+            result,
+            Err(crate::RegistryClientError::Transport(
+                TransportError::HttpStatusExhausted {
+                    status: 503,
+                    attempts: 3
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -862,6 +905,29 @@ mod tests {
 
         assert_eq!(attempts, 1);
         assert!(matches!(result, Err(TransportError::OriginNotAllowed(_))));
+    }
+
+    #[test]
+    fn retry_runner_preserves_exhausted_http_status_without_parsing_messages() {
+        for status in [429, 500, 502, 503, 504] {
+            let mut attempts = 0;
+            let error = execute_bounded_get(
+                || {
+                    attempts += 1;
+                    AttemptOutcome::RetryStatus(status, None)
+                },
+                |_, _| {},
+            )
+            .unwrap_err();
+            assert_eq!(attempts, 3);
+            assert_eq!(
+                error,
+                TransportError::HttpStatusExhausted {
+                    status,
+                    attempts: 3
+                }
+            );
+        }
     }
 
     #[test]

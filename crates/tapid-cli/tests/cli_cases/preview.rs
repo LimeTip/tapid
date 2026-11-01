@@ -987,3 +987,157 @@ fn dependency_dry_run_matches_real_operations_on_equivalent_projects() {
         }
     }
 }
+
+#[test]
+fn dependency_dry_run_retains_recorded_optional_omissions() {
+    use tapid_lockfile::*;
+    let scenario = CliFixture::new("preview-omissions");
+    let manifest = r#"{"name":"app","version":"1.0.0","optionalDependencies":{"missing":"^1"}}"#;
+    scenario
+        .project
+        .write("package.json", manifest.as_bytes())
+        .unwrap();
+    let mut lock = lock_for_manifest(manifest);
+    lock.set_selection(LockedSelection {
+        target: SelectionTarget {
+            os: std::env::consts::OS.into(),
+            cpu: std::env::consts::ARCH.into(),
+            libc: if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                Some("glibc".into())
+            } else if cfg!(all(target_os = "linux", target_env = "musl")) {
+                Some("musl".into())
+            } else {
+                None
+            },
+        },
+        profile: SelectionProfile::Development,
+        declarations: vec![],
+        omissions: vec![AcceptedOmission {
+            origin: OmissionOrigin::Root,
+            name: "missing".into(),
+            requirement: "^1".into(),
+            original_requirement: None,
+            registry: "https://registry.npmjs.org".into(),
+            target: None,
+            reason: OmissionReason::MetadataAbsent,
+        }],
+    })
+    .unwrap();
+    let bytes = lock.to_json().unwrap();
+    scenario
+        .project
+        .write("tapid.lock", bytes.as_bytes())
+        .unwrap();
+    for flags in [vec![], vec!["--offline"], vec!["--frozen"]] {
+        let mut args = vec!["--json", "install", "--dry-run"];
+        args.extend(flags);
+        let output = scenario.command(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["selection"]["omissions"][0]["name"], "missing");
+        assert_eq!(value["data"]["effects"]["metadata_source"], "lockfile");
+        assert_eq!(value["data"]["effects"]["metadata_lookups"], 0);
+    }
+    let output = scenario
+        .command(&["install", "--dry-run", "--offline"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("missing"));
+    assert_eq!(
+        fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+        bytes.as_bytes()
+    );
+    for other_profile in [false, true] {
+        let mut facts = lock.selection().unwrap().clone();
+        if other_profile {
+            facts.profile = SelectionProfile::Production;
+        } else {
+            facts.target.os = if cfg!(target_os = "windows") {
+                "linux"
+            } else {
+                "windows"
+            }
+            .into();
+            facts.target.libc = None;
+        }
+        let mut mismatched = lock.clone();
+        mismatched.set_selection(facts).unwrap();
+        let rejected_bytes = mismatched.to_json().unwrap();
+        scenario
+            .project
+            .write("tapid.lock", rejected_bytes.as_bytes())
+            .unwrap();
+        for flag in ["--offline", "--frozen"] {
+            let output = scenario
+                .command(&["--json", "install", "--dry-run", flag])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(value["selection"].is_null());
+            assert_eq!(
+                fs::read(scenario.project.path().join("tapid.lock")).unwrap(),
+                rejected_bytes.as_bytes()
+            );
+        }
+    }
+    assert!(!scenario.project.path().join("node_modules").exists());
+}
+
+#[test]
+fn dependency_dry_run_reports_new_optional_omissions_without_artifact_access() {
+    let scenario = CliFixture::new("preview-new-omissions");
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"parent":"1.0.0"},"optionalDependencies":{"local":"npm:missing@^1.0.0"}}"#;
+    scenario.project.write("package.json", manifest).unwrap();
+    let fixture = serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org", "name":"parent", "version":"1.0.0", "integrity":format!("sha512-{}", STANDARD.encode([1;64])), "artifact":"never-download", "optionalDependencies":{"native":"1.0.0"}}, {"registry":"https://registry.npmjs.org", "name":"native", "version":"1.0.0", "os":["unsupported-test-os"], "integrity":format!("sha512-{}", STANDARD.encode([1;64])), "artifact":"never-download"}]});
+    scenario
+        .project
+        .write("registry.json", fixture.to_string().as_bytes())
+        .unwrap();
+    for json in [true, false] {
+        let mut args = vec![
+            "install",
+            "--dry-run",
+            "--registry-fixture",
+            "registry.json",
+        ];
+        if json {
+            args.insert(0, "--json");
+        }
+        let output = scenario.command(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        if json {
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let omissions = result["selection"]["omissions"].as_array().unwrap();
+            assert_eq!(omissions.len(), 2);
+            let root = omissions.iter().find(|o| o["name"] == "local").unwrap();
+            assert_eq!(root["reason"], "metadataAbsent");
+            let nested = omissions.iter().find(|o| o["name"] == "native").unwrap();
+            assert_eq!(nested["reason"], "incompatiblePlatform");
+            assert_eq!(result["selection"]["details_complete"], true);
+            assert_eq!(result["data"]["effects"]["artifact_requests"], 0);
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("local"));
+        }
+    }
+    assert_eq!(
+        fs::read(scenario.project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    for path in [
+        "tapid.lock",
+        "node_modules",
+        "store",
+        ".tapid-activation.lock",
+    ] {
+        assert!(!scenario.project.path().join(path).exists(), "{path}");
+    }
+}

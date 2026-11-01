@@ -4,6 +4,9 @@ use tapid_core::DomainError;
 
 #[derive(Debug)]
 pub enum LockfileError {
+    InvalidSelection,
+    SelectionReplayNotSupported,
+    SelectionInputsMismatch,
     Serialization(serde_json::Error),
     Domain(DomainError),
     InvalidUrl(String),
@@ -44,6 +47,17 @@ pub enum LockfileError {
 impl fmt::Display for LockfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidSelection => {
+                write!(f, "invalid versioned selection facts or omission ledger")
+            }
+            Self::SelectionInputsMismatch => write!(
+                f,
+                "recorded selection target/profile differs; explicitly reselect online"
+            ),
+            Self::SelectionReplayNotSupported => write!(
+                f,
+                "recorded selection requires target/profile-aware replay support"
+            ),
             Self::Serialization(error) => write!(f, "invalid lockfile JSON: {error}"),
             Self::Domain(error) => error.fmt(f),
             Self::InvalidUrl(value) => {

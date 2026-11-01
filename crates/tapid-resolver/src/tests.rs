@@ -1398,3 +1398,6 @@ fn refreshed_alias_roots_keep_same_package_transitive_preferences() {
         );
     }
 }
+
+#[path = "pruning_tests.rs"]
+mod pruning_tests;

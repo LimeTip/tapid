@@ -633,6 +633,8 @@ impl LockedWorkspacePackage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Lockfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<crate::LockedSelection>,
     lockfile_version: u32,
     root_manifest_digest: String,
     resolver_version: String,
@@ -651,6 +653,7 @@ impl Lockfile {
         let root_manifest_digest = canonical_artifact_digest(root_manifest_digest)?;
         Ok(Self {
             lockfile_version: LOCKFILE_VERSION,
+            selection: None,
             root_manifest_digest: root_manifest_digest.to_owned(),
             resolver_version: "0".to_owned(),
             linker_version: "0".to_owned(),
@@ -659,6 +662,21 @@ impl Lockfile {
             packages: BTreeMap::new(),
             workspace_packages: BTreeMap::new(),
         })
+    }
+
+    /// Attaches canonical omission facts atomically. Replay integration is not yet enabled.
+    pub fn set_selection(
+        &mut self,
+        selection: crate::LockedSelection,
+    ) -> Result<(), LockfileError> {
+        selection.validate(self)?;
+        self.selection = Some(selection);
+        self.lockfile_version = crate::SELECTION_LOCKFILE_VERSION;
+        Ok(())
+    }
+
+    pub fn selection(&self) -> Option<&crate::LockedSelection> {
+        self.selection.as_ref()
     }
 
     pub fn insert_package(&mut self, package: LockedPackage) -> Result<(), LockfileError> {
@@ -897,6 +915,35 @@ impl Lockfile {
 
     /// Checks that this lockfile belongs to the current root manifest.
     pub fn validate_replay(&self, current_root_manifest_digest: &str) -> Result<(), LockfileError> {
+        if self.selection.is_some() {
+            return Err(LockfileError::SelectionReplayNotSupported);
+        }
+        self.validate_replay_manifest(current_root_manifest_digest)
+    }
+
+    /// Check recorded selection inputs before replay. This does not validate current
+    /// manifest declarations or authorize creating new omissions during installation.
+    pub fn validate_replay_with_selection(
+        &self,
+        current_root_manifest_digest: &str,
+        target: &crate::SelectionTarget,
+        profile: crate::SelectionProfile,
+    ) -> Result<(), LockfileError> {
+        self.validate_alias_schema()?;
+        let selection = self
+            .selection
+            .as_ref()
+            .ok_or(LockfileError::SelectionReplayNotSupported)?;
+        if &selection.target != target || selection.profile != profile {
+            return Err(LockfileError::SelectionInputsMismatch);
+        }
+        self.validate_replay_manifest(current_root_manifest_digest)
+    }
+
+    fn validate_replay_manifest(
+        &self,
+        current_root_manifest_digest: &str,
+    ) -> Result<(), LockfileError> {
         let current_root_manifest_digest = canonical_artifact_digest(current_root_manifest_digest)?;
         if self.root_manifest_digest != current_root_manifest_digest {
             return Err(LockfileError::RootManifestDigestMismatch {
@@ -920,6 +967,13 @@ impl Lockfile {
     }
 
     fn validate_alias_schema(&self) -> Result<(), LockfileError> {
+        if (self.lockfile_version == crate::SELECTION_LOCKFILE_VERSION) != self.selection.is_some()
+        {
+            return Err(LockfileError::InvalidSelection);
+        }
+        if let Some(selection) = &self.selection {
+            selection.validate(self)?;
+        }
         if self.lockfile_version < LIFECYCLE_LOCKFILE_VERSION
             && self
                 .packages
@@ -984,7 +1038,8 @@ impl Lockfile {
     pub fn from_json(input: &str) -> Result<Self, LockfileError> {
         let mut lockfile: Self =
             serde_json::from_str(input).map_err(LockfileError::Serialization)?;
-        if lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
+        if lockfile.lockfile_version != crate::SELECTION_LOCKFILE_VERSION
+            && lockfile.lockfile_version != COPIED_SOURCE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LOCKFILE_VERSION
             && lockfile.lockfile_version != LIFECYCLE_LOCKFILE_VERSION
             && lockfile.lockfile_version != LEGACY_LOCKFILE_VERSION

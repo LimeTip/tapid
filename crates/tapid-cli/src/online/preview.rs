@@ -18,6 +18,7 @@ pub(crate) struct GraphSnapshot {
     pub packages: BTreeMap<String, GraphPackage>,
     pub roots: BTreeMap<String, String>,
     pub requirements: BTreeMap<(String, String), String>,
+    pub selection: Option<crate::application::outcome::SelectionReport>,
 }
 
 impl GraphSnapshot {
@@ -209,6 +210,26 @@ pub(crate) fn resolve(
     for key in &resolved.workspace_root_keys {
         let id: LockfilePackageKey = key.parse()?;
         snapshot.roots.insert(id.name.to_string(), key.clone());
+    }
+    let omissions = selection::registry_omissions(
+        &resolved.resolution,
+        &resolved.records,
+        &keys,
+        &resolved.workspace_manifests,
+        config,
+        resolved.omissions,
+    )?;
+    if !omissions.is_empty() {
+        snapshot.selection = Some(crate::application::outcome::SelectionReport {
+            target: selection_target(),
+            profile: tapid_lockfile::SelectionProfile::Development,
+            omitted_records: omissions.len().saturating_sub(50),
+            omissions: omissions
+                .into_iter()
+                .take(50)
+                .map(crate::application::outcome::SelectionOmission::Native)
+                .collect(),
+        });
     }
     Ok((
         snapshot,

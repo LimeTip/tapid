@@ -6,7 +6,15 @@ mod error;
 mod inspection;
 mod model;
 mod npm_import;
+mod selection;
 mod validation;
+pub use selection::{
+    AcceptedOmission, DeclarationSection, LockedSelection, OmissionOrigin, OmissionReason,
+    RetainedDeclaration, SelectionProfile, SelectionTarget,
+};
+
+/// Ordinary selection facts; imported placement locks retain their separate schema.
+pub const SELECTION_LOCKFILE_VERSION: u32 = 11;
 
 #[cfg(test)]
 mod tests;
@@ -37,5 +45,5 @@ const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;
 
 pub use npm_import::{
     ImportedNpmArtifactReceipt, ImportedNpmEntryPoints, ImportedNpmGraph, ImportedNpmLockfile,
-    ImportedNpmPackage, NpmImportError,
+    ImportedNpmPackage, ImportedOmission, ImportedSelection, NpmImportError,
 };
