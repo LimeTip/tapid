@@ -390,3 +390,37 @@ protected-merge eligibility assessment. The configured Docker socket
 configured worker and run the full documented lane on the final source; do not
 use an unsandboxed host fallback. Fresh independent QA/Security and Acceptance
 remain downstream. No commit, push, merge, deployment or external message occurred.
+
+## Documentation merge with lock inspection and bounded store waiting
+
+Resolved the prepared merge from main `8f087aeac1b0d0bb87e6b521dd22126153a33679`
+into candidate HEAD `55765af477933a8e402002746dfe5d58dc175567`. The engine
+retains ownership of staging and completing the merge. Conflict contents in the
+CLI README, agent guide and JSON protocol now preserve structured batches,
+read-only persisted lock inspection/comparison, bounded store contention and
+current-state limitations after lost responses. The compact guide retains named
+update semantics and the separate trusted run-result channel. No runtime code
+was changed for these conflicts. Final batch pointer normalization remains after
+all evidence contributors.
+
+Fresh static inspection found no remaining conflict markers in the three files;
+whitespace verification passed. Guide sizes are 5869 LF / 5984 CRLF bytes, both
+below the existing strict 6000-byte limit. Relative documentation targets and
+new section anchors were checked. These are static checks, not execution of the
+agent workflow or Rust tests.
+
+Refreshed PR feedback contains no open review threads. Review
+[current PR review](https://github.com/LimeTip/tapid/pull/360)
+approves the pre-merge documentation candidate without a new code finding.
+Published-head CI, CodeQL and release-intent workflows succeeded; they do not
+validate these merge contents. Historical focused results and timing samples
+above remain historical.
+
+No repository tests were executed on the host in this cycle. Fresh Docker image
+inspection failed because the configured Colima daemon endpoint is unavailable.
+The engine must start its local Docker runtime (Docker Desktop or Colima), verify
+the pinned validation image, and run the full source-matched isolated lane from
+`docs/testing.md`, including agent workflows, workspace all-feature tests,
+warnings-denied Clippy, formatting, separate integration tests and architecture.
+Retain native macOS/Windows hosted requirements and independent QA/Acceptance;
+no containment assertions, advisory policies or review gates were changed.
