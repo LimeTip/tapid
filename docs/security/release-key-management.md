@@ -21,3 +21,12 @@ The standalone key-check workflow retains diagnostic uses. Binary candidate buil
 Key rotation, revocation, rollback protection, recovery, and operational ownership must remain documented before changing the trust root. Historical public key files may remain for compatibility with old artifacts but are not active release authorization.
 
 Release-record sidecars use the non-expiring immutable schema from [ADR 0006](../adr/0006-immutable-release-signatures.md). They authenticate exact record bytes, not the freshness of latest-release discovery. The existing local rollback floor remains required. A key recovery or rotation must account for permanently verifiable historical signatures; removing a trusted key can make those releases unverifiable. Legacy signed channel manifests retain their expiration checks.
+
+Candidate signing also requires authoritative authorization evidence before the
+signing step starts. The receipt binds the independent environment review to the
+workflow run, protected job, and unsigned candidate fingerprint. Same-run retry
+reuse requires the immutable first-attempt receipt and unchanged candidate; a new
+manual dispatch requires a new approval. Missing or ambiguous evidence stops
+before key exposure. The completion ledger is read-only reporting and cannot
+serve as a substitute for the environment gate. See
+[authorization provenance](../release-automation.md#completion-ledger-and-authorization-provenance).
