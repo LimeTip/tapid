@@ -13,10 +13,24 @@ pub(crate) struct Args {
 
 #[derive(Debug, Subcommand)]
 enum CacheCommand {
+    /// Prepare exact locked source trees without installing or running hooks.
+    #[command(
+        long_about = "Prepare verified source trees for the complete ordinary locked graph on the current target. Requires a matching validated tapid.lock with existing tree receipts and exact artifact pins. Imported schema-8 locks are unsupported. Does not resolve versions, write locks, run hooks, recover project transactions, or activate node_modules. Source preparation does not prepare authenticated lifecycle outputs, keys, runtime or toolchain prerequisites."
+    )]
+    Fetch(FetchOptions),
     /// Show published package cache counts and logical byte sizes without network access.
     Info,
     /// Preview cache removal, or remove published package data with --yes.
     Clean(CleanOptions),
+}
+
+#[derive(Debug, ClapArgs)]
+struct FetchOptions {
+    /// Project containing the existing ordinary tapid.lock.
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+    #[arg(long, hide = true)]
+    registry_fixture: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -40,6 +54,31 @@ struct CleanOptions {
 
 pub(crate) fn run(args: Args, json: bool) -> ExitCode {
     match args.command {
+        Some(CacheCommand::Fetch(options)) => {
+            let root = match args
+                .store_dir
+                .map_or_else(crate::application::install::default_store_root, Ok)
+            {
+                Ok(root) => root,
+                Err(error) => {
+                    if json {
+                        return crate::output::json::operation_error(
+                            "cache",
+                            "CACHE_PATH_INVALID",
+                            None,
+                        );
+                    }
+                    eprintln!("error: {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            let report = crate::application::cache_fetch::run(
+                &options.project_dir,
+                &root,
+                options.registry_fixture.as_deref(),
+            );
+            crate::output::json::cache_fetch(&options.project_dir, &root, report, json)
+        }
         Some(CacheCommand::Clean(options)) => {
             execute(args.store_dir, true, options.yes, json, "cache")
         }

@@ -1,5 +1,5 @@
 //! Read-only dependency inspection. Results are observations, never executable plans.
-mod inputs;
+use super::observed_inputs as inputs;
 use super::{
     install::InstallMode,
     outcome::{ErrorKind, OperationFailure, OperationOutcome, OperationalError},
@@ -209,7 +209,7 @@ fn inspect(
     let mut updated_manifest = None;
     let mut candidate_exclusions = super::outcome::CandidateExclusions::default();
 
-    let policy = &inputs.policy;
+    let policy = inputs.policy.as_ref().expect("preview policy");
     let matching = if let Some(lock) = &previous {
         matches!(mode, InstallMode::Online)
             && replayable

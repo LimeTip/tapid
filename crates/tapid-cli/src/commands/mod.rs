@@ -76,7 +76,7 @@ pub(crate) enum Command {
         after_help = "Examples:\n  tapid explain react@19.0.0\n  tapid explain @example/pkg@1.2.3 --artifact-file package.tgz\n  tapid --json explain react@19.0.0"
     )]
     Explain(explain::Args),
-    /// Inspect or safely clear the published package cache.
+    /// Inspect, prepare locked sources, or safely clear the package cache.
     Cache(cache::Args),
     /// Preview package-cache removal. Pass --yes to delete published cache entries.
     Clean(cache::CleanArgs),

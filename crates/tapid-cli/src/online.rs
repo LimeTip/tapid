@@ -10,8 +10,9 @@ pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview
 mod locked;
 use crate::application::outcome::{ErrorKind, OperationalError};
 pub(crate) use locked::{
-    PreparedLockedInstall, hydrate_locked, prepare_locked_install,
-    validate_locked_artifact_sources, validate_locked_routes,
+    PreparationObservations, PreparedLockedInstall, hydrate_locked, locked_artifact_url,
+    locked_platform_matches, prepare_locked_install, validate_locked_artifact_sources,
+    validate_locked_routes,
 };
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};

@@ -15,6 +15,14 @@ The CLI also replays verified package trees at `STORE/trees/<sha256-...>/`. Each
 
 `StorePublication::verified_tree_snapshot` verifies and copies a tree under the publication's existing exclusive lock. Frozen hydration uses these snapshots before activation, and retains rollback until the project commit decision. The returned `VerifiedTreeSnapshot` owns its private reservation and lease, removes the reservation on drop, and exposes a borrowed path through `path()`. Keep the owner alive while using that path. The snapshot is independent of subsequent publication rollback.
 
+`StorePublication::newly_published_trees` counts destinations introduced by that
+publication, excluding destinations supplied by a competing publisher. Callers
+report these as durable effects only after `commit` succeeds. Standalone source
+preparation commits without a project coordinator; interruption may retain a
+verified subset of the graph. Every surviving tree still requires marker and
+canonical digest verification. Commit consumes the exclusive guard; acquire a
+subsequent read guard only after that guard has been released.
+
 Verified-tree reads report `IngestError::TreeMissing` only when the tree directory
 is absent. An existing tree with a missing marker, a symlink, or an invalid digest
 remains an error; callers must not treat it as an ordinary cache miss.

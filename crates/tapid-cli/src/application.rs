@@ -2,7 +2,9 @@ use crate::commands::{self, Cli};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::process::ExitCode;
 
+pub(crate) mod cache_fetch;
 mod dependency_scripts;
+mod observed_inputs;
 pub(crate) use dependency_scripts::ExecutionOverrides;
 pub(crate) mod explain;
 pub(crate) mod install;

@@ -2,6 +2,31 @@
 use super::*;
 use crate::application::outcome::DiagnosticContext;
 
+/// Completed source preparation work shared by fetch and frozen hydration.
+/// Tree states are keyed by digest, not by logical package instance.
+#[derive(Default)]
+pub(crate) struct PreparationObservations {
+    pub trees: BTreeMap<String, &'static str>,
+    pub failures: BTreeMap<String, &'static str>,
+    pub network_retrievals: usize,
+    pub fixture_reads: usize,
+    pub local_reads: usize,
+    verified_reads: BTreeSet<String>,
+    verified_fetches: BTreeSet<String>,
+}
+
+impl PreparationObservations {
+    pub fn count(&self, state: &str) -> usize {
+        if state == "already_verified" {
+            return self.verified_reads.len();
+        }
+        if state == "fetched_verified" {
+            return self.verified_fetches.len();
+        }
+        self.trees.values().filter(|value| **value == state).count()
+    }
+}
+
 /// Validate every registry identity and report whether the locked target can replay.
 pub(crate) fn validate_locked_routes(
     lock: &Lockfile,
@@ -24,7 +49,7 @@ pub(crate) fn validate_locked_routes(
     Ok(platforms_match)
 }
 
-pub(super) fn locked_platform_matches(key: &LockfilePackageKey) -> Result<bool, OperationalError> {
+pub(crate) fn locked_platform_matches(key: &LockfilePackageKey) -> Result<bool, OperationalError> {
     let context = key.platform_context()?;
     Ok(current_platform_matches(&PackagePlatform {
         os: context.os.into_iter().collect(),
@@ -45,70 +70,126 @@ pub(super) fn reusable_locked_packages(
     Ok(packages)
 }
 
+/// Validate exact retrieval evidence independently of current cache availability.
+pub(crate) fn locked_artifact_url<'a>(
+    key: &'a LockfilePackageKey,
+    package: &'a LockedPackage,
+) -> Result<&'a str, OperationalError> {
+    if key.source.registry().is_some() && package.registry_integrity_declared() != Some(true) {
+        return Err(OperationalError::new(
+            ErrorKind::Integrity,
+            "locked artifact lacks registry-declared integrity provenance",
+        )
+        .with_diagnostic(DiagnosticContext::comparison(
+            "integrity_provenance",
+            None,
+            "registry_declared",
+            if package.registry_integrity_declared() == Some(false) {
+                "locally_computed"
+            } else {
+                "missing"
+            },
+        ))
+        .for_package(key.into()));
+    }
+    package.artifact_url().or_else(|| key.source.copied().map(PackageSource::as_str)).ok_or_else(|| {
+            OperationalError::new(
+                ErrorKind::Lockfile,
+                "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
+            )
+        })
+}
+
 pub(crate) fn hydrate_locked(
     lock: &Lockfile,
     store: &Store,
     config: &crate::registry::RegistryConfig,
     fixture_path: Option<&Path>,
     project: &Path,
+    observations: &mut PreparationObservations,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
     let mut transports = BTreeMap::new();
     let allowed_origins = config.configured_origins();
     // Load fixtures only if an archive is actually missing.
     let mut fixture_packages = None;
-    hydrate_with_fetch(lock, store, |key, url| {
-        if let Some(source) = key.source.copied() {
-            return copied::fetch_pinned(project, source, fixture_path);
-        }
-        let registry = key.source.registry().ok_or("expected registry identity")?;
-        if let Some(path) = fixture_path {
-            if fixture_packages.is_none() {
-                fixture_packages = Some(fixture(path)?.packages);
+    hydrate_with_fetch(
+        lock,
+        store,
+        observations,
+        fixture_path.is_some(),
+        |key, url| {
+            if let Some(source) = key.source.copied() {
+                return copied::fetch_pinned(project, source, fixture_path);
             }
-            let record = fixture_packages
-                .as_ref()
-                .unwrap()
-                .iter()
-                .find(|p| {
-                    p.registry == registry.as_str()
-                        && p.name == key.name.as_str()
-                        && p.version == key.version.to_string()
-                })
-                .ok_or_else(|| {
-                    OperationalError::new(
-                        ErrorKind::RegistryMetadata,
-                        "fixture has no exact locked artifact",
-                    )
-                })?;
-            if let Some(encoded) = record.artifact.strip_prefix("base64:") {
-                STANDARD.decode(encoded).map_err(|error| {
-                    OperationalError::from_source(ErrorKind::RegistryMetadata, error)
-                })
+            let registry = key.source.registry().ok_or("expected registry identity")?;
+            if let Some(path) = fixture_path {
+                if fixture_packages.is_none() {
+                    fixture_packages = Some(fixture(path)?.packages);
+                }
+                let record = fixture_packages
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|p| {
+                        p.registry == registry.as_str()
+                            && p.name == key.name.as_str()
+                            && p.version == key.version.to_string()
+                    })
+                    .ok_or_else(|| {
+                        OperationalError::new(
+                            ErrorKind::RegistryMetadataUnavailable,
+                            "fixture has no exact locked artifact",
+                        )
+                    })?;
+                if let Some(encoded) = record.artifact.strip_prefix("base64:") {
+                    STANDARD.decode(encoded).map_err(|error| {
+                        OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                    })
+                } else {
+                    fs::read(&record.artifact).map_err(|error| {
+                        let kind = if error.kind() == std::io::ErrorKind::NotFound {
+                            ErrorKind::RegistryMetadataUnavailable
+                        } else {
+                            ErrorKind::RegistryTransport
+                        };
+                        OperationalError::from_source(kind, error)
+                    })
+                }
             } else {
-                fs::read(&record.artifact).map_err(|error| {
-                    OperationalError::from_source(ErrorKind::RegistryTransport, error)
-                })
+                let transport = artifact_transport_for_package(
+                    &mut transports,
+                    config,
+                    registry,
+                    &key.name,
+                    &allowed_origins,
+                )?;
+                let response =
+                    tapid_registry_client::download_artifact(transport, url).map_err(|error| {
+                        let kind = if matches!(
+                            &error,
+                            tapid_registry_client::RegistryClientError::Metadata(
+                                tapid_registry_client::MetadataError::HttpStatus(
+                                    404 | 410 | 500..=599
+                                )
+                            )
+                        ) {
+                            ErrorKind::RegistryMetadataUnavailable
+                        } else {
+                            ErrorKind::RegistryTransport
+                        };
+                        OperationalError::from_source(kind, error)
+                    })?;
+                Ok(response.body)
             }
-        } else {
-            let transport = artifact_transport_for_package(
-                &mut transports,
-                config,
-                registry,
-                &key.name,
-                &allowed_origins,
-            )?;
-            let response =
-                tapid_registry_client::download_artifact(transport, url).map_err(|error| {
-                    OperationalError::from_source(ErrorKind::RegistryTransport, error)
-                })?;
-            Ok(response.body)
-        }
-    })
+        },
+    )
 }
 
 fn hydrate_with_fetch(
     lock: &Lockfile,
     store: &Store,
+    observations: &mut PreparationObservations,
+    using_fixture: bool,
     mut fetch: impl FnMut(&LockfilePackageKey, &str) -> Result<Vec<u8>, OperationalError>,
 ) -> Result<Option<StoreTransaction>, OperationalError> {
     let mut transaction = store.transaction();
@@ -121,93 +202,113 @@ fn hydrate_with_fetch(
         if staged.contains(digest.as_str()) {
             continue;
         }
-        match store.verified_tree_path(&digest) {
-            Ok(_) => continue,
-            Err(tapid_store::IngestError::TreeMissing(_)) => {}
-            Err(error) => {
-                return Err(OperationalError::from(error).context("locked store tree is invalid"));
+        let result = (|| {
+            match store.verified_tree_path(&digest) {
+                Ok(_) => {
+                    observations.verified_reads.insert(digest.to_string());
+                    observations
+                        .trees
+                        .insert(digest.to_string(), "already_verified");
+                    return Ok(());
+                }
+                Err(tapid_store::IngestError::TreeMissing(_)) => {}
+                Err(error) => {
+                    let error = OperationalError::from(error);
+                    return Err(if error.kind == ErrorKind::StoreUnavailable {
+                        OperationalError::new(ErrorKind::Integrity, error)
+                    } else {
+                        error
+                    }
+                    .context("locked store tree is invalid"));
+                }
             }
-        }
-        if key.source.registry().is_some() && package.registry_integrity_declared() != Some(true) {
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                "locked artifact lacks registry-declared integrity provenance",
-            )
-            .with_diagnostic(DiagnosticContext::comparison(
-                "integrity_provenance",
-                None,
-                "registry_declared",
-                if package.registry_integrity_declared() == Some(false) {
-                    "locally_computed"
-                } else {
-                    "missing"
-                },
-            ))
-            .for_package((&key).into()));
-        }
-        let url = package.artifact_url().or_else(|| key.source.copied().map(PackageSource::as_str)).ok_or_else(|| {
-            OperationalError::new(
-                ErrorKind::Lockfile,
-                "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
-            )
-        })?;
-        let bytes = fetch(&key, url)?;
-        let expected: PackageIntegrity = package
-            .artifact_integrity()
-            .parse()
-            .map_err(|error: tapid_core::DomainError| error.to_string())?;
-        if !integrity_matches(&expected, &integrity(&bytes)) {
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                format!("integrity mismatch for locked package {}", key.name),
-            )
-            .with_diagnostic(DiagnosticContext::comparison(
-                "artifact_integrity",
-                Some("sha512"),
-                &expected,
-                integrity(&bytes),
-            ))
-            .for_package((&key).into()));
-        }
-        fs::create_dir_all(store.root())
-            .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
-        let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
-        let temp = store.root().join(format!(
-            ".online-tree-{}-{temp_id}-locked",
-            std::process::id()
-        ));
-        let _guard = TemporaryTree(temp.clone());
-        extract_to(
-            &bytes,
-            copied::archive_format(
-                &key.source
-                    .package_source()
-                    .ok_or("expected artifact source")?,
+            let url = locked_artifact_url(&key, package)?;
+            let bytes = fetch(&key, url)?;
+            if key
+                .source
+                .copied()
+                .is_some_and(|source| source.file_parts().is_some())
+            {
+                observations.local_reads += 1;
+            } else if using_fixture {
+                observations.fixture_reads += 1;
+            } else {
+                observations.network_retrievals += 1;
+            }
+            let expected: PackageIntegrity = package
+                .artifact_integrity()
+                .parse()
+                .map_err(|error: tapid_core::DomainError| error.to_string())?;
+            if !integrity_matches(&expected, &integrity(&bytes)) {
+                return Err(OperationalError::new(
+                    ErrorKind::Integrity,
+                    format!("integrity mismatch for locked package {}", key.name),
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "artifact_integrity",
+                    Some("sha512"),
+                    &expected,
+                    integrity(&bytes),
+                ))
+                .for_package((&key).into()));
+            }
+            fs::create_dir_all(store.root())
+                .map_err(|error| OperationalError::from_source(ErrorKind::Store, error))?;
+            let temp_id = NEXT_TEMP_TREE_ID.fetch_add(1, Ordering::Relaxed);
+            let temp = store.root().join(format!(
+                ".online-tree-{}-{temp_id}-locked",
+                std::process::id()
+            ));
+            let _guard = TemporaryTree(temp.clone());
+            extract_to(
                 &bytes,
-            ),
-            &temp,
-            ArchiveLimits::default(),
-        )
-        .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
-        let actual = canonical_tree_digest(&temp)
-            .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
-        if actual != digest.as_str() {
-            return Err(OperationalError::new(
-                ErrorKind::Integrity,
-                format!("locked tree digest mismatch for {}", key.name),
+                copied::archive_format(
+                    &key.source
+                        .package_source()
+                        .ok_or("expected artifact source")?,
+                    &bytes,
+                ),
+                &temp,
+                ArchiveLimits::default(),
             )
-            .with_diagnostic(DiagnosticContext::comparison(
-                "tree_digest",
-                Some("sha256"),
-                &digest,
-                &actual,
-            ))
-            .for_package((&key).into()));
-        }
-        if staged.insert(digest.to_string()) {
-            transaction
-                .stage_verified_tree(&digest, &temp)
-                .map_err(OperationalError::from)?;
+            .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
+            let actual = canonical_tree_digest(&temp)
+                .map_err(|error| OperationalError::from_source(ErrorKind::Archive, error))?;
+            if actual != digest.as_str() {
+                return Err(OperationalError::new(
+                    ErrorKind::Integrity,
+                    format!("locked tree digest mismatch for {}", key.name),
+                )
+                .with_diagnostic(DiagnosticContext::comparison(
+                    "tree_digest",
+                    Some("sha256"),
+                    &digest,
+                    &actual,
+                ))
+                .for_package((&key).into()));
+            }
+            observations.verified_fetches.insert(digest.to_string());
+            if staged.insert(digest.to_string()) {
+                transaction
+                    .stage_verified_tree(&digest, &temp)
+                    .map_err(OperationalError::from)?;
+            }
+            observations
+                .trees
+                .insert(digest.to_string(), "fetched_verified");
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let state = if matches!(
+                error.kind,
+                ErrorKind::RegistryMetadataUnavailable | ErrorKind::StoreUnavailable
+            ) {
+                "unavailable"
+            } else {
+                "failed"
+            };
+            observations.failures.insert(key.to_string(), state);
+            return Err(error);
         }
     }
     Ok((!staged.is_empty()).then_some(transaction))
@@ -341,16 +442,22 @@ mod tests {
             lock.insert_package(package).unwrap();
         }
         let mut fetches = 0;
-        let transaction = hydrate_with_fetch(&lock, &store, |_, _| {
-            fetches += 1;
-            if fetches > 1 {
-                return Err(OperationalError::new(
-                    ErrorKind::RegistryTransport,
-                    "redundant request rate limited",
-                ));
-            }
-            Ok(bytes.clone())
-        })
+        let transaction = hydrate_with_fetch(
+            &lock,
+            &store,
+            &mut PreparationObservations::default(),
+            true,
+            |_, _| {
+                fetches += 1;
+                if fetches > 1 {
+                    return Err(OperationalError::new(
+                        ErrorKind::RegistryTransport,
+                        "redundant request rate limited",
+                    ));
+                }
+                Ok(bytes.clone())
+            },
+        )
         .unwrap()
         .expect("the missing tree must be staged");
         assert_eq!(fetches, 1);

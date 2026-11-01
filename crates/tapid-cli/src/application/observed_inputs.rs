@@ -1,20 +1,29 @@
 //! Original source evidence, kept separate from proposed manifest replacements.
-use super::*;
+use super::{
+    install::InstallMode,
+    outcome::{ErrorKind, OperationalError},
+};
 use crate::filesystem::{
     atomic::digest_bytes,
     read::{ReadError, read_bounded_file},
 };
+use crate::online;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use tapid_manifest::Workspace;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
+use tapid_manifest::{PackageManifest, Workspace};
 
-pub(super) struct Inputs {
+pub(crate) struct Inputs {
     pub workspace: Workspace,
     pub lock: Option<Vec<u8>>,
     manifests: BTreeMap<PathBuf, PackageManifest>,
     files: BTreeMap<PathBuf, Option<String>>,
     registry: Value,
-    pub policy: tapid_runner::DependencyLifecyclePolicy,
+    pub policy: Option<tapid_runner::DependencyLifecyclePolicy>,
     pub config: crate::registry::RegistryConfig,
     root: PathBuf,
 }
@@ -32,7 +41,7 @@ fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, OperationalError> 
 fn changed() -> OperationalError {
     OperationalError::new(
         ErrorKind::ProjectChanged,
-        "preview inputs changed during inspection; retry against current inputs",
+        "project inputs changed during observation; retry against current inputs",
     )
 }
 fn routing(config: &crate::registry::RegistryConfig) -> Value {
@@ -45,6 +54,19 @@ fn routing(config: &crate::registry::RegistryConfig) -> Value {
 }
 impl Inputs {
     pub fn capture(project: &Path, target: &Path) -> Result<Self, OperationalError> {
+        let mut result = Self::capture_sources(project, target)?;
+        result.policy = Some(super::dependency_scripts::load_policy(&result.root)?);
+        let bytes = read(&result.root.join("tapid.lifecycle.toml"), 1024 * 1024)?;
+        result.files.insert(
+            result.root.join("tapid.lifecycle.toml"),
+            bytes.as_deref().map(digest_bytes),
+        );
+        result.recheck()?;
+        Ok(result)
+    }
+
+    /// Observe graph inputs without requiring install-specific lifecycle policy.
+    pub fn capture_sources(project: &Path, target: &Path) -> Result<Self, OperationalError> {
         let root = fs::canonicalize(project)
             .map_err(|e| OperationalError::from_source(ErrorKind::Manifest, e))?;
         let mut files = BTreeMap::new();
@@ -73,14 +95,8 @@ impl Inputs {
         let lock = read(&root.join("tapid.lock"), 32 * 1024 * 1024)
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error))?;
         files.insert(root.join("tapid.lock"), lock.as_deref().map(digest_bytes));
-        let policy = super::super::dependency_scripts::load_policy(&root)?;
         let config = crate::registry::RegistryConfig::load(&root)
             .map_err(|e| OperationalError::new(ErrorKind::RegistryConfiguration, e))?;
-        let policy_bytes = read(&root.join("tapid.lifecycle.toml"), 1024 * 1024)?;
-        files.insert(
-            root.join("tapid.lifecycle.toml"),
-            policy_bytes.as_deref().map(digest_bytes),
-        );
         let result = Self {
             workspace,
             lock,
@@ -88,7 +104,7 @@ impl Inputs {
             files,
             registry: routing(&config),
             config,
-            policy,
+            policy: None,
             root,
         };
         result.recheck()?;
@@ -164,10 +180,10 @@ impl Inputs {
             || members.iter().any(|(p, d)| self.files.get(p) != Some(d))
             || routing(&crate::registry::RegistryConfig::load(&self.root).map_err(|_| changed())?)
                 != self.registry
-            || super::super::dependency_scripts::load_policy(&self.root)
-                .map_err(|_| changed())?
-                .digest()
-                != self.policy.digest()
+            || self.policy.as_ref().is_some_and(|policy| {
+                super::dependency_scripts::load_policy(&self.root)
+                    .map_or(true, |current| current.digest() != policy.digest())
+            })
         {
             return Err(changed());
         }
@@ -191,13 +207,13 @@ impl Inputs {
             InstallMode::CiOffline => ("ci_offline", Value::Null),
             InstallMode::Update(r) => (
                 "update",
-                json!({"named":r.named,"selection":r.plan.mutations.iter().map(|m| &m.name).collect::<Vec<_>>(),"save_policy":r.save.map(|s| match s { super::super::lifecycle::SavePolicy::Exact => "exact", super::super::lifecycle::SavePolicy::Caret => "caret", super::super::lifecycle::SavePolicy::Tilde => "tilde" })}),
+                json!({"named":r.named,"selection":r.plan.mutations.iter().map(|m| &m.name).collect::<Vec<_>>(),"save_policy":r.save.map(|s| match s { super::lifecycle::SavePolicy::Exact => "exact", super::lifecycle::SavePolicy::Caret => "caret", super::lifecycle::SavePolicy::Tilde => "tilde" })}),
             ),
         };
         json!({"schema_version":1,"root_manifest":identity(&self.root.join("package.json")),"selected_manifest":identity(target),"workspace":members,
             "lock":match &self.lock { Some(bytes) => json!({"state":"present","digest":digest_bytes(bytes)}),None => json!({"state":"absent"}) },
             "registry":{"identity_kind":"semantic_configuration","routing":self.registry},
-            "lifecycle_policy":if self.files[&self.root.join("tapid.lifecycle.toml")].is_some() { json!({"state":"present","identity_kind":"exact_source","digest":self.policy.digest()}) } else { json!({"state":"absent_default_deny"}) },
+            "lifecycle_policy":if self.files[&self.root.join("tapid.lifecycle.toml")].is_some() { json!({"state":"present","identity_kind":"exact_source","digest":self.policy.as_ref().expect("preview policy").digest()}) } else { json!({"state":"absent_default_deny"}) },
             "operation":{"mode":mode_name,"update":update,"allow_unverified_registry_artifacts":allow_unverified},
             "target":format!("{}/{}/{}",std::env::consts::OS,std::env::consts::ARCH,online::current_libc().unwrap_or("unspecified")),
             "consistency":"rechecked_non_atomic_observation",
