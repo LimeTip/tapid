@@ -27,6 +27,8 @@ Lifecycle outputs carry store-local HMAC-SHA256 attestations over their recipe a
 
 Cache maintenance pins the store root and cache namespaces before traversal. Unix traversal and recursive removal use descriptor-relative no-follow operations. Windows holds directory and ancestor handles without delete sharing, rejects reparse points during traversal, and deletes entries through their own handles. Candidate identities are checked before deletion, so a swapped parent cannot redirect cleanup outside the inspected directories.
 
+`Store::published_tree_identities` provides a reporting baseline of marked canonical tree identities under a short shared store lock. It reuses pinned no-follow namespace and marker inspection, releases the lock before returning, and never descends into package contents, measures sizes, hashes trees, creates files, or recovers transactions. Missing stores yield an empty set; busy, unsafe, pending-recovery stores, or tree namespaces without a store lock return an error. This is reporting eligibility only, not evidence that content is valid: consumers must still use existing verified snapshot operations before trusting or counting reuse. Content published after the observation is outside that baseline. Reporting callers may mark statistics unavailable on inspection errors without suppressing subsequent verification or recovery errors.
+
 Normal store-lock acquisition has one five-second monotonic budget per acquisition
 call, including shared reads, exclusive publication, recovery escalation, and
 reacquisition retries. Nonblocking attempts poll at intervals of at most 25 ms,

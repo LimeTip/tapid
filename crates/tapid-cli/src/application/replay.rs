@@ -196,6 +196,7 @@ pub(super) fn can_replay_inspected(
 }
 
 pub(crate) struct ReplayInput {
+    pub artifact_evidence: super::artifact_statistics::ArtifactEvidence,
     pub input: NamedLayoutInput,
     pub trees: BTreeMap<String, PathBuf>,
     pub snapshots: Vec<tapid_store::VerifiedTreeSnapshot>,
@@ -212,6 +213,7 @@ pub(crate) fn replay_input_with_publication(
     store.cleanup_stale_replay_snapshots().map_err(|error| {
         OperationalError::from(error).context("cannot recover stale replay snapshots")
     })?;
+    let mut artifact_evidence = super::artifact_statistics::ArtifactEvidence::default();
     let mut snapshots = Vec::new();
     let (input, trees) = replay_input_with_tree_source(
         lock,
@@ -228,12 +230,14 @@ pub(crate) fn replay_input_with_publication(
                 None => store.verified_tree_snapshot(&digest),
             }
             .map_err(OperationalError::from)?;
+            artifact_evidence.cached(&digest);
             let path = snapshot.path().to_owned();
             snapshots.push(snapshot);
             Ok(path)
         },
     )?;
     Ok(ReplayInput {
+        artifact_evidence,
         input,
         trees,
         snapshots,

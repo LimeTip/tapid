@@ -103,6 +103,7 @@ impl Reporter {
                 changes.added, changes.changed, changes.reused, changes.removed
             );
         }
+        println!("{}", report.artifact_statistics);
         let mut files = report
             .outcome
             .changed_files

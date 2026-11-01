@@ -223,6 +223,7 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
             )
             .map(LifecycleReport::Preview);
         }
+        let mut reporter = crate::output::install::Reporter::new(json);
         crate::application::install::run(
             crate::application::install::InstallRequest {
                 project_dir: &selection.root_dir,
@@ -240,7 +241,7 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
                     .common
                     .allow_unverified_registry_artifacts,
             },
-            |event| crate::output::report_progress(event, json),
+            |event| reporter.progress(event),
         )
         .map(LifecycleReport::Installed)
     })();
@@ -301,6 +302,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             );
         }
     };
+    let mut reporter = crate::output::install::Reporter::new(json);
     match crate::application::install::run(
         crate::application::install::InstallRequest {
             project_dir: &selection.root_dir,
@@ -311,7 +313,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             registry_fixture: None,
             allow_unverified_registry_artifacts: false,
         },
-        |event| crate::output::report_progress(event, json),
+        |event| reporter.progress(event),
     ) {
         Ok(report) => {
             if json {
@@ -319,6 +321,7 @@ pub(crate) fn prune(args: ReadOnlyArgs, json: bool) -> ExitCode {
             }
             crate::output::report_warnings(&report.outcome.warnings);
             println!("Pruned ({} package(s))", report.package_count);
+            println!("{}", report.artifact_statistics);
             ExitCode::SUCCESS
         }
         Err(error) => crate::output::json::failure_or_human(&error, "prune", json),
@@ -358,6 +361,7 @@ fn mutate_and_install(
         )
         .map(LifecycleReport::Preview);
     }
+    let mut reporter = crate::output::install::Reporter::new(json);
     crate::application::install::run(
         crate::application::install::InstallRequest {
             project_dir: &selection.root_dir,
@@ -373,7 +377,7 @@ fn mutate_and_install(
             registry_fixture: common.registry_fixture.as_deref(),
             allow_unverified_registry_artifacts: common.allow_unverified_registry_artifacts,
         },
-        |event| crate::output::report_progress(event, json),
+        |event| reporter.progress(event),
     )
     .map(LifecycleReport::Installed)
 }
@@ -400,6 +404,7 @@ fn report(
             }
             crate::output::report_warnings(&report.outcome.warnings);
             println!("{action} ({} package(s))", report.package_count);
+            println!("{}", report.artifact_statistics);
             ExitCode::SUCCESS
         }
         Err(error) => crate::output::json::failure_or_human(&error, operation, json),

@@ -2,6 +2,52 @@ use std::{fs, process::Command};
 use tapid_test_support::{TempHome, TempProject};
 
 #[test]
+fn npm_import_reports_verified_artifact_statistics() {
+    let project = reference_project("npm-import-artifacts");
+    let home = TempHome::new("npm-import-artifacts").unwrap();
+    assert!(
+        invoke(&project, &["import-package-lock", "package-lock.json"])
+            .status
+            .success()
+    );
+    let store = home.path().join("store");
+    for (extra, cached, local) in [
+        (vec!["--registry-fixture", "registry.json"], 0, 4),
+        (vec!["--offline"], 4, 0),
+    ] {
+        let mut args = vec![
+            "--json",
+            "install",
+            "--frozen",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ];
+        args.extend(extra);
+        let output = Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(&args)
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("LOCALAPPDATA", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["data"]["artifact_statistics"],
+            serde_json::json!({
+                "availability":"available", "cached_trees_reused": cached,
+                "downloaded_artifacts_verified": 0, "local_artifacts_verified": local
+            })
+        );
+    }
+}
+
+#[test]
 fn npm_import_update_converts_to_a_native_lock() {
     let project = TempProject::new("npm-import-update-empty").unwrap();
     let home = TempHome::new("npm-import-update-empty").unwrap();

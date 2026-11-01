@@ -31,6 +31,7 @@ pub(crate) struct ManifestEdit<'a> {
 
 #[derive(Debug)]
 pub(crate) struct InstallReport {
+    pub(crate) artifact_statistics: super::artifact_statistics::ArtifactStatistics,
     pub(crate) candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
@@ -74,6 +75,8 @@ impl PackageChanges {
 }
 
 struct InstallSession {
+    artifact_baseline: Option<std::collections::BTreeSet<String>>,
+    artifact_evidence: super::artifact_statistics::ArtifactEvidence,
     candidate_exclusions: super::outcome::CandidateExclusions,
     hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
@@ -88,6 +91,8 @@ struct InstallSession {
 impl InstallSession {
     fn new(project: &Path) -> Self {
         Self {
+            artifact_baseline: None,
+            artifact_evidence: Default::default(),
             hook_stages: Vec::new(),
             journal: None,
             lock_backup: None,
@@ -276,6 +281,7 @@ pub(crate) fn run_with_execution(
     }
     match perform_install(&mut session, request, overrides, report_replay_progress) {
         Ok((package_count, replayed)) => Ok(InstallReport {
+            artifact_statistics: session.artifact_evidence.finish(session.artifact_baseline),
             candidate_exclusions: session.candidate_exclusions,
             package_count,
             replayed,
@@ -507,6 +513,10 @@ fn perform_install(
             default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
         }
     });
+    // Project recovery has completed. Observe before resolution can acquire
+    // copied archives; do not move the existing deferred store recovery calls.
+    // Pending store recovery (or any inspection error) makes reporting unavailable.
+    session.artifact_baseline = store.published_tree_identities().ok();
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {
@@ -557,6 +567,7 @@ fn perform_install(
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {
+            artifact_evidence,
             candidate_exclusions,
             mut lock,
             layout:
@@ -592,6 +603,7 @@ fn perform_install(
                 &mut report_replay_progress,
             )?
         };
+        session.artifact_evidence.merge(artifact_evidence);
         session.candidate_exclusions = candidate_exclusions;
 
         session
@@ -836,6 +848,7 @@ fn perform_install(
                 .any(|p| !p.derived_hooks().is_empty()))
     {
         let online::PreparedLockedInstall {
+            artifact_evidence,
             layout:
                 online::PreparedLayout {
                     mut input,
@@ -853,6 +866,8 @@ fn perform_install(
             &project_dir,
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         )?;
+
+        session.artifact_evidence.merge(artifact_evidence);
         let mut lifecycle_snapshots = Vec::new();
         super::dependency_scripts::apply(
             &project_dir,
@@ -911,24 +926,27 @@ fn perform_install(
         return Ok((lock.packages().len(), true));
     }
     let mut publication = None;
-    if !offline
-        && let Some(transaction) = online::hydrate_locked(
+    if !offline {
+        let (transaction, evidence) = online::hydrate_locked(
             &lock,
             &store,
             &registry_config,
             registry_fixture,
             &project_dir,
-        )?
-    {
-        session.mutated = true;
-        publication = Some(
-            transaction
-                .publish_for_lifecycle(&journal.coordinator_path())
-                .map_err(OperationalError::from)?,
-        );
-        crate::filesystem::activation::test_crash_at("store_published");
+        )?;
+        session.artifact_evidence.merge(evidence);
+        if let Some(transaction) = transaction {
+            session.mutated = true;
+            publication = Some(
+                transaction
+                    .publish_for_lifecycle(&journal.coordinator_path())
+                    .map_err(OperationalError::from)?,
+            );
+            crate::filesystem::activation::test_crash_at("store_published");
+        }
     }
     let crate::application::replay::ReplayInput {
+        artifact_evidence,
         mut input,
         mut trees,
         mut snapshots,
@@ -940,6 +958,7 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
+    session.artifact_evidence.merge(artifact_evidence);
     super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,

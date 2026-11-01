@@ -2,6 +2,7 @@ use crate::commands::{self, Cli};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::process::ExitCode;
 
+pub(crate) mod artifact_statistics;
 mod dependency_scripts;
 pub(crate) use dependency_scripts::ExecutionOverrides;
 pub(crate) mod explain;

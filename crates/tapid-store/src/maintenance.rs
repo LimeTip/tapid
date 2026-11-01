@@ -25,6 +25,74 @@ pub struct CacheSummary {
 }
 
 impl Store {
+    /// Observe marked published tree identities for reporting eligibility only.
+    /// Does not verify content, descend into trees, recover, or create files.
+    /// The shared lock is released before return. Busy or unsafe stores fail.
+    pub fn published_tree_identities(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, IngestError> {
+        if self.root.as_os_str().is_empty() {
+            return Err(IngestError::InvalidRoot);
+        }
+        let root = match CacheDirectory::open_root(&self.root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+            Err(error) => return Err(error.into()),
+        };
+        let file = match root.open_file(std::ffi::OsStr::new(".store.lock")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if optional_directory(&root, "trees")?.is_none()
+                    && root
+                        .metadata(std::ffi::OsStr::new(STORE_JOURNAL))
+                        .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+                {
+                    return Ok(Default::default());
+                }
+                return Err(invalid_cache(
+                    "tree identity observation requires a store lock",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        FileExt::try_lock_shared(&file).map_err(|error| match error {
+            TryLockError::WouldBlock => io::Error::new(io::ErrorKind::WouldBlock, "store is busy"),
+            TryLockError::Error(error) => error,
+        })?;
+        match root.metadata(std::ffi::OsStr::new(STORE_JOURNAL)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(invalid_cache(
+                    "store requires recovery before tree identity observation",
+                ));
+            }
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        if let Some(directory) = optional_directory(&root, "trees")? {
+            for name in directory.entries()? {
+                let Some(digest) = name
+                    .to_str()
+                    .and_then(|name| name.parse::<ArtifactDigest>().ok())
+                else {
+                    continue;
+                };
+                let metadata = directory.metadata(&name)?;
+                if metadata.kind != Kind::Directory {
+                    continue;
+                }
+                let child = directory.directory(&name)?;
+                if child.identity()? != metadata.identity {
+                    return Err(invalid_cache("cache tree changed during inspection"));
+                }
+                if marked_tree(&child, &digest)? {
+                    identities.insert(digest.to_string());
+                }
+            }
+        }
+        Ok(identities)
+    }
+
     /// Inspect published cache data without creating files or recovering state.
     pub fn cache_info(&self) -> Result<CacheSummary, IngestError> {
         self.maintain_cache(false)
