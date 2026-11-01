@@ -7,6 +7,7 @@ use crate::PackageInstanceWire;
 
 pub const SECURITY_CONTRACT_V1: &str = "tapid-security-v1";
 pub const MAX_SECURITY_BYTES: usize = 262_144;
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// An exact graph occurrence, including alias spelling and resolved peer origins.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -156,12 +157,7 @@ impl SecurityRequest {
             return Err(SecurityReason::InvalidRequest);
         }
         if let SecurityCheck::Artifact { digest } = &self.check
-            && digest
-                .parse::<ArtifactDigest>()
-                .map(|d| d.to_string())
-                .ok()
-                .as_deref()
-                != Some(digest.as_str())
+            && !valid_digest(digest)
         {
             return Err(SecurityReason::InvalidRequest);
         }
@@ -179,13 +175,7 @@ fn valid_placement(value: &str) -> bool {
 }
 
 fn valid_package(package: &PackageInstanceWire) -> bool {
-    package
-        .registry
-        .parse::<RegistryOrigin>()
-        .map(|o| o.to_string())
-        .ok()
-        .as_deref()
-        == Some(package.registry.as_str())
+    valid_origin(&package.registry)
         && package.name.parse::<PackageName>().is_ok()
         && package
             .version
@@ -194,6 +184,24 @@ fn valid_package(package: &PackageInstanceWire) -> bool {
             .ok()
             .as_deref()
             == Some(package.version.as_str())
+}
+
+fn valid_origin(value: &str) -> bool {
+    value
+        .parse::<RegistryOrigin>()
+        .map(|o| o.to_string())
+        .ok()
+        .as_deref()
+        == Some(value)
+}
+
+fn valid_digest(value: &str) -> bool {
+    value
+        .parse::<ArtifactDigest>()
+        .map(|d| d.to_string())
+        .ok()
+        .as_deref()
+        == Some(value)
 }
 
 pub(crate) fn text(value: &str) -> bool {
@@ -236,7 +244,7 @@ impl SecurityResult {
                 self.expires_at,
             ]
             .iter()
-            .any(|v| *v > 9_007_199_254_740_991)
+            .any(|v| *v > MAX_SAFE_INTEGER)
             || (matches!(
                 self.status,
                 SecurityStatus::NotScanned
@@ -397,4 +405,66 @@ pub struct EvidencePublicationRequest {
     pub tenant: String,
     pub evidence_digest: String,
     pub expected_sequence: u64,
+}
+
+impl AccountAuthorization {
+    /// Validates claim semantics, not credential authenticity or authorization.
+    /// Callers must authenticate introspection and check deployment, time and revocation.
+    pub fn validate(&self) -> Result<(), SecurityReason> {
+        if self.version != SECURITY_CONTRACT_V1 {
+            return Err(SecurityReason::UnsupportedVersion);
+        }
+        if !valid_origin(&self.authority)
+            || !valid_origin(&self.audience)
+            || [&self.subject, &self.tenant, &self.credential_id]
+                .iter()
+                .any(|v| !text(v))
+            || self
+                .scopes
+                .iter()
+                .enumerate()
+                .any(|(i, scope)| self.scopes[..i].contains(scope))
+            || self.issued_at > MAX_SAFE_INTEGER
+            || self.expires_at > MAX_SAFE_INTEGER
+            || self.issued_at >= self.expires_at
+        {
+            return Err(SecurityReason::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+impl EvidencePublicationRequest {
+    /// Validates publication intent, not evidence ownership or permission to disclose it.
+    /// Unsupported versions take precedence over other invalid request fields.
+    pub fn validate(&self) -> Result<(), SecurityReason> {
+        if self.version != SECURITY_CONTRACT_V1 {
+            return Err(SecurityReason::UnsupportedVersion);
+        }
+        if !text(&self.tenant)
+            || !valid_digest(&self.evidence_digest)
+            || self.expected_sequence == 0
+            || self.expected_sequence > MAX_SAFE_INTEGER
+        {
+            return Err(SecurityReason::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+impl SecurityErrorResponse {
+    /// Validates version and retry bounds; errors never authenticate evidence or advance replay state.
+    /// Unsupported versions take precedence over invalid retry metadata.
+    pub fn validate(&self) -> Result<(), SecurityReason> {
+        if self.version != SECURITY_CONTRACT_V1 {
+            return Err(SecurityReason::UnsupportedVersion);
+        }
+        if self
+            .retry_after_seconds
+            .is_some_and(|value| value > MAX_SAFE_INTEGER)
+        {
+            return Err(SecurityReason::InvalidRequest);
+        }
+        Ok(())
+    }
 }
