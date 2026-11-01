@@ -31,7 +31,8 @@ when project declarations change.
 ### Frozen installation
 
 Installation of the existing locked graph with matching project declarations and
-no lock changes. Frozen installation permits retrieval of missing pinned content.
+no selection changes. Frozen installation permits retrieval of missing pinned content
+and records real verification receipts when a selection was persisted without them.
 
 ### Offline installation
 
@@ -42,3 +43,14 @@ permission is independent of whether installation is frozen.
 
 Retrieval and verification of missing content for an existing locked selection.
 Hydration leaves package selection unchanged.
+
+### Lockfile-only selection
+
+Persistence of a selected graph and requested declaration edits without changing
+the installed application. Native schema 11 records missing verification explicitly;
+a later frozen installation hydrates exact pins and completes receipts. ci/offline
+require completed native receipts. Registry metadata access is permitted during
+selection; artifact retrieval is deferred, except for copied-source preparation.
+Dry runs remain observations and persist nothing. See the
+[CLI effects contract](crates/tapid-cli/README.md) and
+[receipt/transaction decision](docs/adr/0012-lockfile-only-selections.md).

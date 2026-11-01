@@ -4,8 +4,10 @@
 
 mod error;
 mod inspection;
+mod json;
 mod model;
 mod npm_import;
+mod receipt;
 mod validation;
 
 #[cfg(test)]
@@ -21,6 +23,7 @@ pub use model::{
     DerivedHookOutput, LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfile,
     LockfilePackageKey, LockfilePackageSource, RegistryIntegrityProvenance,
 };
+pub use receipt::SourceTreeReceipt;
 
 /// Returns the current crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -30,6 +33,8 @@ pub const LOCKFILE_VERSION: u32 = 7;
 pub const LIFECYCLE_LOCKFILE_VERSION: u32 = 9;
 /// Locks with immutable copied file and Git sources.
 pub const COPIED_SOURCE_LOCKFILE_VERSION: u32 = 10;
+/// Native selections with explicit, potentially pending source-tree receipts.
+pub const PENDING_RECEIPT_LOCKFILE_VERSION: u32 = 11;
 const ROOTS_LEGACY_LOCKFILE_VERSION: u32 = 6;
 const REGISTRY_ONLY_LOCKFILE_VERSION: u32 = ROOTS_LEGACY_LOCKFILE_VERSION;
 const LEGACY_LOCKFILE_VERSION: u32 = 4;

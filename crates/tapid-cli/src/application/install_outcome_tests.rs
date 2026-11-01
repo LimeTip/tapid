@@ -35,6 +35,83 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
 const ARTIFACT: &str = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
 const INTEGRITY: &str = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
 
+#[test]
+fn pending_native_receipts_reject_ci_and_offline_before_project_acquisition() {
+    for mode in [
+        InstallMode::Ci,
+        InstallMode::CiOffline,
+        InstallMode::Offline,
+    ] {
+        let project = TempProject::new("pending-native-replay").unwrap();
+        let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"*"}}"#;
+        project.write("package.json", manifest).unwrap();
+        project
+            .write("node_modules/sentinel", b"running application")
+            .unwrap();
+        let mut lock =
+            Lockfile::new_selection(&crate::filesystem::atomic::digest_bytes(manifest)).unwrap();
+        let mut selected = tapid_lockfile::LockedPackage::select_with_context_and_provenance(
+            "https://registry.npmjs.org",
+            "plugin",
+            "1.0.0",
+            INTEGRITY,
+            (
+                &Default::default(),
+                &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+            ),
+            tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+        )
+        .unwrap();
+        selected
+            .set_artifact_url("https://registry.npmjs.org/plugin.tgz")
+            .unwrap();
+        let key = selected.key();
+        lock.insert_package(selected).unwrap();
+        lock.set_roots([key]).unwrap();
+        let bytes = lock.to_json().unwrap();
+        project.write("tapid.lock", bytes.as_bytes()).unwrap();
+        // A pending receipt must be rejected even while another process owns activation.
+        let _owner = ActivationLock::acquire(project.path()).unwrap();
+        let store = project.path().join("absent-store");
+        let failure = run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&store),
+                mode,
+                registry_fixture: None,
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("pending source-tree receipt"),
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+        assert_eq!(
+            fs::read(project.path().join("tapid.lock")).unwrap(),
+            bytes.as_bytes()
+        );
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+            b"running application"
+        );
+        assert!(!store.exists());
+        assert!(!crate::filesystem::lifecycle_journal::has_pending(project.path()).unwrap());
+    }
+}
+
 fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) {
     let project = TempProject::new(label).unwrap();
     project
@@ -1214,6 +1291,12 @@ fn changed_roots_keep_compatible_locked_versions() {
 
 fn pinned_fixture_project(label: &str) -> (TempProject, PathBuf, PathBuf) {
     let (project, fixture) = project_with_fixture(label, INTEGRITY);
+    // Unlike ARTIFACT (which declares foo), this archive matches plugin's pin.
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    metadata["packages"][0]["artifact"] = "base64:H4sIAAAAAAAAE+3OuwrCQBSE4dQ+hZxa1llZUuRtFgkhXjZLYmwk7y6YQlDLoBb/1wycKc7kuD/Gpt7mOd1h6FKxMEkqQ3ikpNeUnt18977chWKtpYd8Mg6X2Bf6yq8/dLMUz7VVlk9j0ybb2LXuh7ZLVpl3crJp9euNAAAAAAAAAAAAAAAAAIB3d39PVjgAKAAA".into();
+    metadata["packages"][0]["integrity"] = "sha512-OqIsbOVXRyhhPkWXxjL89MwNQTEusRI+n/aPF2LF7I/RPyQ8FvcR5kmtVJIJ8cLjgVhdKdJHztlyHWe+SjGwFQ==".into();
+    fs::write(&fixture, metadata.to_string()).unwrap();
     project
         .write(
             "package.json",
@@ -1243,6 +1326,212 @@ fn pinned_fixture_project(label: &str) -> (TempProject, PathBuf, PathBuf) {
     fs::write(&lock_path, lock.to_string()).unwrap();
     let cold = project.path().join("cold-store");
     (project, fixture, cold)
+}
+
+fn write_pending_lock(lock_path: &Path) -> Lockfile {
+    let legacy = read_lock(lock_path).unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&legacy.to_json().unwrap()).unwrap();
+    wire["lockfileVersion"] = 11.into();
+    for package in wire["packages"].as_object_mut().unwrap().values_mut() {
+        let package = package.as_object_mut().unwrap();
+        package.remove("treeDigest");
+        package.remove("unpackedDigest");
+        package.insert("sourceTreeReceipt".into(), serde_json::Value::Null);
+    }
+    fs::write(lock_path, wire.to_string()).unwrap();
+    legacy
+}
+
+#[test]
+fn pending_schema_11_hydrates_exact_pins_then_replays_offline_and_ci() {
+    for first_mode in [InstallMode::Frozen, InstallMode::Online] {
+        let (project, fixture, cold) = pinned_fixture_project("pending-schema-11-hydration");
+        let lock_path = project.path().join("tapid.lock");
+        let legacy = write_pending_lock(&lock_path);
+        let pending = read_lock(&lock_path).unwrap();
+        assert!(pending.has_pending_receipts());
+        // Resolution would reject this requirement. Hydration only reads pinned
+        // artifacts and must never consult fixture dependency metadata.
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        metadata["packages"][0]["dependencies"] =
+            serde_json::json!({"must-not-resolve":"invalid requirement"});
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        let mut completed_bytes = None;
+        for mode in [
+            first_mode,
+            InstallMode::Frozen,
+            InstallMode::Offline,
+            InstallMode::Ci,
+            InstallMode::CiOffline,
+        ] {
+            run(
+                InstallRequest {
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&cold),
+                    mode,
+                    registry_fixture: Some(&fixture),
+                    allow_unverified_registry_artifacts: false,
+                },
+                |_| {},
+            )
+            .unwrap();
+            let completed = read_lock(&lock_path).unwrap();
+            assert!(!completed.has_pending_receipts());
+            assert_eq!(completed.roots(), pending.roots());
+            assert_eq!(completed.root_bindings(), pending.root_bindings());
+            for (key, selected) in pending.packages() {
+                let verified = &completed.packages()[key];
+                assert_eq!(verified.artifact_url(), selected.artifact_url());
+                assert_eq!(verified.artifact_integrity(), selected.artifact_integrity());
+                assert_eq!(verified.dependencies(), selected.dependencies());
+                assert_eq!(
+                    verified.tree_digest().unwrap(),
+                    legacy.packages()[key].tree_digest().unwrap()
+                );
+            }
+            let bytes = fs::read(&lock_path).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["lockfileVersion"],
+                11
+            );
+            if let Some(previous) = &completed_bytes {
+                assert_eq!(&bytes, previous);
+            }
+            completed_bytes = Some(bytes);
+            assert!(
+                project
+                    .path()
+                    .join("node_modules/plugin/package.json")
+                    .is_file()
+            );
+        }
+    }
+}
+
+#[test]
+fn pending_schema_11_hydration_failures_preserve_selection_and_application() {
+    for fault in ["integrity", "identity", "archive", "activation"] {
+        let (project, fixture, cold) = pinned_fixture_project(&format!("pending-failure-{fault}"));
+        let lock_path = project.path().join("tapid.lock");
+        write_pending_lock(&lock_path);
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path).unwrap()).unwrap();
+        match fault {
+            "integrity" => metadata["packages"][0]["artifact"] = ARTIFACT.into(),
+            "identity" => {
+                metadata["packages"][0]["artifact"] = ARTIFACT.into();
+                lock["packages"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                    .next()
+                    .unwrap()["artifactIntegrity"] = INTEGRITY.into();
+            }
+            "archive" => {
+                let bytes = b"not an archive";
+                metadata["packages"][0]["artifact"] = format!(
+                    "base64:{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+                .into();
+                lock["packages"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                    .next()
+                    .unwrap()["artifactIntegrity"] =
+                    crate::online::integrity(bytes).to_string().into();
+            }
+            "activation" => {
+                project
+                    .write(".tapid-managed", b"unowned application")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        fs::write(&fixture, metadata.to_string()).unwrap();
+        fs::write(&lock_path, lock.to_string()).unwrap();
+        let before = fs::read(&lock_path).unwrap();
+        let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
+        let failure = run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&cold),
+                mode: InstallMode::Frozen,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(failure.recovery_error.is_none(), "{fault}: {failure:?}");
+        assert!(
+            matches!(
+                failure.outcome.state,
+                ChangeState::Unchanged | ChangeState::RolledBack
+            ),
+            "{fault}: {failure:?}"
+        );
+        assert_eq!(fs::read(&lock_path).unwrap(), before, "{fault}");
+        assert_eq!(
+            fs::read(project.path().join("node_modules/plugin/package.json")).unwrap(),
+            installed,
+            "{fault}"
+        );
+        assert!(read_lock(&lock_path).unwrap().has_pending_receipts());
+        assert!(!cold.join("trees").exists(), "{fault}");
+    }
+}
+
+#[test]
+fn complete_schema_11_replays_without_rewriting_receipts() {
+    let (project, fixture, cold) = pinned_fixture_project("complete-schema-11-replay");
+    let lock_path = project.path().join("tapid.lock");
+    let legacy = read_lock(&lock_path).unwrap();
+    let mut selected = Lockfile::new_selection(legacy.root_manifest_digest()).unwrap();
+    selected
+        .insert_packages(legacy.packages().values().cloned())
+        .unwrap();
+    selected.set_roots(legacy.roots().iter().cloned()).unwrap();
+    selected
+        .set_root_bindings(legacy.root_bindings().clone())
+        .unwrap();
+    let bytes = selected.to_json().unwrap();
+    fs::write(&lock_path, &bytes).unwrap();
+    for mode in [
+        InstallMode::Frozen,
+        InstallMode::Offline,
+        InstallMode::Ci,
+        InstallMode::CiOffline,
+    ] {
+        run(
+            InstallRequest {
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&cold),
+                mode,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&lock_path).unwrap(), bytes.as_bytes());
+        assert!(
+            project
+                .path()
+                .join("node_modules/plugin/package.json")
+                .is_file()
+        );
+    }
 }
 
 #[test]
@@ -1896,7 +2185,13 @@ fn frozen_refuses_corrupt_warm_content_without_redownloading() {
     let lock_path = project.path().join("tapid.lock");
     let before = fs::read(&lock_path).unwrap();
     let lock = read_lock(&lock_path).unwrap();
-    let digest = lock.packages().values().next().unwrap().tree_digest();
+    let digest = lock
+        .packages()
+        .values()
+        .next()
+        .unwrap()
+        .tree_digest()
+        .unwrap();
     fs::write(
         warm.join("trees").join(digest).join("package.json"),
         b"tampered",

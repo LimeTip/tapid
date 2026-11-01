@@ -5,6 +5,9 @@ use tapid_manifest::DependencyKind;
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct AddArgs {
+    /// Persist selections and manifest edits without activating dependencies.
+    #[arg(long, conflicts_with = "allow_unverified_registry_artifacts")]
+    pub(crate) lockfile_only: bool,
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -35,6 +38,9 @@ pub(crate) struct AddArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct RemoveArgs {
+    /// Persist selections and manifest edits without activating dependencies.
+    #[arg(long, conflicts_with = "allow_unverified_registry_artifacts")]
+    pub(crate) lockfile_only: bool,
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -47,6 +53,9 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
+    /// Persist selections and manifest edits without activating dependencies.
+    #[arg(long, conflicts_with = "allow_unverified_registry_artifacts")]
+    pub(crate) lockfile_only: bool,
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -155,9 +164,14 @@ pub(crate) fn add(args: AddArgs, json: bool) -> ExitCode {
             }
         })
         .collect::<Vec<_>>();
-    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_add(manifest, &mutations)
-    });
+    let result = mutate_and_install(
+        &args.common,
+        json,
+        false,
+        args.lockfile_only,
+        args.dry_run,
+        |manifest| crate::application::lifecycle::plan_add(manifest, &mutations),
+    );
     report(result, json, "add", "Added dependencies")
 }
 
@@ -175,20 +189,27 @@ pub(crate) fn remove(args: RemoveArgs, json: bool) -> ExitCode {
             json,
         );
     }
-    let result = mutate_and_install(&args.common, json, false, args.dry_run, |manifest| {
-        crate::application::lifecycle::plan_remove(manifest, &args.packages)
-    });
+    let result = mutate_and_install(
+        &args.common,
+        json,
+        false,
+        args.lockfile_only,
+        args.dry_run,
+        |manifest| crate::application::lifecycle::plan_remove(manifest, &args.packages),
+    );
     report(result, json, "remove", "Removed dependencies")
 }
 
 pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
     use crate::application::lifecycle::{SavePolicy, UpdateRequest};
     let result = (|| {
-        let selection = crate::application::lifecycle::resolve_workspace(
-            &args.common.project_dir,
-            args.common.workspace.as_deref(),
-        )
-        .map_err(|error| OperationFailure::unchanged(&args.common.project_dir, error))?;
+        let resolve = if args.lockfile_only && !args.dry_run {
+            crate::application::selection::resolve_workspace
+        } else {
+            crate::application::lifecycle::resolve_workspace
+        };
+        let selection = resolve(&args.common.project_dir, args.common.workspace.as_deref())
+            .map_err(|error| OperationFailure::unchanged(&args.common.project_dir, error))?;
         let plan = crate::application::lifecycle::plan_update(
             &selection.manifest,
             &args.packages,
@@ -222,6 +243,20 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
                 args.common.allow_unverified_registry_artifacts,
             )
             .map(LifecycleReport::Preview);
+        }
+        if args.lockfile_only {
+            let crate::application::install::InstallMode::Update(request) = mode else {
+                unreachable!()
+            };
+            return crate::application::selection::run(
+                &selection.root_dir,
+                &selection.manifest_path,
+                &selection.manifest,
+                &plan.manifest,
+                args.common.registry_fixture.as_deref(),
+                Some(request),
+            )
+            .map(LifecycleReport::Selected);
         }
         crate::application::install::run(
             crate::application::install::InstallRequest {
@@ -329,16 +364,19 @@ fn mutate_and_install(
     common: &CommonArgs,
     json: bool,
     refresh: bool,
+    lockfile_only: bool,
     dry_run: bool,
     planner: impl FnOnce(
         &tapid_manifest::PackageManifest,
     ) -> Result<crate::application::lifecycle::LifecyclePlan, OperationalError>,
 ) -> Result<LifecycleReport, OperationFailure> {
-    let selection = crate::application::lifecycle::resolve_workspace(
-        &common.project_dir,
-        common.workspace.as_deref(),
-    )
-    .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
+    let resolve = if lockfile_only && !dry_run {
+        crate::application::selection::resolve_workspace
+    } else {
+        crate::application::lifecycle::resolve_workspace
+    };
+    let selection = resolve(&common.project_dir, common.workspace.as_deref())
+        .map_err(|error| OperationFailure::unchanged(&common.project_dir, error))?;
     let plan = planner(&selection.manifest)
         .map_err(|error| OperationFailure::unchanged(&selection.root_dir, error))?;
     let mode = if refresh {
@@ -357,6 +395,17 @@ fn mutate_and_install(
             common.allow_unverified_registry_artifacts,
         )
         .map(LifecycleReport::Preview);
+    }
+    if lockfile_only {
+        return crate::application::selection::run(
+            &selection.root_dir,
+            &selection.manifest_path,
+            &selection.manifest,
+            &plan.manifest,
+            common.registry_fixture.as_deref(),
+            None,
+        )
+        .map(LifecycleReport::Selected);
     }
     crate::application::install::run(
         crate::application::install::InstallRequest {
@@ -380,6 +429,7 @@ fn mutate_and_install(
 
 #[derive(Debug)]
 enum LifecycleReport {
+    Selected(crate::application::selection::SelectionReport),
     Installed(crate::application::install::InstallReport),
     Preview(crate::application::preview::PreviewReport),
 }
@@ -391,6 +441,7 @@ fn report(
     action: &str,
 ) -> ExitCode {
     match result {
+        Ok(LifecycleReport::Selected(report)) => crate::output::selection(&report, operation, json),
         Ok(LifecycleReport::Preview(report)) => {
             crate::output::preview::report(&report, operation, json)
         }
@@ -436,6 +487,7 @@ mod tests {
 
         let result = add(
             AddArgs {
+                lockfile_only: false,
                 dry_run: false,
                 packages: vec!["react@^18.0.0".into()],
                 dev: false,
@@ -504,7 +556,7 @@ mod stale_tests {
             registry_fixture: Some(fixture),
             allow_unverified_registry_artifacts: false,
         };
-        let result = mutate_and_install(&common, false, false, false, |manifest| {
+        let result = mutate_and_install(&common, false, false, false, false, |manifest| {
             let plan = crate::application::lifecycle::plan_add(
                 manifest,
                 &[crate::application::lifecycle::DependencyMutation {

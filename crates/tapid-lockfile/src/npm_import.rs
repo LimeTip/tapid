@@ -4,7 +4,6 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use tapid_core::{ArtifactDigest, PackageIntegrity, PackageName, PackageVersion};
 
-mod json;
 mod parse;
 mod workspace;
 pub use parse::NpmImportError;

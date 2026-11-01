@@ -3,6 +3,7 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use std::process::ExitCode;
 
 mod dependency_scripts;
+pub(super) mod inputs;
 pub(crate) use dependency_scripts::ExecutionOverrides;
 pub(crate) mod explain;
 pub(crate) mod install;
@@ -13,6 +14,7 @@ pub(crate) mod preview;
 mod release_record;
 pub(crate) mod release_verification;
 pub(crate) mod replay;
+pub(crate) mod selection;
 pub(crate) mod status;
 
 pub(crate) mod tools;

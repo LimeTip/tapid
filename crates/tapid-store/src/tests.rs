@@ -93,6 +93,74 @@ fn version_two_coordinator(project: &Path, state: &str) -> PathBuf {
 }
 
 #[test]
+fn version_four_activation_coordinator_supports_publication_and_recovery() {
+    for committed in [false, true] {
+        let project = tapid_test_support::TempProject::new("v4-activation-coordinator").unwrap();
+        let store = Store::new(project.path().join("store"));
+        let path = coordinator(project.path(), "Prepared");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        record["version"] = serde_json::json!(4);
+        record["kind"] = serde_json::json!("Activation");
+        fs::write(&path, record.to_string()).unwrap();
+        let publication = store.transaction().publish_for_lifecycle(&path).unwrap();
+        drop(publication);
+        let created = make_marked_tree(&store.root, "interrupted activation");
+        write_store_journal(&store.root, &path, &[created.to_string()], false).unwrap();
+        if committed {
+            record["state"] = serde_json::json!("Committed");
+            fs::write(&path, record.to_string()).unwrap();
+        }
+        store.recover_transactions().unwrap();
+        assert_eq!(
+            store.root.join("trees").join(created.as_str()).exists(),
+            committed
+        );
+        assert!(!store.root.join(STORE_JOURNAL).exists());
+    }
+}
+
+#[test]
+fn nonactivation_coordinators_cannot_publish_or_recover_store_content() {
+    for (version, kind) in [
+        (4, Some("Metadata")),
+        (4, None),
+        (4, Some("Unknown")),
+        (3, Some("Metadata")),
+        (5, Some("Activation")),
+    ] {
+        let project = tapid_test_support::TempProject::new("nonactivation-coordinator").unwrap();
+        let store = Store::new(project.path().join("store"));
+        let path = coordinator(project.path(), "Prepared");
+        let legacy = fs::read(&path).unwrap();
+        let mut record: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        record["version"] = serde_json::json!(version);
+        if let Some(kind) = kind {
+            record["kind"] = serde_json::json!(kind);
+        }
+        let invalid = serde_json::to_vec(&record).unwrap();
+        fs::write(&path, &invalid).unwrap();
+        assert!(
+            store.transaction().publish_for_lifecycle(&path).is_err(),
+            "version {version}, kind {kind:?}"
+        );
+        assert!(!store.root.join(STORE_JOURNAL).exists());
+
+        // A coordinator replaced after publication must also fail closed on recovery.
+        fs::write(&path, legacy).unwrap();
+        let created = make_marked_tree(&store.root, "must survive invalid coordinator");
+        write_store_journal(&store.root, &path, &[created.to_string()], false).unwrap();
+        fs::write(&path, invalid).unwrap();
+        assert!(
+            store.recover_transactions().is_err(),
+            "version {version}, kind {kind:?}"
+        );
+        assert!(store.root.join("trees").join(created.as_str()).is_dir());
+        assert!(store.root.join(STORE_JOURNAL).is_file());
+    }
+}
+
+#[test]
 fn prepared_coordinator_recovery_removes_only_transaction_created_tree() {
     let root = root();
     let project = root.with_extension("project");

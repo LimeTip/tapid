@@ -361,12 +361,12 @@ fn evidence_changes(before: &GraphSnapshot, after: &GraphSnapshot) -> Vec<GraphE
 }
 
 fn artifact(package: &crate::LockedPackage) -> BTreeMap<String, String> {
-    let mut evidence: BTreeMap<String, String> = [
-        ("integrity".into(), package.artifact_integrity().into()),
-        ("tree_digest".into(), package.tree_digest().into()),
-        ("unpacked_digest".into(), package.unpacked_digest().into()),
-    ]
-    .into();
+    let mut evidence: BTreeMap<String, String> =
+        [("integrity".into(), package.artifact_integrity().into())].into();
+    if let Some(receipt) = package.source_tree_receipt() {
+        evidence.insert("tree_digest".into(), receipt.tree_digest().into());
+        evidence.insert("unpacked_digest".into(), receipt.unpacked_digest().into());
+    }
     if let Some(value) = package.artifact_url() {
         evidence.insert("url".into(), value.into());
     }

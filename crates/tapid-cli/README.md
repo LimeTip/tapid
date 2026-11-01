@@ -27,6 +27,54 @@ The generated release installers select archives through `https://tapid.dev/rele
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
+`install`, `add`, `remove`, and `update` accept `--lockfile-only` to persist
+reviewed dependency selections while the installed application continues using its
+existing dependencies. Plain install writes only the root `tapid.lock`, preserving
+manifest bytes. Dependency edits use the existing dependency sections, workspace
+selection, targeted-update preferences, and save policies, writing only selected
+manifests and the root lock. Resolution runs once; publication rechecks captured
+manifests, membership, lock bytes, registry configuration, lifecycle policy, and
+accepted copied-file evidence before committing the same validated graph.
+
+Registry selection may request metadata but never registry archives. Copied file
+and Git sources use existing immutable pinning and safe archive validation in
+disposable staging; Git retrieval may be necessary. This mode does not initialize,
+recover, or publish the verified store, execute hooks or root scripts, or change
+root/member `node_modules`, shims, and ownership markers, including unowned trees.
+Copied sources retain their existing root-only support restrictions.
+
+The mode conflicts with `--offline`, `--frozen`, dependency execution overrides,
+and `--allow-unverified-registry-artifacts`; it is unavailable on `ci`.
+`--dry-run --lockfile-only` uses the existing read-only preview: no recovery,
+staging, journal, project writes, or cache writes. Copied-source previews remain
+unsupported. Human and schema-v1 JSON results distinguish persisted selections
+and pending verification from installation and report actual metadata effects.
+
+Native selection writes schema 11, with explicit nullable source-tree receipts.
+Reusable receipts require matching source and artifact evidence; lifecycle outputs
+are not retained by selection. A matching imported schema-8 install preserves its
+lock and receipts byte for byte without hydration. Explicit imported dependency
+edits deliberately resolve a native graph; unsupported topology or failed resolution
+leaves prior project outputs intact.
+
+Matching ordinary and frozen installs hydrate pending schema-11 receipts from
+exact pins without metadata reselection. Archive integrity, safety, package identity,
+and tree content are verified before receipt publication or activation. Schema 11
+is retained after hydration. Frozen hydration executes no dependency hooks. `ci`
+and offline installation reject pending receipts before project/store recovery or
+mutation, including a pending lock recorded in an interrupted decision. Hydrate
+with `install --frozen` first; completed native locks support existing ci/offline
+replay, with valid warm content still required for offline execution.
+
+Installation transactions use lifecycle journal version 4 with explicit Activation
+or Metadata kinds. Metadata decisions contain bounded, validated manifest/lock
+before/after evidence and never recover installed layouts or the store. Before the
+durable decision, recovery preserves prior outputs; afterward, it completes the
+new output set. Publication is recoverable across files, not simultaneous. Metadata
+selection settles metadata decisions before planning and refuses activation recovery.
+Legacy journal versions 1–3 retain their activation semantics; older clients reject
+version 4. See [the receipt and transaction decision](../../docs/adr/0012-lockfile-only-selections.md).
+
 ## Commands
 
 ```text

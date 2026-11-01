@@ -225,7 +225,7 @@ impl GraphSnapshot {
         let schema = format
             .lockfile_version
             .ok_or(SnapshotError::UnsupportedFormat)?;
-        if !matches!(schema, 4..=10) {
+        if !matches!(schema, 4..=11) {
             return Err(SnapshotError::UnsupportedFormat);
         }
         preflight::check(bytes)?;

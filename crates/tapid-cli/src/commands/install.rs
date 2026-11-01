@@ -4,6 +4,9 @@ use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
+    /// Persist dependency selections without activating node_modules or running hooks.
+    #[arg(long, conflicts_with_all = ["offline", "frozen", "allow_unverified_registry_artifacts", "allow_unapproved_dependency_scripts", "unsafe_no_dependency_sandbox"])]
+    pub(crate) lockfile_only: bool,
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -58,6 +61,9 @@ fn parse_package_argument(value: &str) -> Result<String, String> {
 pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
     if args.dry_run {
         return preview(&args, json);
+    }
+    if args.lockfile_only {
+        return select(&args, json);
     }
     let mut reporter = crate::output::install::Reporter::new(json);
     let overrides = crate::application::ExecutionOverrides {
@@ -125,6 +131,43 @@ pub(crate) fn run(mut args: Args, json: bool) -> ExitCode {
             reporter.failure(error);
             ExitCode::from(1)
         }
+    }
+}
+
+fn select(args: &Args, json: bool) -> ExitCode {
+    let result = (|| {
+        let selection = crate::application::selection::resolve_workspace(
+            &args.project_dir,
+            args.workspace.as_deref(),
+        )
+        .map_err(|e| OperationFailure::unchanged(&args.project_dir, e))?;
+        let after = if let Some(spec) = &args.package {
+            let (name, requirement) = crate::package_spec::parse(spec);
+            crate::application::lifecycle::plan_add(
+                &selection.manifest,
+                &[crate::application::lifecycle::DependencyMutation {
+                    name: name.into(),
+                    requirement: Some(requirement.into()),
+                    kind: tapid_manifest::DependencyKind::Dependencies,
+                }],
+            )
+            .map_err(|e| OperationFailure::unchanged(&selection.root_dir, e))?
+            .manifest
+        } else {
+            selection.manifest.clone()
+        };
+        crate::application::selection::run(
+            &selection.root_dir,
+            &selection.manifest_path,
+            &selection.manifest,
+            &after,
+            args.registry_fixture.as_deref(),
+            None,
+        )
+    })();
+    match result {
+        Ok(report) => crate::output::selection(&report, "install", json),
+        Err(error) => crate::output::json::failure_or_human(&error, "install", json),
     }
 }
 

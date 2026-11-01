@@ -1,4 +1,4 @@
-//! Reject duplicate keys rather than silently replacing selected npm entries.
+//! Reject duplicate keys rather than silently replacing selected lockfile entries.
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, SeqAccess, Visitor},

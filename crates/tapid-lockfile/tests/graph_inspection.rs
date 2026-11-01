@@ -531,3 +531,44 @@ fn validated_snapshot_debug_does_not_expose_store_attestations() {
     let snapshot = GraphSnapshot::from_bytes(value.to_string().as_bytes()).unwrap();
     assert!(!format!("{snapshot:?}").contains("hmac-sha256-"));
 }
+
+#[test]
+fn pending_receipt_hydration_changes_evidence_without_changing_selections() {
+    let verified = package("pending", "1.0.0");
+    let pending = LockedPackage::select_with_context_and_provenance(
+        verified.registry(),
+        verified.name(),
+        verified.version(),
+        verified.artifact_integrity(),
+        (
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        ),
+        RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    let key = pending.key();
+    let mut lock = Lockfile::new_selection(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    lock.insert_packages([pending]).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let before = GraphSnapshot::from_bytes(lock.to_json().unwrap().as_bytes()).unwrap();
+    assert_eq!(before.inspect().schema, 11);
+    assert_eq!(before.inspect().instances.len(), 1);
+    lock.attach_source_tree_receipt(&key, verified.source_tree_receipt().unwrap())
+        .unwrap();
+    let after = GraphSnapshot::from_bytes(lock.to_json().unwrap().as_bytes()).unwrap();
+    let comparison = before.compare(&after);
+    assert!(comparison.selected_graph_supported);
+    assert_eq!(comparison.changed_selections, 0);
+    assert!(comparison.added_instances.is_empty());
+    assert!(comparison.removed_instances.is_empty());
+    assert!(comparison.relationship_changes.is_empty());
+    let change = comparison
+        .evidence_changes
+        .iter()
+        .find(|change| change.dimension == "source_artifact")
+        .unwrap();
+    assert!(!change.before.contains_key("tree_digest"));
+    assert!(!change.before.contains_key("unpacked_digest"));
+    assert_eq!(change.after["tree_digest"], verified.tree_digest().unwrap());
+}
