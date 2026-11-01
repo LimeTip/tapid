@@ -1,0 +1,6 @@
+{
+  "name": "tapid-npm-pack-interop",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": { "npm": "10.9.2" }
+}

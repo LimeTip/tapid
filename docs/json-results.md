@@ -645,3 +645,21 @@ or reconstruct historical ownership or ordering. Optional operation IDs and dura
 completion records are deferred; no historical operation query is provided. The
 [controlled workflow evaluation](testing.md#bounded-wait-and-lost-response-evaluation)
 does not measure production response-loss frequency.
+
+## Local packing
+
+`tapid --json pack [directory] --dry-run [--output path]` and creation with required
+`--output path` use schema version 1, operation `pack`. Preview is unchanged;
+creation is committed; post-activation staging cleanup failure is
+`committed_cleanup_pending`. Handled failures have `data: null` while retaining
+completed activation state.
+
+Successful data contains `name`, `version`, `preview`, optional lossless native
+`destination`, complete ordered `files` (`path`, `size`, `sha256`, numeric `mode`),
+`file_count`, `content_bytes`, `archive` (`size`, `sha256`),
+`selection_policy_version: 1`, `gitignore_not_used`, and
+`snapshot.consistency: "not_atomic"`. Inventory paths retain exact accepted spelling
+without truncation or sanitization. They are package-relative; the tar encoder adds
+`package/`. `gitignore_not_used` reports a root `.gitignore` without root `.npmignore`;
+`.gitignore` never filters selection. Preview digests describe captured bytes for that
+invocation only, not a snapshot or authorization for a later creation.

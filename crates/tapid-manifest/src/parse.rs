@@ -122,7 +122,7 @@ fn valid_command(value: &str) -> bool {
         && !value.chars().any(|c| c == '\0' || c.is_control())
 }
 
-fn valid_target(value: &str) -> bool {
+pub(crate) fn valid_target(value: &str) -> bool {
     if value.is_empty() || value.contains('\0') || value.contains('\\') {
         return false;
     }

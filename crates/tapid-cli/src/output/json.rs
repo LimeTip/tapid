@@ -8,7 +8,9 @@ mod explain;
 mod lock_graph;
 pub(crate) use lock_graph::lock_graph;
 mod outdated;
+mod pack;
 mod preview;
+pub(crate) use pack::pack;
 mod tools;
 mod why;
 

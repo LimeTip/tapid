@@ -164,6 +164,11 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test --offline
+      - name: Verify pinned npm archive interoperability
+        shell: bash
+        run: |
+          npm ci --prefix tests/npm-pack-interop --ignore-scripts --no-audit --no-fund
+          TAPID_TEST_NODE="$(node -p 'process.execPath')" node --experimental-strip-types scripts/dev.ts test -p tapid-publish --test npm_interop --locked -- --ignored
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check

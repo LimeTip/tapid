@@ -525,3 +525,27 @@ pending-recovery guidance before another mutation. Current status and an
 committed, especially after cleanup or a later mutation. Operation IDs and durable
 completion records remain deferred. See [JSON results](../../docs/json-results.md#contention-and-lost-responses)
 and the [workflow evaluation](../../docs/testing.md#bounded-wait-and-lost-response-evaluation).
+
+### Local npm tarballs
+
+```sh
+tapid pack ./my-package --dry-run
+tapid --json pack ./my-package --output ./my-package.tgz
+```
+
+`pack` captures one directory (default `.`), never executes lifecycle scripts,
+and prints the complete ordered inventory, normalized modes, sizes, and SHA-256
+identities. Creation requires `--output`; relative output paths use the invocation
+directory, independent of package selection. Preview accepts an optional destination,
+validates it, and writes nothing. Existing destinations, including symlinks, are refused.
+See [the packing policy](../tapid-publish/README.md#npm-archive-capability) for the
+supported files/ignore grammar, exclusions, bounds, and compatibility limitations.
+
+Creation captures and encodes before exclusively creating a sibling `.tapid-pack-*`
+staging file, writing and syncing it, and atomically hard-linking it to the destination
+without replacement. Filesystems lacking this operation fail explicitly. Interrupted
+operations may leave recognizable staging orphans or a complete destination; no
+partial destination is activated. Orphans are always excluded from package input
+and are not automatically deleted. A post-activation cleanup error reports committed
+output with cleanup pending. Atomic visibility does not promise power-loss durability.
+Keep source and destination trees trusted and stable throughout the invocation.

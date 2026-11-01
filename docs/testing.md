@@ -268,3 +268,19 @@ durable completion records are therefore deferred pending evidence of a required
 workflow needing that attribution, rather than adding cross-agent coordination
 for isolated worktrees. Native locking behavior remains subject to the existing
 Linux, macOS, and Windows CI matrix.
+
+## npm archive interoperability
+
+The native test matrix provisions integrity-locked npm 10.9.2 with scripts disabled
+in `tests/npm-pack-interop`, then runs the required named lane on each platform:
+
+```sh
+npm ci --prefix tests/npm-pack-interop --ignore-scripts --no-audit --no-fund
+TAPID_TEST_NODE="$(node -p 'process.execPath')" node --experimental-strip-types scripts/dev.ts test -p tapid-publish --test npm_interop --locked -- --ignored
+```
+
+The explicit lane fails if provisioning or absolute Node configuration is missing.
+Ordinary capability tests do not require this fixture. Runtime assertions use isolated
+homes/configuration/cache/temp paths and offline scripts-disabled npm inspection and
+installation. They verify metadata, installed bytes, require/import behavior, bin
+mode where supported, and absent lifecycle markers without registry publication.
