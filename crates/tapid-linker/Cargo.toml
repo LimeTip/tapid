@@ -17,3 +17,6 @@ path = "src/lib.rs"
 tapid-core = { version = "0.0.7", path = "../tapid-core" }
 tapid-manifest = { version = "0.0.10", path = "../tapid-manifest" }
 sha2 = "0.10"
+
+[dev-dependencies]
+tapid-test-support = { path = "../tapid-test-support" }

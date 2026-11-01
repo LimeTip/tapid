@@ -24,3 +24,48 @@ Windows collisions are checked against the actual output paths produced by repla
 The CLI's native Windows materialization regression runs in the existing Windows CI job. It executes both wrapper formats for a Node shebang control, checks argument and exit propagation, and verifies rejection before any shim write for case, extension, and sigma collisions, preserving sentinel output files. It does not claim exhaustive filesystem casing coverage.
 
 This crate does not execute scripts, enforce a process sandbox, authenticate registries, or itself mutate the filesystem. Runtime platform checks remain required. Other platforms have no supported link strategy in this release.
+
+## Shim collision work fixture
+
+One private accumulator retains entries and generated-output reservations across
+registry and workspace population, then sorts once by target and source. Source
+validation remains separate: workspace bins inspect the real canonical source
+but retain the staged package-link source in the plan. Reservations still precede
+interpreter inspection. `validate_targets` shares the same reservation operation.
+
+`shims::tests::large_mixed_fixture_measures_indexed_work` exercises the production
+population and insertion paths with 5,000 registry commands (`r0000`–`r4999`) and
+5,000 workspace commands (`w0000`–`w4999`) in one output directory. Two real Node
+source files serve all mappings. Private per-invocation test counters observe
+key generation and set-insertion attempts; no instrumentation is compiled into
+production builds. A pairwise baseline compares the same ordered generated
+output identities and counts actual prior-entry comparisons.
+
+Measured on Darwin arm64, 2026-10-28, against the working changes based on
+`99c2bffa2418cc49551db8ce64fe82c9c479b1ca`:
+
+| Strategy | Successful generated keys | Successful reservation attempts | Pairwise comparisons |
+| --- | ---: | ---: | ---: |
+| Unix | 10,000 | 10,000 | 49,995,000 |
+| Windows | 20,000 | 20,000 | 49,995,000 |
+
+After those successful insertions, a separate workspace package repeats `r0000`.
+Both methods reject it. Total generated keys become 10,001 / 20,002 and total
+reservation attempts become 10,001 / 20,001 respectively: Windows eagerly
+constructs both keys but stops reserving at the first collision. The baseline
+finds this duplicate at its first prior entry, totaling 49,995,001 comparisons.
+Counters at the registry/workspace transition also verify that registry keys
+are generated only once.
+
+Reproduce from the repository root (Node 22 or another supported version):
+
+```sh
+CARGO_TARGET_DIR=target node --experimental-strip-types scripts/dev.ts test -p tapid-linker --lib --locked large_mixed_fixture_measures_indexed_work -- --nocapture
+```
+
+Reservation attempts are not internal BTree comparisons. These counts establish
+elimination of pairwise scanning and registry-key reconstruction, not a
+wall-clock or application-level speedup. Broader application benchmarks belong
+to #308. Windows strategy tests on Unix do not establish native Windows path
+encoding or wrapper execution; the existing native Windows CI regression owns
+that evidence.
