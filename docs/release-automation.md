@@ -34,7 +34,7 @@ Rerunning preparation preserves the open `release/prepare` PR and reports its li
 
 The merged release intent starts the "Release Tapid" workflow on `main`. Its actual file remains `crates-publication.yml` for crates.io identity compatibility. Ordinary changes without a release intent do not publish a release.
 
-The coordinator first checks the GitHub environment and branch policies and waits for CI, CodeQL, and command-help checks on the exact source commit. Missing setup blocks the run before tagging. Before the `stable-release` approval, read the candidate summary. It identifies the selected source commit and version, reviewed notes, the ten unsigned files and their digests, including all six archives and both generated installers, package compatibility results, and the exact dependency-ordered crate plan. Approval authorizes publication of this whole candidate, including crates.io. The reviewer must be independent of the actor who started the run.
+The coordinator first checks the GitHub environment and branch policies and waits for successful main-push CI and CodeQL analysis on the exact source commit; command-help tests are owned by that CI. Missing setup blocks the run before tagging. Before the `stable-release` approval, read the candidate summary. It identifies the selected source commit and version, reviewed notes, the ten unsigned files and their digests, including all six archives and both generated installers, package compatibility results, and the exact dependency-ordered crate plan. Approval authorizes publication of this whole candidate, including crates.io. The reviewer must be independent of the actor who started the run.
 
 After approval, the workflow signs and creates the draft, downloads and verifies its exact eleven assets, executes all six target binaries on native runners, promotes the verified draft, checks public installation and upgrades on Linux, macOS, and Windows, then publishes missing crates and checks a clean Cargo installation. It carries the tag, source SHA, release ID, and asset identity between jobs. Operators do not copy them into separate dispatch forms.
 
@@ -52,3 +52,54 @@ Start with the failed run's summary and preserve its evidence. Retry only after 
 - If a planner correction changes the order recorded in the original release intent, the approved-suffix check blocks recovery. Review and explicitly approve a recovery procedure for the corrected order before publishing more crates. Do not edit the immutable tagged intent or weaken the suffix check to make a retry pass.
 
 The signing-key check, standalone draft verification, and public smoke workflows remain available for diagnostics. Their inputs do not define the ordinary automatic flow; binary candidate building is called by the coordinator. The detailed [distribution runbook](release-distribution.md) retains exact asset, registry, and endpoint checks for investigation.
+
+## Completion ledger and authorization provenance
+
+The final `report` job runs with `always()` after every coordinator stage and retains
+`release-evidence-<attempt>` for 30 days. It contains `release-evidence.json`
+(schema `tapid-release-evidence-v1`) and a concise `summary.md`. Download it from
+the coordinator run; no numeric IDs need to be transferred to another workflow.
+The report has read-only GitHub permissions and cannot satisfy a signing,
+promotion, smoke, or crates publication prerequisite.
+
+The ledger records candidate fingerprints, source and annotated tag identity,
+notes and plan digests, exact assets, preparation PR, artifact IDs/digests,
+authorization reviewer and protected-job references, stage and native/smoke job
+results, independently confirmed registry versions and remaining suffix, clean
+locked installation version/help, and immutable public release read-back.
+`complete` requires every mandatory result. Missing, failed, cancelled or skipped
+evidence produces `incomplete` with reasons and coordinator recovery links. An
+artifact validation failure never becomes a success report. The ledger records
+only allowlisted data; API comments, error response bodies and authentication
+material are excluded.
+
+Before signing, the protected job reads GitHub's workflow review history and the
+attempt-specific job records. It requires one independent `stable-release`
+approval, the main-only coordinator identity, and the currently executing
+protected job. GitHub's [review-history response](https://docs.github.com/en/rest/actions/workflow-runs#get-the-review-history-for-a-workflow-run)
+does not identify an approval timestamp or run attempt. The first attempt can
+bind that single review to this run and its immutable unsigned artifact; no
+review timestamp is invented. It retains `release-authorization-1` before exposing
+the signing key.
+
+A retry within the same run must download that exact first-attempt receipt from
+this run and prove the same source, workflow SHA, notes, plan and unsigned asset
+fingerprint. The current history must still identify the same single independent
+reviewer and environment, and the current protected job must match the current
+attempt. The receipt records both the approving attempt and the retained artifact
+ID. Changed bytes, missing/expired receipts, additional ambiguous reviews or
+unprovable provenance stop signing. Use a fresh manual recovery dispatch when
+that provenance cannot be established; it requires fresh authorization. Preserve
+original retained signed bytes for incomplete-draft recovery rather than building
+replacement archives. A fresh dispatch cannot recover an incomplete draft without
+those original bytes; preserve the failed run and investigate rather than
+replacing assets.
+
+Cancellation can prevent GitHub from starting or finishing the final report job.
+Use the earlier unsigned candidate, authorization and retained signed-payload
+artifacts and job logs in that case; absence of a final ledger is incomplete
+evidence. Artifact expiry does not authorize rebuilding conflicting draft bytes.
+A passing local test or policy check does not establish live App installation,
+reviewer policy activation, Trusted Publisher matching or successful publication.
+Verify those controls with a non-promoting hosted candidate trial before enabling
+the automatic publication lane, then retain the next reviewed release's ledger.
