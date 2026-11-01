@@ -225,6 +225,27 @@ impl ImportedNpmLockfile {
     pub fn root_manifest_digest(&self) -> &str {
         &self.root_manifest_digest
     }
+    // Only persisted declaration fields; never inspect manifests or scripts.
+    pub(crate) fn declaration_fields(&self, path: &str) -> BTreeMap<String, String> {
+        let mut fields = BTreeMap::new();
+        for field in [
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+            "peerDependenciesMeta",
+        ] {
+            if let Some(value) = self.npm_lock["packages"][path].get(field) {
+                fields.insert(field.into(), value.to_string());
+            }
+        }
+        fields
+    }
+
+    pub(crate) fn workspace_manifest_digests(&self) -> &BTreeMap<String, String> {
+        &self.workspace_manifest_digests
+    }
+
     pub fn verified_tree(&self, path: &str) -> Option<&str> {
         self.verified_trees.get(path).map(String::as_str)
     }
