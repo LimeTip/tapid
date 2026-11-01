@@ -41,3 +41,18 @@ attestation with the existing owner-only key, then verifies the output tree
 under the same retained lock. Unlike replay snapshot creation, it creates no
 key, reservation, lease, or copy. Missing authentication material or evicted
 output trees fail explicitly; verification never regenerates lifecycle output.
+
+Normal store-lock acquisition has one five-second monotonic budget per acquisition
+call, including shared reads, exclusive publication, recovery escalation, and
+reacquisition retries. Nonblocking attempts poll at intervals of at most 25 ms,
+capped by remaining time. Expiry returns an I/O `WouldBlock` error (the CLI's
+`STORE_BUSY`). No new attempt starts after expiry; an in-flight attempt may
+complete. Scheduler and filesystem latency can delay return beyond five seconds.
+Separate acquisitions receive separate budgets: this is not a whole-command or
+aggregate waiting deadline. Recovery already started under a lock finishes even
+if the budget expires. Lock ownership and publication isolation are unchanged;
+recovery work, filesystem operations, network requests, and lifecycle execution
+are not time-limited by this policy. Long legitimate holders can cause contention
+failures, and polling provides no fairness guarantee. Five seconds is an initial
+responsiveness policy, not a measured optimum. Cache maintenance continues to
+refuse contention immediately rather than waiting.

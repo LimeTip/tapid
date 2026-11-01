@@ -66,12 +66,11 @@ pub(crate) fn run(args: Args) -> ExitCode {
     };
     let mut policy_inputs = None;
     let outcome = execute(&args, &mut policy_inputs);
-    if let Some(file) = &mut result_file
-        && let Err(error) = result::write(file, &outcome, policy_inputs.as_ref())
-    {
-        eprintln!("error: cannot write run result file: {error}");
-    }
-    match outcome {
+    let delivery = match &mut result_file {
+        Some(file) => result::write(file, &outcome, policy_inputs.as_ref()),
+        None => Ok(()),
+    };
+    render_after_result_delivery(delivery, &mut io::stderr(), || match outcome {
         Ok(outcome) => render_outcome(
             &outcome,
             result_file.is_none().then_some(args.receipt_json),
@@ -81,7 +80,20 @@ pub(crate) fn run(args: Args) -> ExitCode {
                 .flatten(),
         ),
         Err(_) => ExitCode::from(1),
+    })
+}
+
+// Publication failure must be diagnosed before rendering, including on Windows
+// where rendering a completed child exits the process with its full status.
+fn render_after_result_delivery(
+    delivery: io::Result<()>,
+    diagnostics: &mut impl Write,
+    render: impl FnOnce() -> ExitCode,
+) -> ExitCode {
+    if let Err(error) = delivery {
+        let _ = writeln!(diagnostics, "error: cannot write run result file: {error}");
     }
+    render()
 }
 
 fn execute(
