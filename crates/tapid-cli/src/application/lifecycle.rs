@@ -8,7 +8,7 @@ use std::{
 use tapid_core::{PackageName, PackageVersion, RegistryOrigin};
 use tapid_lockfile::{Lockfile, LockfilePackageKey, LockfilePackageSource};
 use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
-use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
+use tapid_registry_client::{HttpTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
 
 #[allow(dead_code)]
@@ -470,7 +470,7 @@ fn versions_from_fixture(
 }
 
 fn versions_from_registry(
-    transport: &HttpsTransport,
+    transport: &impl HttpTransport,
     origin: &RegistryOrigin,
     name: &PackageName,
 ) -> Result<Vec<(PackageVersion, BTreeSet<String>)>, OperationalError> {
@@ -526,6 +526,61 @@ fn outdated_entries(
     offline: bool,
     outcome: &mut OperationOutcome,
 ) -> Result<Vec<OutdatedEntry>, OperationalError> {
+    let mut transports = std::collections::BTreeMap::new();
+    let allowed_origins = std::sync::OnceLock::new();
+    outdated_entries_with(
+        project_dir,
+        workspace_selector,
+        registry_fixture,
+        offline,
+        outcome,
+        &mut |config, origin, name| {
+            crate::online::metadata_transport_for_package(
+                &mut transports,
+                config,
+                origin,
+                name,
+                allowed_origins.get_or_init(|| config.configured_origins()),
+            )
+            .and_then(|transport| versions_from_registry(transport, origin, name))
+        },
+        &mut read_fixture,
+    )
+}
+
+type Versions = Vec<(PackageVersion, BTreeSet<String>)>;
+type CachedVersions = Result<Versions, (ErrorKind, String)>;
+type MetadataCache = std::collections::BTreeMap<(RegistryOrigin, PackageName), CachedVersions>;
+
+fn cached_versions(
+    metadata: &mut MetadataCache,
+    origin: RegistryOrigin,
+    name: PackageName,
+    load: impl FnOnce() -> Result<Versions, OperationalError>,
+) -> &CachedVersions {
+    metadata.entry((origin, name)).or_insert_with(|| {
+        load()
+            .map(|mut versions| {
+                versions.sort();
+                versions
+            })
+            .map_err(|error| (error.kind, error.to_string()))
+    })
+}
+
+fn outdated_entries_with(
+    project_dir: &Path,
+    workspace_selector: Option<&str>,
+    registry_fixture: Option<&Path>,
+    offline: bool,
+    outcome: &mut OperationOutcome,
+    load_registry: &mut impl FnMut(
+        &crate::registry::RegistryConfig,
+        &RegistryOrigin,
+        &PackageName,
+    ) -> Result<Versions, OperationalError>,
+    load_fixture: &mut impl FnMut(&Path) -> Result<Fixture, OperationalError>,
+) -> Result<Vec<OutdatedEntry>, OperationalError> {
     let selection = resolve_workspace(project_dir, workspace_selector)?;
     outcome.project_dir = selection.root_dir.clone();
     let project_dir = selection.root_dir.as_path();
@@ -570,8 +625,6 @@ fn outdated_entries(
         .collect::<std::collections::BTreeMap<_, _>>();
     let fixture = std::sync::OnceLock::new();
     let mut metadata = std::collections::BTreeMap::new();
-    let mut transports = std::collections::BTreeMap::new();
-    let allowed_origins = registry_config.configured_origins();
     let mut entries = Vec::new();
     for (identity, declared, kind) in direct_dependencies {
         let identity = identity.clone();
@@ -680,12 +733,11 @@ fn outdated_entries(
             })
             .map(|(key, _)| key.version.clone())
             .max();
-        let cache_key = (origin.clone(), package_name.clone());
-        let versions = metadata.entry(cache_key).or_insert_with(|| {
-            let result = match registry_fixture {
+        let versions = cached_versions(&mut metadata, origin.clone(), package_name.clone(), || {
+            match registry_fixture {
                 Some(path) => {
                     let loaded = fixture.get_or_init(|| {
-                        read_fixture(path).map_err(|error| (error.kind, error.to_string()))
+                        load_fixture(path).map_err(|error| (error.kind, error.to_string()))
                     });
                     match loaded {
                         Ok(fixture) => versions_from_fixture(fixture, &origin, &package_name),
@@ -696,18 +748,8 @@ fn outdated_entries(
                     ErrorKind::RegistryMetadataUnavailable,
                     "offline: newer registry versions were not checked; use online outdated or --registry-fixture",
                 )),
-                None => crate::online::metadata_transport_for_package(
-                    &mut transports,
-                    &registry_config,
-                    &origin,
-                    &package_name,
-                    &allowed_origins,
-                ).and_then(|transport| versions_from_registry(transport, &origin, &package_name)),
-            };
-            result.map(|mut versions| {
-                versions.sort();
-                versions
-            }).map_err(|error| (error.kind, error.to_string()))
+                None => load_registry(&registry_config, &origin, &package_name),
+            }
         });
         let (newest_compatible, newest_available, diagnostic) = match versions {
             Ok(versions) => {
@@ -1002,3 +1044,6 @@ mod tests {
         assert_eq!(manifest.peer_dependencies()["foo"], "npm:");
     }
 }
+
+#[cfg(test)]
+mod cache_tests;
