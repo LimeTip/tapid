@@ -1,6 +1,6 @@
 # External adoption evaluation
 
-This work addresses [#307](https://github.com/LimeTip/tapid/issues/307). No complete pilot journey has been evaluated in this checkout. Historical implementation reports are not current evidence. Pilot results do not change [production support](../production-adoption.md).
+This work addresses [#307](https://github.com/LimeTip/tapid/issues/307). The first pilot has a [completed capture of an unsuccessful attempt](uptime-kuma/attempt-2026-11-01/report.md); no successful application journey is established. Historical implementation reports are not current evidence. Pilot results do not change [production support](../production-adoption.md).
 
 The opt-in `evaluate` export in `scripts/evaluate-adoption.ts` accepts a version-1 specification with explicit project/run identity, ordered phases and an evidence destination. Each phase supplies executable/arguments, working directory, explicit environment, deadline in milliseconds, byte output limit, optional required output strings, input/output digest paths, manual steps and preceding prerequisite IDs. `unsupported` records a diagnosed limitation without launching a command. Importing the module executes nothing.
 
@@ -56,7 +56,9 @@ await evaluate(uptimeKumaRun(JSON.parse(readFileSync(process.argv[1], "utf8"))))
 ```
 
 Receipts go to the sibling `<root>-evidence` directory. Review them before publication.
-This command has **not** been executed as a complete external journey here.
+The [first attempt](uptime-kuma/attempt-2026-11-01/report.md) reached the end of this
+specification, including explicit unsupported and prerequisite-blocked phases.
+Reaching the end of capture does **not** establish a successful external journey.
 
 Startup uses a fresh per-check data directory, binds `127.0.0.1:3001`, requires the
 application's listening message plus HTTP 200 containing its HTML title, and terminates
