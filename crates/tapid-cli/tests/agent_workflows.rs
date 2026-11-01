@@ -86,7 +86,9 @@ fn command(project: &TempProject, home: &TempHome, args: &[&str]) -> Command {
         .env_remove("TAPID_NPM_TOKEN")
         .env_remove("TAPID_TEST_AGENT_TOKEN")
         .env_remove("TAPID_TEST_CRASH_POINT")
-        .env_remove("TAPID_TEST_RECOVER_ONLY");
+        .env_remove("TAPID_TEST_RECOVER_ONLY")
+        .env_remove("TAPID_TEST_PAUSE_POINT")
+        .env_remove("TAPID_TEST_PAUSE_READY");
     command
 }
 
@@ -116,34 +118,6 @@ fn npm_project() -> TempProject {
 fn success(result: &Value) {
     assert_eq!(result["outcome"], "success", "{result}");
     assert_eq!(result["retry"], Value::Null);
-}
-
-/// Observe fixture bytes and links without following installed links into the cache.
-#[derive(Debug, PartialEq, Eq)]
-enum SnapshotEntry {
-    File(Vec<u8>),
-    Directory,
-    Link(PathBuf),
-}
-
-fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, SnapshotEntry> {
-    fn visit(root: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, SnapshotEntry>) {
-        let metadata = fs::symlink_metadata(path).unwrap();
-        let bytes = if metadata.is_symlink() {
-            SnapshotEntry::Link(fs::read_link(path).unwrap())
-        } else if metadata.is_dir() {
-            for entry in fs::read_dir(path).unwrap() {
-                visit(root, &entry.unwrap().path(), entries);
-            }
-            SnapshotEntry::Directory
-        } else {
-            SnapshotEntry::File(fs::read(path).unwrap())
-        };
-        entries.insert(path.strip_prefix(root).unwrap().to_owned(), bytes);
-    }
-    let mut entries = BTreeMap::new();
-    visit(root, root, &mut entries);
-    entries
 }
 
 fn preserve_conventions(project: &TempProject) {
@@ -258,6 +232,35 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
                 .graph()
                 .unwrap();
                 assert_eq!(after.packages, before.packages);
+                project.write("observed-before.lock", expected).unwrap();
+                project.write("observed-after.lock", &current).unwrap();
+                let comparison = metrics.call(
+                    &project,
+                    &home,
+                    &[
+                        "--json",
+                        "lock",
+                        "compare",
+                        "observed-before.lock",
+                        "observed-after.lock",
+                        "--limit",
+                        "1",
+                    ],
+                    ("lock", "success", 0),
+                );
+                success(&comparison);
+                assert_eq!(comparison["data"]["summary"]["changed_selections"], 0);
+                assert_eq!(comparison["data"]["summary"]["added_instances"], 0);
+                assert_eq!(
+                    comparison["data"]["before_coverage"]["analysis_complete"],
+                    true
+                );
+                assert!(
+                    comparison["data"]["summary"]["evidence_changes"]
+                        .as_u64()
+                        .unwrap()
+                        > 0
+                );
             } else {
                 assert_eq!(&current, expected);
             }
@@ -276,7 +279,7 @@ fn agent_guide_examples_complete_with_bounded_calls_and_preserved_npm_lock() {
         );
     }
     assert_eq!(examples, 10);
-    metrics.finish(10);
+    metrics.finish(12);
 }
 
 /// Compare complete package records so unrelated version, source, and edge changes fail the test.
@@ -312,7 +315,17 @@ fn agent_dependency_edits_and_repeated_install_preserve_unselected_graph() {
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
     .unwrap();
+    fs::copy(
+        project.path().join("tapid.lock"),
+        project.path().join("observed-before.lock"),
+    )
+    .unwrap();
     invoke(&["add", "@actual/scoped@1.2.0"]);
+    fs::copy(
+        project.path().join("tapid.lock"),
+        project.path().join("observed-after.lock"),
+    )
+    .unwrap();
     let added = tapid_lockfile::Lockfile::from_json(
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
@@ -328,7 +341,38 @@ fn agent_dependency_edits_and_repeated_install_preserve_unselected_graph() {
     )
     .unwrap();
     assert_eq!(after.packages(), before.packages());
-    metrics.finish(4);
+    let comparison = metrics.call(
+        &project,
+        &home,
+        &[
+            "--json",
+            "lock",
+            "compare",
+            "observed-before.lock",
+            "observed-after.lock",
+            "--limit",
+            "1",
+        ],
+        ("lock", "success", 0),
+    );
+    success(&comparison);
+    assert_eq!(comparison["data"]["scope"]["kind"], "all");
+    assert_eq!(
+        comparison["data"]["before_coverage"]["analysis_complete"],
+        true
+    );
+    assert_eq!(
+        comparison["data"]["before_coverage"]["excluded_instances"],
+        0
+    );
+    assert_eq!(comparison["data"]["summary"]["added_instances"], 1);
+    assert_eq!(comparison["data"]["summary"]["removed_instances"], 0);
+    assert_eq!(
+        comparison["data"]["records"][0]["value"]["name"],
+        "@actual/scoped"
+    );
+    assert_eq!(comparison["data"]["summary"]["evidence_changes"], 1); // declaration digest only
+    metrics.finish(5);
 }
 
 /// Treat precise refusal with preserved project outputs as successful completion of unsupported tasks.
@@ -511,6 +555,7 @@ fn agent_same_project_contention_stops_before_dependency_edit() {
     let lock = fs::File::create(project.path().join(".tapid-activation.lock")).unwrap();
     FileExt::lock(&lock).unwrap();
     let mut metrics = Measurements::default();
+    let started = std::time::Instant::now();
     let result = metrics.call(
         &project,
         &home,
@@ -519,12 +564,21 @@ fn agent_same_project_contention_stops_before_dependency_edit() {
     );
     assert_eq!(result["errors"][0]["code"], "PROJECT_BUSY");
     assert_eq!(result["retry"], "after_contention");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert_eq!(
         fs::read(project.path().join("package.json")).unwrap(),
         manifest
     );
     assert!(!project.path().join("tapid.lock").exists());
-    metrics.finish(1);
+    FileExt::unlock(&lock).unwrap();
+    metrics.previous_failure = None;
+    success(&metrics.call(
+        &project,
+        &home,
+        &["--json", "import-package-lock", "package-lock.json"],
+        ("import-package-lock", "success", 0),
+    ));
+    metrics.finish(2);
 }
 
 /// Recover a lost commit response through the documented install caller before another mutation.
@@ -552,8 +606,9 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "commit result was lost");
+    assert!(output.stdout.len() + output.stderr.len() <= 8192);
     let pinned = fs::read(project.path().join("tapid.lock")).unwrap();
-    let interrupted = tree_snapshot(project.path());
+    let interrupted = project_snapshot(project.path());
     assert!(
         project
             .path()
@@ -574,7 +629,7 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
     assert_eq!(status["data"]["recovery"], "pending");
     assert_eq!(status["changes"]["state"], "unchanged");
     assert_eq!(status["retry"], Value::Null);
-    assert_eq!(tree_snapshot(project.path()), interrupted);
+    assert_eq!(project_snapshot(project.path()), interrupted);
     // Inspection must stop on the pending transaction, without recovering it.
     let result = metrics.call(
         &project,
@@ -584,7 +639,7 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
     );
     assert_eq!(result["retry"], "recover_first");
     assert_eq!(result["changes"]["state"], "recovery_required");
-    assert_eq!(tree_snapshot(project.path()), interrupted);
+    assert_eq!(project_snapshot(project.path()), interrupted);
     // Exercise the documented install recovery without re-resolving the committed graph.
     let recovered = metrics.call(
         &project,
@@ -613,6 +668,388 @@ fn agent_lost_commit_response_recovers_before_repeating_mutation() {
             .join(".tapid-lifecycle-journal.json")
             .exists()
     );
+    metrics.finish(4);
+}
+
+/// Isolated projects still contend on one store; the holder is ready before spawn.
+#[test]
+fn agent_shared_store_contention_expires_and_release_allows_retry() {
+    use fs4::FileExt;
+    use std::time::{Duration, Instant};
+    let first = npm_project();
+    let second = npm_project();
+    let home = TempHome::new("agent-store-contention").unwrap();
+    let store = home.path().join("store");
+    let store_arg = store.to_str().unwrap();
+    let args = [
+        "--json",
+        "install",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store_arg,
+    ];
+    let mut metrics = Measurements::default();
+    success(&metrics.call(&first, &home, &args, ("install", "success", 0)));
+    let manifest = fs::read(second.path().join("package.json")).unwrap();
+    second.write("node_modules/KEEP", b"previous").unwrap();
+    second
+        .write(".tapid-managed", b"tapid-managed-v1\n")
+        .unwrap();
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(store.join(".store.lock"))
+        .unwrap();
+    FileExt::lock(&holder).unwrap();
+    let started = Instant::now();
+    let mut child = command(&second, &home, &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(9) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("shared-store contender exceeded watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let elapsed = started.elapsed();
+    let result = metrics.record(
+        &args,
+        child.wait_with_output().unwrap(),
+        ("install", "failure", 1),
+    );
+    assert_eq!(result["errors"][0]["code"], "STORE_BUSY", "{result}");
+    assert_eq!(result["changes"]["state"], "unchanged", "{result}");
+    assert_eq!(result["retry"], "after_contention");
+    assert!(elapsed >= Duration::from_secs(5));
+    assert!(elapsed < Duration::from_secs(7), "{elapsed:?}");
+    assert_eq!(
+        fs::read(second.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert!(!second.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(second.path().join("node_modules/KEEP")).unwrap(),
+        b"previous"
+    );
+    // Retry after observed release; store tests cover release during an active wait.
+    FileExt::unlock(&holder).unwrap();
+    let mut child = command(&second, &home, &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(9);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("released store contender exceeded watchdog");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // This retry follows observed release and is necessary, rather than blind repetition.
+    metrics.previous_failure = None;
+    success(&metrics.record(
+        &args,
+        child.wait_with_output().unwrap(),
+        ("install", "success", 0),
+    ));
+    metrics.finish(3);
+    println!("shared_store_expiry_ms={}", elapsed.as_millis());
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EntrySnapshot {
+    Directory,
+    File(Vec<u8>),
+    Link(std::path::PathBuf),
+}
+
+/// Compare entries and bytes, excluding timestamps (reads may update access time).
+fn project_snapshot(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, EntrySnapshot> {
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        entries: &mut std::collections::BTreeMap<std::path::PathBuf, EntrySnapshot>,
+    ) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            let value = if kind.is_symlink() {
+                EntrySnapshot::Link(fs::read_link(&path).unwrap())
+            } else if kind.is_dir() {
+                visit(root, &path, entries);
+                EntrySnapshot::Directory
+            } else {
+                EntrySnapshot::File(fs::read(&path).unwrap())
+            };
+            entries.insert(path.strip_prefix(root).unwrap().to_owned(), value);
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+fn cancel_at_checkpoint(
+    invocation: &mut Command,
+    home: &TempHome,
+    checkpoint: &str,
+) -> std::process::Output {
+    let ready = home.path().join("pause-ready");
+    let mut child = invocation
+        .env("TAPID_TEST_PAUSE_POINT", checkpoint)
+        .env("TAPID_TEST_PAUSE_READY", &ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready.exists() {
+        if child.try_wait().unwrap().is_some() {
+            let output = child.wait_with_output().unwrap();
+            panic!("exited before cancellation checkpoint: {output:?}");
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("cancellation checkpoint watchdog expired");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    #[cfg(unix)]
+    {
+        // Signal only the CLI parent, without asserting process-tree termination.
+        let sent = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        if sent != 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("cannot send cancellation signal");
+        }
+    }
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("cancelled parent did not exit");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(output.status.signal(), Some(libc::SIGTERM));
+    }
+    output
+}
+
+#[test]
+fn agent_interruptions_preserve_durable_decision_and_status_is_read_only() {
+    for (checkpoint, cancellation) in [
+        ("activation_complete", false),
+        ("commit_decision", false),
+        ("post_commit_cleanup", false),
+        #[cfg(unix)]
+        ("activation_complete", true),
+        #[cfg(unix)]
+        ("commit_decision", true),
+        #[cfg(unix)]
+        ("post_commit_cleanup", true),
+    ] {
+        let project = TempProject::new("agent-interrupted").unwrap();
+        let home = TempHome::new("agent-interrupted").unwrap();
+        project
+            .write(
+                "package.json",
+                br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+            )
+            .unwrap();
+        project
+            .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+            .unwrap();
+        let store = project.path().join("store");
+        let store_arg = store.to_str().unwrap();
+        let mut invocation = command(
+            &project,
+            &home,
+            &[
+                "--json",
+                "install",
+                "--registry-fixture",
+                "registry.json",
+                "--store-dir",
+                store_arg,
+            ],
+        );
+        let output = if cancellation {
+            cancel_at_checkpoint(&mut invocation, &home, checkpoint)
+        } else {
+            invocation
+                .env("TAPID_TEST_CRASH_POINT", checkpoint)
+                .output()
+                .unwrap()
+        };
+        assert!(
+            !output.status.success(),
+            "missing interruption at {checkpoint}"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(output.stdout.len() + output.stderr.len() <= 8192);
+        let pending = fs::read(project.path().join("tapid.lock")).unwrap();
+        let mut metrics = Measurements {
+            calls: 1,
+            bytes: output.stdout.len() + output.stderr.len(),
+            ..Measurements::default()
+        };
+        let before = project_snapshot(project.path());
+        let status = metrics.call(
+            &project,
+            &home,
+            &["--json", "status"],
+            ("status", "failure", 1),
+        );
+        assert_eq!(status["outcome"], "failure", "{status}");
+        assert_eq!(status["data"]["recovery"], "pending");
+        assert_eq!(
+            project_snapshot(project.path()),
+            before,
+            "inspection changed {checkpoint}"
+        );
+        // The recovery-only debug seam exercises settlement without a fresh mutation.
+        let recovery = command(
+            &project,
+            &home,
+            &["--json", "install", "--offline", "--store-dir", store_arg],
+        )
+        .env("TAPID_TEST_RECOVER_ONLY", "1")
+        .output()
+        .unwrap();
+        success(&metrics.record(
+            &["--json", "install", "--offline", "--store-dir", store_arg],
+            recovery,
+            ("install", "success", 0),
+        ));
+        if checkpoint == "activation_complete" {
+            assert!(!project.path().join("tapid.lock").exists());
+            assert!(!project.path().join("node_modules").exists());
+            assert!(!store.join("trees").exists());
+        } else {
+            assert_eq!(
+                fs::read(project.path().join("tapid.lock")).unwrap(),
+                pending
+            );
+            assert!(
+                project
+                    .path()
+                    .join("node_modules/h3/package.json")
+                    .is_file()
+            );
+            assert!(store.join("trees").is_dir());
+        }
+        assert!(!store.join(".tapid-transaction.json").exists());
+        assert!(
+            !project
+                .path()
+                .join(".tapid-lifecycle-journal.json")
+                .exists()
+        );
+        metrics.finish(3);
+        println!("interruption_checkpoint={checkpoint} cancellation={cancellation}");
+    }
+}
+
+#[test]
+fn agent_response_lost_after_cleanup_reconciles_current_state_without_attribution() {
+    let project = TempProject::new("agent-loss").unwrap();
+    let home = TempHome::new("agent-loss").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"1.0.0"}}"#,
+        )
+        .unwrap();
+    project
+        .write("registry.json", include_bytes!("fixtures/npm-aliases.json"))
+        .unwrap();
+    let store = project.path().join("store");
+    let args = [
+        "--json",
+        "install",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store.to_str().unwrap(),
+    ];
+    let output = command(&project, &home, &args).output().unwrap();
+    // The harness observes completion, then withholds the result from reconciliation.
+    assert!(output.status.success(), "{output:?}");
+    let mut metrics = Measurements {
+        calls: 1,
+        bytes: output.stdout.len() + output.stderr.len(),
+        ..Measurements::default()
+    };
+    assert!(output.stdout.len() <= 8192);
+    assert!(output.stderr.is_empty());
+    assert!(
+        !project
+            .path()
+            .join(".tapid-lifecycle-journal.json")
+            .exists()
+    );
+    let pinned = fs::read(project.path().join("tapid.lock")).unwrap();
+    let before = project_snapshot(project.path());
+    let status = metrics.call(
+        &project,
+        &home,
+        &["--json", "status"],
+        ("status", "success", 0),
+    );
+    success(&status);
+    assert_eq!(status["changes"]["state"], "unchanged");
+    assert_eq!(project_snapshot(project.path()), before);
+    assert!(
+        project
+            .path()
+            .join("node_modules/h3/package.json")
+            .is_file()
+    );
+    success(&metrics.call(
+        &project,
+        &home,
+        &[
+            "--json",
+            "add",
+            "@actual/scoped@1.2.0",
+            "--registry-fixture",
+            "registry.json",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+        ("add", "success", 0),
+    ));
+    assert_ne!(fs::read(project.path().join("tapid.lock")).unwrap(), pinned);
+    let before = project_snapshot(project.path());
+    success(&metrics.call(
+        &project,
+        &home,
+        &["--json", "status"],
+        ("status", "success", 0),
+    ));
+    assert_eq!(project_snapshot(project.path()), before);
     metrics.finish(4);
 }
 
@@ -844,7 +1281,7 @@ fn agent_resolved_preview_matches_apply_and_preserves_project_and_cache() {
         &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
     )
     .unwrap();
-    let snapshot = tree_snapshot(project.path());
+    let snapshot = project_snapshot(project.path());
     let preview = metrics.call(
         &project,
         &home,
@@ -868,7 +1305,7 @@ fn agent_resolved_preview_matches_apply_and_preserves_project_and_cache() {
     assert_eq!(preview["data"]["effects"]["artifact_requests"], 0);
     assert_eq!(preview["data"]["effects"]["cache_writes"], false);
     assert_eq!(preview["data"]["effects"]["project_writes"], false);
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     success(&metrics.call(
         &project,
         &home,
@@ -954,7 +1391,7 @@ fn agent_inspection_distinguishes_no_match_from_partial_metadata() {
         ],
         ("install", "success", 0),
     ));
-    let snapshot = tree_snapshot(project.path());
+    let snapshot = project_snapshot(project.path());
     let missing = metrics.call(
         &project,
         &home,
@@ -965,7 +1402,7 @@ fn agent_inspection_distinguishes_no_match_from_partial_metadata() {
     assert_eq!(missing["data"]["not_found"], true);
     assert_eq!(missing["data"]["paths"], serde_json::json!([]));
     assert_eq!(missing["changes"]["state"], "unchanged");
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     let partial = metrics.call(
         &project,
         &home,
@@ -975,7 +1412,7 @@ fn agent_inspection_distinguishes_no_match_from_partial_metadata() {
     assert_eq!(partial["retry"], Value::Null);
     assert_eq!(partial["changes"]["state"], "unchanged");
     assert!(!partial["data"].is_null());
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     metrics.finish(3);
 }
 
@@ -1062,7 +1499,7 @@ fn agent_shared_store_contention_requires_wait_without_project_mutation() {
         .open(project.path().join("store/.store.lock"))
         .unwrap();
     FileExt::lock(&lock).unwrap();
-    let snapshot = tree_snapshot(project.path());
+    let snapshot = project_snapshot(project.path());
     let mut metrics = Measurements::default();
     let result = metrics.call(
         &project,
@@ -1079,7 +1516,7 @@ fn agent_shared_store_contention_requires_wait_without_project_mutation() {
     assert_eq!(result["errors"][0]["code"], "CACHE_BUSY");
     assert_eq!(result["retry"], "after_contention");
     assert_eq!(result["changes"]["state"], "unchanged");
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     metrics.finish(1);
 }
 
@@ -1111,7 +1548,7 @@ fn agent_precommit_interruption_recovers_original_project_before_retry() {
     ));
     project.write("node_modules/KEEP", b"previous").unwrap();
     let protected = protected_state(&project);
-    let installed = tree_snapshot(&project.path().join("node_modules"));
+    let installed = project_snapshot(&project.path().join("node_modules"));
     let output = command(
         &project,
         &home,
@@ -1137,7 +1574,7 @@ fn agent_precommit_interruption_recovers_original_project_before_retry() {
     assert!(output.stdout.is_empty());
     metrics.calls += 1;
     metrics.bytes += output.stdout.len() + output.stderr.len();
-    let pending = tree_snapshot(project.path());
+    let pending = project_snapshot(project.path());
     let inspection = metrics.call(
         &project,
         &home,
@@ -1146,7 +1583,7 @@ fn agent_precommit_interruption_recovers_original_project_before_retry() {
     );
     assert_eq!(inspection["retry"], "recover_first");
     assert_eq!(inspection["changes"]["state"], "recovery_required");
-    assert_eq!(tree_snapshot(project.path()), pending);
+    assert_eq!(project_snapshot(project.path()), pending);
     let args = [
         "--json",
         "install",
@@ -1168,7 +1605,7 @@ fn agent_precommit_interruption_recovers_original_project_before_retry() {
     );
     assert_eq!(protected_state(&project), protected);
     assert_eq!(
-        tree_snapshot(&project.path().join("node_modules")),
+        project_snapshot(&project.path().join("node_modules")),
         installed
     );
     assert!(
@@ -1212,7 +1649,7 @@ fn agent_hostile_package_text_cannot_replace_manager_or_policy() {
             ("install", "success", 0),
         ));
         project.write("package.json", serde_json::json!({"name":"app","version":"1.0.0","packageManager":manager,"dependencies":{"h3":hostile}}).to_string().as_bytes()).unwrap();
-        let snapshot = tree_snapshot(project.path());
+        let snapshot = project_snapshot(project.path());
         let result = metrics.call(
             &project,
             &home,
@@ -1231,7 +1668,7 @@ fn agent_hostile_package_text_cannot_replace_manager_or_policy() {
         assert!(rendered.contains("disable integrity"));
         assert!(rendered.contains("forged"));
         assert!(!rendered.chars().any(char::is_control));
-        assert_eq!(tree_snapshot(project.path()), snapshot);
+        assert_eq!(project_snapshot(project.path()), snapshot);
         metrics.finish(2);
     }
     // An existing unmanaged tree is an unsupported replacement, regardless of manager choice.
@@ -1393,7 +1830,7 @@ fn assert_conservative_preview_consumer(actual: &Value) {
 fn agent_actual_binary_channels_reject_stale_guides_and_stdout_run_results() {
     let project = npm_project();
     let home = TempHome::new("agent-channels").unwrap();
-    let snapshot = tree_snapshot(project.path());
+    let snapshot = project_snapshot(project.path());
     let mut metrics = Measurements::default();
     let version = metrics.call(
         &project,
@@ -1479,7 +1916,7 @@ fn agent_actual_binary_channels_reject_stale_guides_and_stdout_run_results() {
     assert_eq!(unsupported["errors"][0]["code"], "JSON_UNSUPPORTED_COMMAND");
     assert_eq!(unsupported["changes"]["state"], "unchanged");
     assert_eq!(unsupported["retry"], Value::Null);
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     metrics.finish(4);
 }
 
@@ -1545,7 +1982,7 @@ process.exitCode=37;
             .as_bytes(),
         )
         .unwrap();
-    let snapshot = tree_snapshot(project.path());
+    let snapshot = project_snapshot(project.path());
     let output = command(
         &project,
         &home,
@@ -1575,7 +2012,7 @@ process.exitCode=37;
     assert_eq!(result["receipt"]["termination"], "Exited(37)");
     assert_eq!(result["receipt"]["assurance"], "Restricted");
     assert!(result["receipt"]["completion"].is_object());
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     assert_incomplete_run_delivery(&bytes);
     assert!(trusted_run_result(forged.as_bytes()).is_none());
     Measurements {
@@ -1630,7 +2067,7 @@ fn agent_unavailable_managed_tree_run_stops_before_child_spawn() {
             b"[run.scripts.probe]\nread=['.']\nsubprocess=true\n",
         )
         .unwrap();
-    let snapshot = tree_snapshot(project.path());
+    let snapshot = project_snapshot(project.path());
     let path = home.path().join("unsupported-result.json");
     let output = command(
         &project,
@@ -1657,7 +2094,7 @@ fn agent_unavailable_managed_tree_run_stops_before_child_spawn() {
         "ManagedTree"
     );
     assert!(result["receipt"].is_null());
-    assert_eq!(tree_snapshot(project.path()), snapshot);
+    assert_eq!(project_snapshot(project.path()), snapshot);
     Measurements {
         calls: 1,
         bytes: output.stdout.len() + output.stderr.len() + bytes.len(),

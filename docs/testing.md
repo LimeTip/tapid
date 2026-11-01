@@ -34,6 +34,12 @@ If execution is still denied, inspect the worker mount/security policy before
 attributing the failure to executable permissions. This configuration does not
 supply native containment prerequisites or establish native platform support.
 
+Keep validation inside the isolated worker, without host credentials or an
+unsandboxed host fallback. Check both mount options and worker execution policy
+when generated fixtures cannot launch; a passing host run cannot prove the
+worker configuration. Linux results do not establish native macOS or Windows
+containment behavior.
+
 ## Development prerequisites and build reuse
 
 Use Git, Rust with rustfmt and Clippy, and a supported Node.js major (26 preferred,
@@ -214,7 +220,7 @@ These counts measure Tapid invocations, not fixture setup or Node discovery.
 | Requirement | State | Assertion and deterministic budget |
 | --- | --- | --- |
 | Completion, parseability, output size, calls and retries | covered | Every process sequence checks its expected result and calls `finish`; package success cannot infer exit status (the `why` no-match case exits 1). |
-| Add/remove and replay without graph churn | covered | `dependency_edits_and_repeated_install_preserve_unselected_graph`: four calls, complete unrelated package records and final graph equality; guide sequence: ten calls, unchanged replay lock bytes and original npm lock bytes. |
+| Add/remove and replay without graph churn | covered | `dependency_edits_and_repeated_install_preserve_unselected_graph`: five calls, complete unrelated package records and final graph equality; guide sequence: twelve calls, unchanged replay lock bytes and original npm lock bytes. |
 | Actionable peer conflict in one JSON call | covered | `stops_on_precise_failures_without_retry_or_file_mutation`: source/name/version, missing peer requirement, declaration pointers, `after_correction`, unchanged manifest/locks/installed sentinel/policy/instructions. One call for each refusal. |
 | Malformed arguments, missing credentials and unsupported project | covered | The same refusal scenario checks typed codes, exit 2 for parsing, null parse retry, correction advice for operational failures and protected bytes. No real credentials or human-output follow-up. |
 | Pending status and lost commit response | covered | `lost_commit_response_recovers_before_repeating_mutation`: four calls including the crash; status reports pending with unchanged state and null retry, both inspections preserve the entire interrupted snapshot, outdated requires recovery first, frozen/offline install settles the journal and preserves committed lock bytes. |
@@ -226,7 +232,7 @@ These counts measure Tapid invocations, not fixture setup or Node discovery.
 | Partial inspection and conservative interpretation | covered | `inspection_distinguishes_no_match_from_partial_metadata`: three calls, confirmed no-match differs from partial offline metadata; neither inspection changes project/store bytes. The preview fixture consumer rejects unknown schema/operation/code/retry, missing or contradictory identity, duplicate keys, empty/truncated/multiple results; partial evidence requests inspection and additive fields stay compatible. This private interpreter is not an external adapter or published schema validator and never grants mutation authority. |
 | Hostile package data, policy and manager conventions | covered | `hostile_package_text_cannot_replace_manager_or_policy`: two calls per npm/pnpm/Yarn convention (setup install then inspection); fake instructions, forged success/receipt, credential requests and bypass advice stay in the typed declared-requirement field, terminal controls are removed, typed diagnostic and null retry remain authoritative, entire snapshot is preserved. Two further calls diagnose an unmanaged tree through status and refuse replacement while preserving manager locks, installed sentinel and instructions. Lock presence alone is not treated as unsupported migration. |
 | Cold locked cache and separate worktrees sharing cache | covered | `separate_checkouts_share_verified_cache_without_graph_changes`: three calls, cold locked hydration followed by offline replay in a separate isolated checkout, exact lock-byte preservation and installed package existence. Temporary checkouts model cache consumers without Git or external services. |
-| Same-project and shared-store contention | covered | `same_project_contention_stops_before_dependency_edit` and `shared_store_contention_requires_wait_without_project_mutation`: one call each; held deterministic locks, typed busy code, `after_contention`, preserved project state. No timing benchmark. |
+| Same-project and shared-store contention | covered | `same_project_contention_stops_before_dependency_edit` and `shared_store_contention_requires_wait_without_project_mutation`: two and one calls respectively; held deterministic locks, typed busy code, `after_contention`, preserved project state. No timing benchmark. |
 | Cancellation before commit versus lost response after commit | covered | `precommit_interruption_recovers_original_project_before_retry`: four calls including deterministic abort at activation; inspection preserves pending state and requires recovery first, recover-only install restores original manifest/lock/installed bytes and settles the journal. This models abrupt cancellation, not graceful signal handling; broader recovery seams remain in `cli.rs::run_lifecycle_recovery_crash_case`. |
 | Stale guide and actual binary channels | covered | `actual_binary_channels_reject_stale_guides_and_stdout_run_results`: four calls; binary version agrees with the pinned guide and rejects a stale requirement, actual help contains the public command inventory, run help exposes result-file delivery, stdout run JSON refuses before launch. |
 | Published discovery and schema coverage | dependent | [#195](https://github.com/LimeTip/tapid/issues/195) owns versioned installed-binary command/result coverage, options/defaults/conflicts and published schemas. Current help is presentation text, not that contract. Consume its validation mechanism when delivered; no replacement protocol is introduced here. |
@@ -248,3 +254,72 @@ success, calls, output bytes, retries/recovery, unrelated churn, policy/bypass
 attempts, time/cost and failures. Keep optional named-tokenizer measurements
 separate. Ordinary regression tests require no external model, real credential,
 public registry or pilot participant.
+
+### Bounded wait and lost-response evaluation
+
+The measurements below describe earlier source revisions, not validation of the
+combined workflow lane. The lost-commit-response sequence now includes status
+and requires four calls; the assertion inventory above describes current coverage.
+
+Issue [#198](https://github.com/LimeTip/tapid/issues/198) is evaluated through
+existing store and `agent_workflows` seams, without operation IDs or completion
+records. A controlled macOS run of the nine workflow tests passed with these
+measurements (bytes include stdout and stderr; temporary path lengths can change
+them on another run):
+
+| Controlled scenario | Calls | Output bytes | Safe next action / limitation |
+| --- | ---: | ---: | --- |
+| Project contention, then release | 2 | 1,514 | Retry only after release; contender inputs stay unchanged. |
+| Two projects, shared-store expiry, then release | 3 | 7,496 | `STORE_BUSY`, `unchanged`, `after_contention`; retry succeeds after release. Expiry measured 5,043 ms. |
+| Existing lost commit response and frozen offline recovery | 3 | 2,694 | Inspect pending recovery, then preserve the committed lock through recovery. |
+| Abrupt interruption at `activation_complete` | 3 | 5,267 | Status preserves all entries/bytes; recovery rolls back project activation and published trees. |
+| Abrupt interruption at `commit_decision` | 3 | 5,282 | Status preserves evidence; recovery retains the committed lock, installed package, and store trees. |
+| Abrupt interruption at `post_commit_cleanup` | 3 | 5,282 | Activation cleanup has run; recovery removes remaining evidence without undoing commit. |
+| Completed install with response withheld, unchanged status, later add, status | 4 | 11,745 | Reconcile expected state; subsequent status describes the later state, without historical attribution. |
+
+Every scenario reports zero unnecessary repeated failures and enforces the 8 KiB
+per-result budget. Retrying after observed lock release is necessary and excluded
+from unnecessary repetitions. The response-withholding harness first observes
+subprocess completion; it does not simulate a particular transport failure rate.
+The three abrupt interruptions use debug-only crash checkpoints. The same
+workflow also pauses the parent at each boundary on Unix, sends it SIGTERM,
+asserts signal termination, and checks read-only inspection and normal recovery.
+Readiness is synchronized through an isolated temporary file; parent exit has a
+ten-second watchdog, and the debug-only pause aborts after fifteen seconds if
+the supervisor disappears. This proves parent-signal cancellation settlement,
+not graceful cancellation or process-tree termination. Existing lifecycle and CI
+crash tests also cover store publication and activation boundaries.
+
+A fresh integrated macOS run passed all 11 workflow tests, including both guide
+additions and all six crash/signal boundary cases. Shared-store expiry measured
+5,068 ms; its three calls emitted 7,502 bytes. Project contention emitted 1,520
+bytes over two calls, and completed-response withholding emitted 11,745 bytes
+over four calls. All scenarios reported zero unnecessary retries and enforced
+the per-result budget. These are local fixture measurements with variable path
+lengths, not production frequency or timeout-tuning evidence.
+
+Store unit tests use a subprocess watchdog for the real five-second default,
+short private deadlines for shared/exclusive and recovery escalation, compatible
+readers, and error preservation. Recovery accounting uses thread-local controlled
+monotonic time advanced after real filesystem recovery: expiry after the second
+recovery and expiry during the first recovery are checked without
+scheduler-dependent sleeps. A guard restores test overrides on panic. Native
+shared/exclusive release-during-wait tests synchronize unlock with an observed
+contended attempt and use channel watchdogs. The CLI separately proves expiry
+followed by a successful retry launched after confirmed release. CLI contention
+permits two seconds of scheduling tolerance and kills/reaps a contender at its
+nine-second watchdog.
+Whole-command duration is not bounded. Status snapshots include manifest,
+lockfile, installed layout, store contents, and recovery evidence, ignoring access
+timestamps. Status neither acquires transaction locks nor opens the shared store.
+
+These are controlled scenarios, not a production incident sample: response-loss
+frequency and its denominator remain unknown. After cleanup, present-state
+inspection cannot prove invocation identity or reconstruct ownership/ordering
+after later mutations. An `unchanged` inspection describes only that call, not the
+lost mutation. Existing reconciliation and recovery support the tested workflows;
+historical attribution remains explicitly unresolved. Operation IDs and bounded
+durable completion records are therefore deferred pending evidence of a required
+workflow needing that attribution, rather than adding cross-agent coordination
+for isolated worktrees. Native locking behavior remains subject to the existing
+Linux, macOS, and Windows CI matrix.
