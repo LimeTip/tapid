@@ -1,0 +1,46 @@
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "off"
+candidate = "per-process-rlimit-rss"
+requested = "tree memory enforcement via RLIMIT_RSS comparison"
+available = "setrlimit/getrlimit readback only; no authoritative tree or resident accounting"
+observed = """
+exit status: 0: mode=off requested_rss=1048576 touched_bytes=2097152 completed=true resident_measurement=unavailable
+; exit status: 0: mode=off requested_rss=1048576 touched_bytes=2097152 completed=true resident_measurement=unavailable
+; exit status: 0: mode=off requested_rss=1048576 touched_bytes=2097152 completed=true resident_measurement=unavailable
+"""
+enforced = "none"
+threshold = 1048576
+units = "bytes configured in each fresh process; sequential controls"
+setup_ready = true
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+--- research case ---
+verdict = "unsupported"
+
+[observation]
+case = "rss"
+candidate = "per-process-rlimit-rss"
+requested = "tree memory enforcement via RLIMIT_RSS comparison"
+available = "setrlimit/getrlimit readback only; no authoritative tree or resident accounting"
+observed = """
+exit status: 0: rss_setup=unavailable errno=Some(22) detail=Invalid argument (os error 22)
+; exit status: 0: rss_setup=unavailable errno=Some(22) detail=Invalid argument (os error 22)
+; exit status: 0: rss_setup=unavailable errno=Some(22) detail=Invalid argument (os error 22)
+"""
+enforced = "none"
+threshold = 1048576
+units = "bytes configured in each fresh process; sequential controls"
+setup_ready = false
+positive_control = true
+candidate_available = false
+violation_observed = false
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+

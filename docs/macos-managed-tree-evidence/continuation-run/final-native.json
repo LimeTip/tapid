@@ -1,0 +1,184 @@
+[
+  {
+    "name": "clang",
+    "command": [
+      "clang",
+      "-dynamiclib",
+      "-fblocks",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/bridge.c",
+      "-o",
+      "target/transport-control/libprobe.dylib"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-xpc-transport",
+    "command": [
+      "target/transport-control/Probe",
+      "xpc-transport"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-broker",
+    "command": [
+      "target/transport-control/Probe",
+      "broker"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-rlimits",
+    "command": [
+      "target/transport-control/Probe",
+      "rlimits"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-rapid-reparent",
+    "command": [
+      "target/transport-control/Probe",
+      "rapid-reparent",
+      "8"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-lineage",
+    "command": [
+      "target/transport-control/Probe",
+      "lineage"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-cleanup",
+    "command": [
+      "target/transport-control/Probe",
+      "cleanup"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-limits",
+    "command": [
+      "target/transport-control/Probe",
+      "limits"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-rejection",
+    "command": [
+      "target/transport-control/Probe",
+      "rejection"
+    ],
+    "exitCode": 2
+  },
+  {
+    "name": "native-authority",
+    "command": [
+      "target/transport-control/Probe",
+      "authority"
+    ],
+    "exitCode": 2
+  },
+  {
+    "name": "sign-service",
+    "command": [
+      "codesign",
+      "--force",
+      "--sign",
+      "-",
+      "--entitlements",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/entitlements.plist",
+      "target/continuation-bundle/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "sign-app",
+    "command": [
+      "codesign",
+      "--force",
+      "--sign",
+      "-",
+      "target/continuation-bundle/Probe.app"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "verify-app",
+    "command": [
+      "codesign",
+      "--verify",
+      "--deep",
+      "--strict",
+      "--verbose=4",
+      "target/continuation-bundle/Probe.app"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "entitlements",
+    "command": [
+      "codesign",
+      "--display",
+      "--entitlements",
+      ":-",
+      "target/continuation-bundle/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "native-xpc",
+    "command": [
+      "target/continuation-bundle/Probe.app/Contents/MacOS/Probe",
+      "xpc"
+    ],
+    "exitCode": 2
+  },
+  {
+    "name": "os",
+    "command": [
+      "/usr/bin/sw_vers"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "kernel",
+    "command": [
+      "/usr/bin/uname",
+      "-a"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "rust",
+    "command": [
+      "rustc",
+      "--version"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "sdk",
+    "command": [
+      "xcrun",
+      "--show-sdk-version"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "uid",
+    "command": [
+      "/usr/bin/id",
+      "-u"
+    ],
+    "exitCode": 0
+  }
+]

@@ -1,0 +1,7 @@
+XPC reply error: <dictionary: 0x1f2de0b60> { count = 1, transaction: 0, voucher = 0x0, contents =
+	"XPCErrorDescription" => <string: 0x1f2de0ca0> { string cache = 0x0, length = 18, contents = "Connection invalid" }
+}
+XPC reply error: <dictionary: 0x1f2de0b60> { count = 1, transaction: 0, voucher = 0x0, contents =
+	"XPCErrorDescription" => <string: 0x1f2de0ca0> { string cache = 0x0, length = 18, contents = "Connection invalid" }
+}
+xpc_transport_controls=[15, -1, -2, -2] expected=[15,-1,-2,-2] candidate_enforcement=none

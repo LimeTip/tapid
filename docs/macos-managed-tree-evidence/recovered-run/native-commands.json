@@ -1,0 +1,37 @@
+[
+  {
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "cleanup"
+    ],
+    "exitCode": 0
+  },
+  {
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "limits"
+    ],
+    "exitCode": 0
+  },
+  {
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "lineage"
+    ],
+    "exitCode": 0
+  },
+  {
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "rejection"
+    ],
+    "exitCode": 2
+  },
+  {
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "authority"
+    ],
+    "exitCode": 2
+  }
+]

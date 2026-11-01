@@ -1,0 +1,190 @@
+[
+  {
+    "name": "native-broker",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "broker"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-authority",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "authority"
+    ],
+    "status": 2
+  },
+  {
+    "name": "native-descriptors",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "descriptors"
+    ],
+    "status": 2
+  },
+  {
+    "name": "native-rejection",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "rejection"
+    ],
+    "status": 2
+  },
+  {
+    "name": "native-rlimits",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "rlimits"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-scoped-limits",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "scoped-limits"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-cleanup",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "cleanup"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-limits",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "limits"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-lineage",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "lineage"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-rapid",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "rapid-reparent",
+      "8"
+    ],
+    "status": 0
+  },
+  {
+    "name": "clang",
+    "command": [
+      "/usr/bin/clang",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fblocks",
+      "-dynamiclib",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/bridge.c",
+      "-o",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/MacOS/libprobe.dylib"
+    ],
+    "status": 0
+  },
+  {
+    "name": "sign-lib",
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/MacOS/libprobe.dylib"
+    ],
+    "status": 0
+  },
+  {
+    "name": "sign-worker-lib",
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib"
+    ],
+    "status": 0
+  },
+  {
+    "name": "sign-worker",
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "--entitlements",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/entitlements.plist",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc"
+    ],
+    "status": 0
+  },
+  {
+    "name": "sign-app",
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app"
+    ],
+    "status": 0
+  },
+  {
+    "name": "verify",
+    "command": [
+      "/usr/bin/codesign",
+      "--verify",
+      "--deep",
+      "--strict",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app"
+    ],
+    "status": 0
+  },
+  {
+    "name": "entitlements",
+    "command": [
+      "/usr/bin/codesign",
+      "-d",
+      "--entitlements",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-xpc-transport",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/MacOS/Probe",
+      "xpc-transport"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-xpc-missing",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/MacOS/Probe",
+      "xpc-missing"
+    ],
+    "status": 0
+  },
+  {
+    "name": "native-xpc",
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/final-probe/Probe.app/Contents/MacOS/Probe",
+      "xpc"
+    ],
+    "status": 2
+  }
+]

@@ -1,0 +1,55 @@
+[
+  {
+    "name": "os",
+    "command": [
+      "/usr/bin/sw_vers"
+    ],
+    "status": 0
+  },
+  {
+    "name": "kernel",
+    "command": [
+      "/usr/bin/uname",
+      "-a"
+    ],
+    "status": 0
+  },
+  {
+    "name": "rust",
+    "command": [
+      "rustc",
+      "--version"
+    ],
+    "status": 0
+  },
+  {
+    "name": "sdk",
+    "command": [
+      "/usr/bin/xcrun",
+      "--show-sdk-version"
+    ],
+    "status": 0
+  },
+  {
+    "name": "uid",
+    "command": [
+      "/usr/bin/id",
+      "-u"
+    ],
+    "status": 0
+  },
+  {
+    "name": "service-diagnostics",
+    "command": [
+      "/usr/bin/log",
+      "show",
+      "--last",
+      "1m",
+      "--style",
+      "compact",
+      "--predicate",
+      "process == \"Worker\""
+    ],
+    "status": 64
+  }
+]

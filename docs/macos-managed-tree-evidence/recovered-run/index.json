@@ -1,0 +1,1317 @@
+{
+  "schemaVersion": 1,
+  "developmentEvidence": true,
+  "managedTreeSupported": false,
+  "baseRevision": "49cc711749d7cd6a2cab480f324bbd0d6b85c45e",
+  "baseTree": "26f40288dc64c7af953ae5cb3b6d4bbaa5eda666",
+  "dirty": true,
+  "sourceScope": "Baseline Git tree plus SHA-256 overlay of all tracked/untracked Rust crate sources, crate/root/integration manifests and locks, Cargo config and dev wrapper; documentation and evidence excluded from runtime fingerprint.",
+  "sourceFiles": [
+    {
+      "path": ".cargo/config.toml",
+      "sha256": "cd202983e2e7b35693668ec318608eb49a4e28138e9e54fa00689317cc9f82cb"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "044b24f253b7a179561a9c1e48dcb847a58c1d536aa2558372d547a2e1b12781"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "14d69c3b0371fe9e0ae88056c7818c4d5c7ee6c6140f01829193f33efaae27f3"
+    },
+    {
+      "path": "crates/tapid-archive/Cargo.toml",
+      "sha256": "02ef5d346acd1e492566aa207e810780e6e8caecb7073726763ee95acbc54e19"
+    },
+    {
+      "path": "crates/tapid-archive/src/lib.rs",
+      "sha256": "c34ce11dfcb497d96e194cd3b92f490c5db735dfa762f8597cd2fe7263ad9df2"
+    },
+    {
+      "path": "crates/tapid-archive/src/tree_validation.rs",
+      "sha256": "dd0b944b03af7cf1e81b05d3bb61e56de8673254595a07c1adf60ab3adbbd1d5"
+    },
+    {
+      "path": "crates/tapid-attestations/Cargo.toml",
+      "sha256": "ce3cfba53d18a82de48107c03b5e1df177d4f81c84accc74f54777b25ae7526f"
+    },
+    {
+      "path": "crates/tapid-attestations/src/lib.rs",
+      "sha256": "9904a615040bf209eac87fc10bd90ca7c7afbbe4265f7cf8ff7d6dae83ff8843"
+    },
+    {
+      "path": "crates/tapid-attestations/src/security.rs",
+      "sha256": "0cf72a77713ea5856d27cb68eeb9e8cb22787297a7a5558d29d494db6a08facc"
+    },
+    {
+      "path": "crates/tapid-attestations/tests/security_evidence.rs",
+      "sha256": "cc27b07ccc282b8be08e2c5c70cf8370f33eeae7da8ea12be1f9b9d2abf5bb36"
+    },
+    {
+      "path": "crates/tapid-attestations/tests/support/security_v1_consumer.rs",
+      "sha256": "000f8d147e72994b0a828f06db5b499dda7342e80d4b8f0d4bddde377a2e06c1"
+    },
+    {
+      "path": "crates/tapid-cli/Cargo.toml",
+      "sha256": "6c252d5f8077e5b230428f9995a2154dce76c35b0fa49bc1f7d70062ec29ead4"
+    },
+    {
+      "path": "crates/tapid-cli/build.rs",
+      "sha256": "5e34ae679b2892cf762e69bac2f5d4fa367da2751ca549829c4ecdbfd415dac8"
+    },
+    {
+      "path": "crates/tapid-cli/src/application.rs",
+      "sha256": "f76932c8c0866268d2aadc85b7347225da4f7be0b7656f1557cf148df424a8d4"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/dependency_node_gyp.rs",
+      "sha256": "4e2874163032c298321d3cf854452040b284c9a6ccaf10025bf734d8dd79272a"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/dependency_scripts.rs",
+      "sha256": "b751640880438c6f227369cb3b42bcb4685bbc70f1c73491a8160498c834940d"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/explain.rs",
+      "sha256": "238d1743c8bf8db53d0f8da6cd9015643841b9d0259f3416d7b8515b6e1b3452"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/install.rs",
+      "sha256": "ed253fb68b1b3dd3ff639b4143b3592dddae5d5f5b8c41128ee42e4f00e3e7d4"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/install_outcome_tests.rs",
+      "sha256": "ccfeacce00d3b6396b559c77267215e7c2bfeff1cfe9b0a4eba0287a42e535f7"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/installer.rs",
+      "sha256": "b536fdd4dd6231caf49d32962646c6b40069eb20396e6c94a8bd2c881cf92b90"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/lifecycle.rs",
+      "sha256": "b7aa9c277c34d5a8c54e414f61e326eaf0e8524169388f35f092c09694e31396"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/outcome.rs",
+      "sha256": "6953dead256ae24d24ebbcd88eef09e3034ac7394e91c079f5a35380606f0a9f"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/outcome/diagnostic.rs",
+      "sha256": "f471268195b8c862b4567ac0e53f411eda5b9ddd3adc113dc5012c4ea509e95b"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/outcome/lifecycle.rs",
+      "sha256": "30b44fd31543100b7d36a1077b059e8954f5a24cadb4ade835095a8fff0aff67"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/preview.rs",
+      "sha256": "8c2527b5e6caa8cb76044f265efd450db0ab3ee50b9627bee080680386e6a557"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/preview/inputs.rs",
+      "sha256": "5ccef6e6c69cff843071172b37d48c66e4ce209e5b1e2be93bafeeef7660e489"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/release_record.rs",
+      "sha256": "e10faf3a593cfbe48dea4796b4518481ecd7a4027fa162ac8bea36628bb946d9"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/release_verification.rs",
+      "sha256": "7ccfc44eae498ebf45312306f688e86c06fda97e17eacd29ecd3193eb16522bd"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/replay.rs",
+      "sha256": "d0c52efaaebf4176a16ff3f109692090d8b0081f3b5d7175ff0dfc86b5daaf1b"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/status.rs",
+      "sha256": "a3ae2f1707309391e86b4384df10f7779e67c3f3a686cb100b020331c12032cd"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/tools.rs",
+      "sha256": "16cf8db0d0445636605d2dcf0a730fad0cf269f34b285ce3004c3f25539166cb"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/tools/launchers.rs",
+      "sha256": "4ba7ff8b483ebfc70cac8ad4cf28cbbb9dece1012388d8843c1b2bd3955f6b20"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/tools/state.rs",
+      "sha256": "0dfb079eb602f642b5734dc5126d66e59df99d82cc513f54b964e3a68b1aa9ec"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/tools/transaction.rs",
+      "sha256": "7a1b4151efe088b3e827c6c21ce0529a8e3e935552415e4e4ebb7bbed89e7da2"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/upgrade.rs",
+      "sha256": "378dbe69d59bd35cb02cab4afa1f8613fed4e84577f7898ca9cf3ccbf9b11e2d"
+    },
+    {
+      "path": "crates/tapid-cli/src/application/why.rs",
+      "sha256": "74177456b407a2b680ef7546a50df1037fd532cdc37656ca506056cfaa822639"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/cache.rs",
+      "sha256": "9e569acbb68df8922aa7ef914f81f10b3a698ee31d716e593fb351ec82607c07"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/ci.rs",
+      "sha256": "c26c36104fa2f9d7a0a1ae5dd7577ddbcb1efb4a1369fece67a905429fa06b98"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/documentation.rs",
+      "sha256": "a34683032d5159c0188e7b6ef6e67698c7a793c69f494513847ae27383111788"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/explain.rs",
+      "sha256": "9c73a687f6efcc27fc1a379f6a163f7eb21ed4ecd172f057d3e4fdaa94cafb65"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/init.rs",
+      "sha256": "260ecd43da48a8ce15f45abeda728d9c86f4f10a5874426fb9bcffc9524caa53"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/install.rs",
+      "sha256": "20f729524798afd4f49f84a268e187b11decff0e4bee36c58b5a55d8ad376791"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/license.rs",
+      "sha256": "6d5ff38174af122ca613500762c62ff6348824cf8c3a16aaed428671cb84778a"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/lifecycle.rs",
+      "sha256": "16d6847f912ff280e20968273276ce6582f9581f09a12363b9e993db55822860"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/lock.rs",
+      "sha256": "720d138eb5306be1921e320bb42fdf72b1c7e1dc6f68b0f4bf63e55c38176d67"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/manifest.rs",
+      "sha256": "ea74e5c6e2f6c3a1f9f7924adacf228a5a98f261b0b26dee832e4e1f3bef4ca8"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/mod.rs",
+      "sha256": "79077451b59736370149bd1eac887d1d3161eecbfd237cfd0d61852776c3b794"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/npm_import.rs",
+      "sha256": "606a1fe46a4682c11e7f83705c1b37632d16fde052fdbda4005b27698bbab1c5"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/release_verification.rs",
+      "sha256": "4a8ef2cc00037e107e2ea88c74c5f2b4931b61a6dbe19f4d19bd3a0eecf25d34"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/run.rs",
+      "sha256": "80a11c019e1ba0420a6bd7ac2df00218fb1b625dd09914e75fc271cbeee04b29"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/run/permissions.rs",
+      "sha256": "b72b23ada97f352f48d14d185dcf1656b53f0558aea8becddedfa32ecc0847fe"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/run/result.rs",
+      "sha256": "4e3bf96ede42cc7f7563ca312a736c61c26c760bdb17e933a262f4f219fc9c63"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/run/tests.rs",
+      "sha256": "a78d5270c9db36a1908a5975c51bcd243b28a39df55d8e1abbcc882c4113e1bc"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/sandbox.rs",
+      "sha256": "4e51b7b83d6426e8652049395dc9b2149fa2cb3eaa9aecf6a2488a73ff22bf0f"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/status.rs",
+      "sha256": "370c65d85bbaed43c6e6c953dd7d4d417d215674d9c85dbb29fc1c907dab11d0"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/tool.rs",
+      "sha256": "a2081c62fec3c8f96ee65d3c7f548eb3bf294a5766b45ceaf8424ea3c3dbe04d"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/upgrade.rs",
+      "sha256": "b868b84f43a4f682444d35bb2da6c38434c6ee3a74e729dcbcda8dafafb1cd7a"
+    },
+    {
+      "path": "crates/tapid-cli/src/commands/why.rs",
+      "sha256": "b91e1156bc5251ec0e7bd93adf68c46a7be1989904c9f6a9eda675da061ea6d3"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/activation.rs",
+      "sha256": "e117083582ff8187fa0c01b078aaef02e340510ebe5ac9208df17cde590da25e"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/atomic.rs",
+      "sha256": "0754692da297754c3bb15b3bcdc1984446457f11a7fa6f0967dcb9c98bbc80cf"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/lifecycle_journal.rs",
+      "sha256": "2f5ab268da1a5c846554cc4277255ee844d24c1ba95be63af37518ab2646a791"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/mod.rs",
+      "sha256": "25ce25ca7b23cc72694168c192fb2a8f53d5668a8120840031f8f8b21d0b63b0"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/read.rs",
+      "sha256": "ddbc21b1be4b993637a8b0907e498d951475fb9d76d3d9419fd2c38c1eb72a16"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/tool_shims.rs",
+      "sha256": "0a83d7ced02edc0488490f94fa315430dea210c1719575deb2c34e24a4a52ee2"
+    },
+    {
+      "path": "crates/tapid-cli/src/filesystem/tree.rs",
+      "sha256": "d1c8f999ceaa429f6f1012340aa7daa3b805cc1f4883423a63309be0f8f25f6a"
+    },
+    {
+      "path": "crates/tapid-cli/src/lib.rs",
+      "sha256": "ded49ee575dd65f09af3fe73af7907ee5da9c635bfdabdcc26d1b380a3647941"
+    },
+    {
+      "path": "crates/tapid-cli/src/main.rs",
+      "sha256": "7c4c8a477207220d8be265c8a8046cbb10f3c0fc79564ed34221f12375466944"
+    },
+    {
+      "path": "crates/tapid-cli/src/online.rs",
+      "sha256": "7743473c586e1168601cf993005076656bdc4cea6d0b5f6eadb0c9ccc82b8a44"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/artifact.rs",
+      "sha256": "c09ac6dbe202622e3b99010ae05d9c37b065b59943078847091949055b8926e1"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/copied.rs",
+      "sha256": "c88f7fc1b4541fed208d2015620888744c064b1e2cafee719151e23f90425710"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/graph.rs",
+      "sha256": "2a6b43e2c7d810beaa168d234b097c543804d534d2c521f9e755d99ab61b549c"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/locked.rs",
+      "sha256": "b2567df503bdbcd5c03a693d17c88c80486d235e8c2a42a0e3f863707884e748"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/npm_import.rs",
+      "sha256": "922699368e5d31dd9aab9f1d3bb1b746ad3349049e96b9d6fd553ee117a3d1a8"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/platform.rs",
+      "sha256": "dc4c453fec9c9eefc70f1196e540c0d722ef487165231b75b19f9333eaa0ec23"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/preview.rs",
+      "sha256": "954f2ab3b111bc0398c21325f3bae82f885e2e6a3776ae32b65a3c8930cf7bec"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/resolution.rs",
+      "sha256": "381200f222f83ce61100f2b1d076fe1f128ed6b9457d06b79768466a56d96ebb"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/resolution/exclusions.rs",
+      "sha256": "3dbe72a41ed6cb22c03b030a00391b36e15316b8928da48c54edd22b4d00820e"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/routing.rs",
+      "sha256": "de844640d3797eacf32b5b249d4db2ac6f16c03b8380568f8a0ea5a1557462e0"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/tests.rs",
+      "sha256": "ae348be697b2cec22b15657d94a455738cb795893b5ac39e2b5c5a60cb837a1b"
+    },
+    {
+      "path": "crates/tapid-cli/src/online/update.rs",
+      "sha256": "ffef2ee793690125d5ac942da3ad8f5d13f66446362a64fbe316aa1a74a335f5"
+    },
+    {
+      "path": "crates/tapid-cli/src/output.rs",
+      "sha256": "1f87cd29c39eed6e09878f8260151cf45a8e46e8a39053d06aa83267829bf54c"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/install.rs",
+      "sha256": "985273b5e7ffc57ad5400ef85a079b724ec01429d85a04716c85c327dd08083a"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json.rs",
+      "sha256": "684b53b2a57abb9d18373d26b1dfe03d65c74fe8ca1e18dd7cc228f73ee1cb3c"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/cache.rs",
+      "sha256": "f6a58977aff39371f7a7913bbd94b102ae950c4197f934d0a3230f1cf1981370"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/dependency.rs",
+      "sha256": "bdfaaafba26b292bc606990ba3e423a809d48699f15035e877b19f59d8cd3148"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/diagnostic.rs",
+      "sha256": "516005ac388aaca0cc2945204b4a40afb6089fb8f1ceb5f38a24c5e891fc4690"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/explain.rs",
+      "sha256": "af576b1293c1b567a914286bf249f5fd0cb1dc8b9bd9aca68fadb685f4a9a0c1"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/lifecycle_tests.rs",
+      "sha256": "d9a6b5463bcb8919adeb4f5349649395042e871f7479b7da951d7c27ddf12907"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/outdated.rs",
+      "sha256": "c14509b4745e344e064e8583eae5f285d3b08b69ba9b69057f7dea08fc9e9060"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/paths.rs",
+      "sha256": "ee0b029970b6b66f5b23771e28509a83d3ee69bda50d6e61945d25ff63236881"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/preview.rs",
+      "sha256": "817a6402cf27dceee62037e0ad1e9c4b666a3cd61c3595a853817e5072200ab5"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/tools.rs",
+      "sha256": "5198303a04e6244295e0ac866de978bf6712e6ffcfdbf164e5576c81c6ef9929"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/json/why.rs",
+      "sha256": "7f3000f2e35907008a2e533bf84e2dde3e425e90d5bc71bc96589d0327e7d837"
+    },
+    {
+      "path": "crates/tapid-cli/src/output/preview.rs",
+      "sha256": "80665022a4a4de1e947e89bc3a1a31cebb955c8c0a844133a1fb109c02307d9d"
+    },
+    {
+      "path": "crates/tapid-cli/src/package_spec.rs",
+      "sha256": "93bc750e886ad447f692375cc5a4669ca5f14ddf56c9b45870cf65bf71a108f4"
+    },
+    {
+      "path": "crates/tapid-cli/src/registry.rs",
+      "sha256": "3bb78326aef60bca1d23a75d1b300b26bc7ca6ea47852f76eefaa0af38635d55"
+    },
+    {
+      "path": "crates/tapid-cli/src/run.rs",
+      "sha256": "07b4eef51b11ce3ea84f75772304672c0f97a327b60bcf04f443942b4b9671f4"
+    },
+    {
+      "path": "crates/tapid-cli/src/transport/mod.rs",
+      "sha256": "ba4e1c42de8ca4d3b4f2b5251c29d3f755d6d2edd965b6d59436530ed087ccd7"
+    },
+    {
+      "path": "crates/tapid-cli/src/transport/release.rs",
+      "sha256": "b7af52053281ac63c765a934d71a495da3b4ce60d6eabd253ca2aaebfd338c94"
+    },
+    {
+      "path": "crates/tapid-cli/tests/agent_workflows.rs",
+      "sha256": "77a37c135991ff9de91b821b2613efd14ec688275b4f3915bac577db2c5c627c"
+    },
+    {
+      "path": "crates/tapid-cli/tests/architecture.rs",
+      "sha256": "ba21cb8896dba4323bca133b548ece7471bcf6b1e108bdac66e6f34f81a17c87"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli.rs",
+      "sha256": "919dd401f5dc7405cf73a367713df1c62ad25a4a474771adda00965cdee99f52"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/cache.rs",
+      "sha256": "023c318ed084f570d6a4c2eb5c6ecdfaceb3e7b9baddde2aaabd87681b6ce553"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/ci.rs",
+      "sha256": "ecab97c3323c44a64279cdaa62b6ac6e47c680f5146724c52d9354ce7ab000be"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/command_fixture.rs",
+      "sha256": "ed3f7a7a4b57d7f31a18be82af1b294656185624df47f5f8ef97a1560f5b3853"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/command_support.rs",
+      "sha256": "21da70556f727f043cec1c35f37d55df67b698466f952966ff58e22d24f3638c"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/explain.rs",
+      "sha256": "71be0d291182cba860532cf489edf801a2c561bd75e27481ec702c8765225cc9"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/lifecycle_reporting.rs",
+      "sha256": "b328099985269a1fe931234cef75147afcae7da9afe4a6be1b5f75d95ce0170f"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/preview.rs",
+      "sha256": "82383ccffaaccd08a5339e426a2a7b59bd626d762a1b55715338cea0448b6dd3"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/run_permissions.rs",
+      "sha256": "6f6ab955fe6b458c0b782760c51ef58ec87580f8969f9661853927ae4b091892"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/status.rs",
+      "sha256": "32c24fb6d1ead42b5cd56df5d231ec46e2d844c1338b2472184086ba72dfdf93"
+    },
+    {
+      "path": "crates/tapid-cli/tests/cli_cases/tools.rs",
+      "sha256": "add4d33bdb30b5e31dc24acfde1f3d984d41d2db92b34811fde24d9476ce5886"
+    },
+    {
+      "path": "crates/tapid-cli/tests/json_cases/outdated.rs",
+      "sha256": "c97011bebdf2720798968791bad5559c0ddfff16419c8e92d8ea306fa02380b7"
+    },
+    {
+      "path": "crates/tapid-cli/tests/json_results.rs",
+      "sha256": "79d7087a49a3314e9f99e0a14289907538c673cb6409925dcb668618ea5573e6"
+    },
+    {
+      "path": "crates/tapid-cli/tests/npm_import.rs",
+      "sha256": "9906020ee8e10e78c5d062d1a38613e2545c136b5668782880a485b6630fede1"
+    },
+    {
+      "path": "crates/tapid-cli/tests/release_verification.rs",
+      "sha256": "36c3b321291f90b18c97453d4b1b063fca2f0bcd5de497fc2b64278ff6d753e4"
+    },
+    {
+      "path": "crates/tapid-cli/tests/run_planning.rs",
+      "sha256": "daee20fcdf518521b653fe1ff6219f80aa75ab0311f6f755be89e6151806dd00"
+    },
+    {
+      "path": "crates/tapid-cli/tests/upgrade.rs",
+      "sha256": "80a40e2a9bce7cbf2e5b478feef6fdc9c67a3e59a4e08d5141165fb176886308"
+    },
+    {
+      "path": "crates/tapid-cli/tests/workspace_acceptance/mod.rs",
+      "sha256": "05c9561991b157ef671b0a49e2d973c063f645c6d2fb7355bfc728b04c50d216"
+    },
+    {
+      "path": "crates/tapid-core/Cargo.toml",
+      "sha256": "65c8561eeae9613153b3d4c973fd844dfc3cb058a19d974c12259660739fd73e"
+    },
+    {
+      "path": "crates/tapid-core/src/artifact_url.rs",
+      "sha256": "9dd714155962d2d5322ff4e9062fd1527344ce7609b6655bfe298964151141f3"
+    },
+    {
+      "path": "crates/tapid-core/src/lib.rs",
+      "sha256": "4a76ed78a304e0d5102edeacc05a4c8b76c7e4d699096ec4fefc8f6005d4b9e7"
+    },
+    {
+      "path": "crates/tapid-core/src/platform.rs",
+      "sha256": "3f093f30b9bfc36184857c0cc1f488f3b5b9d6eb083ff92bc312decee29800ff"
+    },
+    {
+      "path": "crates/tapid-core/src/source.rs",
+      "sha256": "8c6e8cff1e52c57a33c98f905383bec53cb1faa06800aa6cb06db22cbfaee577"
+    },
+    {
+      "path": "crates/tapid-linker/Cargo.toml",
+      "sha256": "0fee932cbf1118374cf86a8d88a24a33741414bb5b9c351046332336b377005d"
+    },
+    {
+      "path": "crates/tapid-linker/src/layout.rs",
+      "sha256": "5da118b4f2132d6c6349c2c0220b8c3dc6d79378376100cedc2a6e76c45523a0"
+    },
+    {
+      "path": "crates/tapid-linker/src/lib.rs",
+      "sha256": "c70ab3863b0b5ff82ce8e272270677f0245bf31b271761d7f06e2dc52c4ee7b1"
+    },
+    {
+      "path": "crates/tapid-linker/src/platform.rs",
+      "sha256": "92738e97b7a35851e73ff12da5d2ec4737961f98c8f95ed6bef1caac9beab8ad"
+    },
+    {
+      "path": "crates/tapid-linker/src/shims.rs",
+      "sha256": "44789c44551ec1e94aa8a1f0bdaf8e24487ad8ebd6f73b4de060ccb2b9a92f47"
+    },
+    {
+      "path": "crates/tapid-linker/src/workspace.rs",
+      "sha256": "97220efddf01eb6a9ef8a871eb840300ea8790dc6cb4ff0e23af8b3b977cf37d"
+    },
+    {
+      "path": "crates/tapid-lockfile/Cargo.toml",
+      "sha256": "303acda6d739f1e15b2fd71233286a7b88e232aa706ec165205adf2304c7376c"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/error.rs",
+      "sha256": "2f563429f591bacd092bf7cf2157bae2a06f47ff2424f3292c265fcee5b40d7a"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/lib.rs",
+      "sha256": "3c434f6eddec4f0ca76b2eaf11de0e083621295a024190f3abd6096fa3b59f51"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/model.rs",
+      "sha256": "674107b3a071410887a3caa8b7be23cad90626405baae803f292eb4ff1519931"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/npm_import.rs",
+      "sha256": "7f48b0b9d48f96e7293ece302d46e13fee61853029445584f740895f5b8c26a1"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/npm_import/json.rs",
+      "sha256": "d9d4ea4704f4db78fcc6ddf06ff1e6ef6d5ecfca051065db4ecc12693fb81c25"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/npm_import/parse.rs",
+      "sha256": "ccdc2fc21697fef6991eb5d0f279dfbc55fdc7bbd32ec2bb241f480254a565fb"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/npm_import/tests.rs",
+      "sha256": "02edbda4b5e0b311df983802bce38c44aba1a11c62bef9b1a0a2b2a29583f1f4"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/npm_import/workspace.rs",
+      "sha256": "b29f707fb68b84547deeacc233aa85fb2feedae85a209da9a3d83a60cf89eb8d"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/tests.rs",
+      "sha256": "123c313c6364181616e06d406d6550242e44e53b2d8c2ef53f9eea10f05335b8"
+    },
+    {
+      "path": "crates/tapid-lockfile/src/validation.rs",
+      "sha256": "5ded5b21c8992be87ebe4cfba53e3e5673a23945a21b41c62cf887e2cf799570"
+    },
+    {
+      "path": "crates/tapid-manifest/Cargo.toml",
+      "sha256": "882101ed83b2b212679c837678b7004cfd3bd19d18a30c2ce5ebf0b9304cc380"
+    },
+    {
+      "path": "crates/tapid-manifest/src/error.rs",
+      "sha256": "a59bd5eedf4c8155e30223d89f114b31086179e6f3ffb4a1cb4b4de35d0b312f"
+    },
+    {
+      "path": "crates/tapid-manifest/src/lib.rs",
+      "sha256": "85fdbdd3f3e184906976150e5499b01b1f60324483ee49490af244a078cd290b"
+    },
+    {
+      "path": "crates/tapid-manifest/src/lifecycle.rs",
+      "sha256": "60a74a7fbe3aa78cce9a26f44aeb11e32481835da2bce698d6be7f0d1ac0e229"
+    },
+    {
+      "path": "crates/tapid-manifest/src/model.rs",
+      "sha256": "59cdaa0dd75a0e1cc787e7c21021fe1a54d57d2469e92ba57ba304418598a6bd"
+    },
+    {
+      "path": "crates/tapid-manifest/src/parse.rs",
+      "sha256": "bdd3ef5055f96d92f24d12648b5c5cc22e8483b5550463c2db822916c6ea0ee8"
+    },
+    {
+      "path": "crates/tapid-manifest/src/workspace.rs",
+      "sha256": "957fd131a6702162c18206a81297f63a0b24f98509cd42bd739341e08c3ad94c"
+    },
+    {
+      "path": "crates/tapid-policy/Cargo.toml",
+      "sha256": "1ec9420d1cb3fbb61b3a53b36602af49e1f6885001b002647e3cbaa71c032203"
+    },
+    {
+      "path": "crates/tapid-policy/src/lib.rs",
+      "sha256": "c0d43d7a890328f5d57e0f04b43338b0f854b12eb9fd93a5a94b653bc30cb3b3"
+    },
+    {
+      "path": "crates/tapid-protocol/Cargo.toml",
+      "sha256": "758de4ef124444c60c6c163afbf408e066580e82b7ed861548e3449a3f96b856"
+    },
+    {
+      "path": "crates/tapid-protocol/src/lib.rs",
+      "sha256": "76eb5848d308bc1623748d7d80727420da2fa7c4046ff4566697b73c4d0c5b4a"
+    },
+    {
+      "path": "crates/tapid-protocol/src/security.rs",
+      "sha256": "1c6ac3556513b762d774fb8d30a598fd700ebf5f340ae2db85020ffcb773e946"
+    },
+    {
+      "path": "crates/tapid-publish/Cargo.toml",
+      "sha256": "d8b6899e0dead6332524b15b4e3f8906ebb23a112ffdbd3832c32e7c191f70f5"
+    },
+    {
+      "path": "crates/tapid-publish/src/lib.rs",
+      "sha256": "dce4fb6d8e4a74a59eaf69d654fdd42ebb2e9a8218682078e863cdba4aaf33ee"
+    },
+    {
+      "path": "crates/tapid-registry-client/Cargo.toml",
+      "sha256": "776503e7fc47057b369a360163a4a576f2bc8b43175f2fcb75ed44f10b610c65"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/artifact.rs",
+      "sha256": "a6983012facdcf19637d796888f41d032f122fc8330169fb55f93a700abf260c"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/client.rs",
+      "sha256": "20237953ece53c6e7bf3082bc7b3950a76a81808ae42e3aca8ccb8d312e7304b"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/errors.rs",
+      "sha256": "448b58d1346db2089ed270daaf9bb4b645e43571a3d0c34a59475efbb46d3517"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/git.rs",
+      "sha256": "e18cfa8f611e02b959f2bdbe0e07c4ea3edd4aba050b12d3a8185c7c26dd5234"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/git/http.rs",
+      "sha256": "e034c20c341a3164444ea52d8fd5c1e8707dba9e67985fee48acf140162fa4c7"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/jsr.rs",
+      "sha256": "92ea1b2dc8282eb9e0b3a7b53782df8b93798cdc1fb6c36d8c783165dc70c844"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/lib.rs",
+      "sha256": "b9732c290bc7454faf8598f9de6b09dd46c10528d89e2388ae8e3127a56d8669"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/models.rs",
+      "sha256": "c78a890525e73975a70fe04e8b5179aa7f8a3e31f3bd228aadf2d78ada1d275e"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/npm.rs",
+      "sha256": "cb37f879ab5f20657a1787688f972efd14fae4304553b7d6d61a3da513eaee6f"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/npm/inspection.rs",
+      "sha256": "a3149e8ba8d96c7e0960e1f467d30278fe7dadcc04b09e903017cbbfcd20d45f"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/response.rs",
+      "sha256": "67b46ca283fd9083b04e051f9526f557a5d15b63e30564e442738d948f38d5b8"
+    },
+    {
+      "path": "crates/tapid-registry-client/src/transport.rs",
+      "sha256": "7f24ba30de29cff4c31660c57a497111e4e0e86648fa7e8a1f3f327bbedb4764"
+    },
+    {
+      "path": "crates/tapid-release-client/Cargo.toml",
+      "sha256": "901f101f89c73e1c1acfc15b4ec19c53f703ce27a3741474a192f735e4681991"
+    },
+    {
+      "path": "crates/tapid-release-client/src/lib.rs",
+      "sha256": "5f54296ae0d8661ce6b14153d8fa32664e152da826cec33ab18e45abb5fa4759"
+    },
+    {
+      "path": "crates/tapid-release-client/src/tests.rs",
+      "sha256": "69e08e874df1790ef9915cdeaa2be9fe4bd30650f3035036b0e9be3aea2765ad"
+    },
+    {
+      "path": "crates/tapid-resolver/Cargo.toml",
+      "sha256": "4bb6e81249bec9dc4ea5d9be68acc00608c41c9de0c1498b37f53aefcbd42b14"
+    },
+    {
+      "path": "crates/tapid-resolver/src/lib.rs",
+      "sha256": "49fe7327c37eb06d059a40c62c0e61c71412270223c92353593d2c025a8d359a"
+    },
+    {
+      "path": "crates/tapid-resolver/src/tests.rs",
+      "sha256": "753db8044695929a5f8cf76c0698ded53ff7cdcbe4390ea4b33c32413d5f4e2d"
+    },
+    {
+      "path": "crates/tapid-resolver/tests/node_semver_compat.rs",
+      "sha256": "cd8ee445c07bbe5d5abc118b02f64d4c2c935b3c225e3fd09a2cad7969703515"
+    },
+    {
+      "path": "crates/tapid-runner/Cargo.toml",
+      "sha256": "78e7b764c660fd654e648212483d07d40b70971084837043685ab7e65527e8f3"
+    },
+    {
+      "path": "crates/tapid-runner/build.rs",
+      "sha256": "ffcac107d9226dc6cc378d23ef4b62361b177da9af557ba60d053b1dbcf0eb4b"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe.rs",
+      "sha256": "fd1f4b869a15a448fd3e66478110ca3ebdc0de6517e29f95cb2bd8f82b9c85ad"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/authority.rs",
+      "sha256": "c443d2cbce25c16cf374e7b4876233fbc477ac56755c66cecb049d659ff7b1df"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/cleanup.rs",
+      "sha256": "e796f82abb21ab1bd28399eaa77578e36ae9342a9849ef02dce524f83efa01bc"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/probe.rs",
+      "sha256": "bdc3c803c2744de84c23b83f949f857a3233e78d8fe1b7656e46f180ff5e417b"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/record.rs",
+      "sha256": "fed69c2d337eb683a57a100fae63e6c22a04474e5acd0960ae6e5e8b61dff5e5"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/workload.rs",
+      "sha256": "8d0fc07b1b0ac2f8468a089685d9fba6d5890946cda53439f27d63a344670a16"
+    },
+    {
+      "path": "crates/tapid-runner/examples/macos_managed_tree_probe/xpc.rs",
+      "sha256": "9e819750e51efc69d9653fbcd095187f79f0b1914517cdab5e6956b422bf9eec"
+    },
+    {
+      "path": "crates/tapid-runner/src/config.rs",
+      "sha256": "b50a0b503ada6bff87b0452733d288ce67696d2ca2092a13a35b959477840d22"
+    },
+    {
+      "path": "crates/tapid-runner/src/execution.rs",
+      "sha256": "ab6081cc57796772d792fde0d6bb4b93ff2ccfdf23c6bb45599d362df820ff6b"
+    },
+    {
+      "path": "crates/tapid-runner/src/execution/policy_ceiling.rs",
+      "sha256": "d2976fd6a247d61e569fe3e646e63ee6432d2405b5e03f38587d4b7a7d27fea7"
+    },
+    {
+      "path": "crates/tapid-runner/src/execution/request.rs",
+      "sha256": "afc7ee2a8f07020fa68e3e5516a020d2dbb7c1bcacf6fa17e5a993effaf01233"
+    },
+    {
+      "path": "crates/tapid-runner/src/execution/supervision.rs",
+      "sha256": "54512fb239a7dd1db71f737ca2bca84a9e7f0be513e9b08af4c812430ccc3c1f"
+    },
+    {
+      "path": "crates/tapid-runner/src/execution/tests.rs",
+      "sha256": "75711f3cfb2bc149c9c4e140569bd871fb57d77a835e1028cd43ed82532895ad"
+    },
+    {
+      "path": "crates/tapid-runner/src/execution/uncontained.rs",
+      "sha256": "7129df14e33238ccc2551cb0b0c0a6d5d3b0f73f01f615ffcccaf0fc29e82f88"
+    },
+    {
+      "path": "crates/tapid-runner/src/lib.rs",
+      "sha256": "d7efb0f26ee36cd00b5e71d2729f8035c63a302bfcf4c39739db4034e33c26ac"
+    },
+    {
+      "path": "crates/tapid-runner/src/lifecycle.rs",
+      "sha256": "6b4ffec328b833872cac25fe33b92bca60084ab2b5ba7836444b4a5b9f325ab8"
+    },
+    {
+      "path": "crates/tapid-runner/src/linux_restricted.rs",
+      "sha256": "00fb1003ff46c2bc613a87a792ee7eff6417a519c8258ff1f1ec06e48e5b6a2d"
+    },
+    {
+      "path": "crates/tapid-runner/src/linux_restricted/managed.rs",
+      "sha256": "df8a225017ed9fff5135373c6af4a30914c86b6ceca475deb41d0f7a5dfcbbfc"
+    },
+    {
+      "path": "crates/tapid-runner/src/linux_restricted/managed_filesystem.rs",
+      "sha256": "aa877a9ba4d89b16d82bbbfe65dda8dc48bf40a714e7909b91693649b6503b5b"
+    },
+    {
+      "path": "crates/tapid-runner/src/linux_restricted/tests.rs",
+      "sha256": "0c91132bcc722422c5a802079d65ffb9e2fae8687f14259f4e66bb86d4648b3c"
+    },
+    {
+      "path": "crates/tapid-runner/src/linux_restricted/toolchain.rs",
+      "sha256": "eceab582c00cf46c05fe08f6349e0ba6edede52280644c4157955a78a16195e2"
+    },
+    {
+      "path": "crates/tapid-runner/src/macos_restricted.rs",
+      "sha256": "860ebaa2d26e49b0a0f19c0b1f6ab004ee0e664702a7ed5cc2f4862fcbe87986"
+    },
+    {
+      "path": "crates/tapid-runner/src/macos_restricted/tests.rs",
+      "sha256": "2a7afab05204867fcaf2bee0eb66a7e1bb7cdc4da8c9be8a4a734446f0d5eef3"
+    },
+    {
+      "path": "crates/tapid-runner/src/unix_output.rs",
+      "sha256": "2636a04559fa34242ec6489ba526670a5e4858839c10816752e3d3b1d30e1d6f"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_cancellation.rs",
+      "sha256": "48600641a06e10c7957b1d52276392a6ea4029dad5236c2c63a02a6540fb0512"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/dll.rs",
+      "sha256": "540d8bc27b3ce462be30e294fefe7edc40f25537b631e0ff74c66fe187d5aeb5"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/imports.rs",
+      "sha256": "812917b2d760c3c13ba992075da41828c37cc7d125b50d74ec8146afac54ac3b"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/lookup.rs",
+      "sha256": "1616a0aa1e98307bb816559102fabccd2ad3687c0a8f3b453b730757c5cabc11"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/lookup_protocol.rs",
+      "sha256": "39d338def7b89c4f13cf9e6edfabb642b8be64a6e8176778dfce449395e157d5"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/native.rs",
+      "sha256": "8ef353cfa1899309dd311b6806ef003aef77eda4e92c379582e5099132453c70"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/network.rs",
+      "sha256": "163dc425988297060d431e6b260ba73b92020176fa998ed15b67684f1bf68db0"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/network_protocol.rs",
+      "sha256": "3f4e6322f31b2548fea226729a5024ecafeb9ee64983251099bf561cd07bc18f"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compat/protocol.rs",
+      "sha256": "2c19b2ac216cf293d1e4ffb390b7dc2a75c5808afea291640ea836f9cf0b45c5"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_compatibility.rs",
+      "sha256": "22e44779273f9117c00cee5d0828384011dce89feebc191342fb70488de8a421"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_evidence.rs",
+      "sha256": "938b9cd2fbe195e26cfcd3829bc67077d2c3ffa59b61f21c4851e74346092f10"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_execution.rs",
+      "sha256": "cdbf43191fd1a7b6ca58f089c5453399d66761fbcab1faf6a65ae0052118b1df"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_filesystem.rs",
+      "sha256": "e304a7ec0f2f766235caa3b8bf331615bfa7a2110ee97f9ee7ced1db26197c88"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/client.rs",
+      "sha256": "1f828bdf4f76f2228ca7c703c1057b7e1f555e21ebc88c3443f19954631e1cb2"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/filtering.rs",
+      "sha256": "f1d6b0ea33d305ffe1aaa1be67a4c7c84e80c84c45b7963bdf0251060dcee6d7"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/identity.rs",
+      "sha256": "93852f5821c31be960eebb8a3fc87e92cfe7b1682a53734eb8fa67ba868649e9"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/installation.rs",
+      "sha256": "9bae2919b8b09b0cc070af8c028f22bcf57686b0449aae10b88fa95e38a1ee87"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/mod.rs",
+      "sha256": "d59bc69b13f5e7d10acc3237ca6f57982dcf92d97b83873b98797e53e0e6ab65"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/pipe.rs",
+      "sha256": "3487a44f68b59bab19423cb4e2d50dbf9c141d2cbdf6e6b8ef537336e74af315"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/protocol.rs",
+      "sha256": "07dacfad7ea1e753f0192af66660c7bb977c853e0b8efb5fcb7fb1ac17fbaa2a"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_guard/service.rs",
+      "sha256": "967f05b9e4fcff06c9153052b652ea55954aecf4c053f485b85ebd9657bc0d42"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_integrity.rs",
+      "sha256": "6c45d26ef98090dabb3db2039dd57bd183c4bde94fc9eae4b1e9a62cc7455514"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_job.rs",
+      "sha256": "26d3aefdb00a4ef877de426bab183f8846b6e9e5df1b6c748bce8334ff073b38"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_job_tests.rs",
+      "sha256": "3baba9c157927208658df031dec8b76b362f066f51dc1de9f504c8a7f5994601"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_lookup.rs",
+      "sha256": "174f4b21a8a75380cd105c4f44e71c0dc8aef53bbd4be86b7664a3baa836c6c7"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_network.rs",
+      "sha256": "83c70f894de9837b8ebb17f00b0916746dc13bfe86c2278246e8785d22f2f272"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_node.rs",
+      "sha256": "2743bcb3e727a0096ef451bf4620bccc40c292e1f291b4fe2007818c01bb4012"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_process.rs",
+      "sha256": "039352437a933b7deb19298fc8ca920b5c439b27a0a27d36cfa9647162703b70"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_token.rs",
+      "sha256": "5d519630a980a8f245e29445e9d7770a37b871e01745e7054919ea0334af57e2"
+    },
+    {
+      "path": "crates/tapid-runner/src/windows_write_validation.rs",
+      "sha256": "6be16deb7d08cd0372cc1b6ba195a7174feb4f455cebdc5dc47ad4d509ed65ea"
+    },
+    {
+      "path": "crates/tapid-runner/tests/fixtures/windows_node_launcher.rs",
+      "sha256": "f5fadf8cf19e1bbb022251256d1cf2606bd64f6a27e9b968d6833623eace8728"
+    },
+    {
+      "path": "crates/tapid-runner/tests/support/tcp_host.rs",
+      "sha256": "a7c810caebbf1af6ca05ef8cabd5eb670b174359d4dccb599fa3c6ed1907adaf"
+    },
+    {
+      "path": "crates/tapid-runner/tests/support/windows_acl.rs",
+      "sha256": "1daeef72fd2b1fb50b77c57901b67fcb80375492104b3d6525c749a429e2b216"
+    },
+    {
+      "path": "crates/tapid-runner/tests/support/windows_node.rs",
+      "sha256": "f7d725168636d21ea7c6a52a657cefe8a9b811a423866ccadf1672a83e6e27d3"
+    },
+    {
+      "path": "crates/tapid-runner/tests/tcp_host.rs",
+      "sha256": "24a8fcabb7c859b04315955a0c8b0cef75d7e10e060bf7d2688bfca61011ef94"
+    },
+    {
+      "path": "crates/tapid-runner/tests/windows_containment.rs",
+      "sha256": "e104771cb6fce68b1dacf6d6864ccd56c24eb4e84e3addc5c1c5c8b3f9fda745"
+    },
+    {
+      "path": "crates/tapid-runner/tests/windows_network.rs",
+      "sha256": "ce554cf55f950623293f87cce22d9fb7c053f99e76eb522f681892d11a6fc32a"
+    },
+    {
+      "path": "crates/tapid-runner/tests/windows_review_regressions.rs",
+      "sha256": "f08d991f11207ac124ae9644eb205e865d8c131a9702eba4d7c1b95250413ce6"
+    },
+    {
+      "path": "crates/tapid-signatures/Cargo.toml",
+      "sha256": "30c807c20896caf4c9a68ba746ef95c14dfbec1bc18698fc256f7c5ab74da7a5"
+    },
+    {
+      "path": "crates/tapid-signatures/src/lib.rs",
+      "sha256": "f749b58cf6d0ce045940c9784de751b0323b5117f97b801194887f44962b2828"
+    },
+    {
+      "path": "crates/tapid-signatures/src/release.rs",
+      "sha256": "902f928f53fb6bbc417a833a499e9b4ca1b19b9895c56d14cdeb65801f3a312c"
+    },
+    {
+      "path": "crates/tapid-store/Cargo.toml",
+      "sha256": "37a3a69a88d5e6b1bfd5e9c1814cce5a75cf01e094639e8f4b033b728db97de3"
+    },
+    {
+      "path": "crates/tapid-store/src/lib.rs",
+      "sha256": "90d579d80d97f3ae5033906c393f48abd92a99e74af9fb7d7900130eb1029ca4"
+    },
+    {
+      "path": "crates/tapid-store/src/lifecycle.rs",
+      "sha256": "5619039cedbfd20d4c017070e6af07f5f7feebd6c9dac3a219624d5f3b84f899"
+    },
+    {
+      "path": "crates/tapid-store/src/lifecycle/windows.rs",
+      "sha256": "62f970f4d6264c304684ddd13bfc9006211463c84b179da7b41fb8417f3d046c"
+    },
+    {
+      "path": "crates/tapid-store/src/maintenance.rs",
+      "sha256": "cc7c490db7090b0b66e46da58a3057af270dda804bdd1829c38fb7fa012ae66e"
+    },
+    {
+      "path": "crates/tapid-store/src/maintenance/directory.rs",
+      "sha256": "68bd559bba2fa8d0ca2451e29e93b3d5ba1a4fefe7f72e0257776cb736a4013e"
+    },
+    {
+      "path": "crates/tapid-store/src/maintenance/directory/unix.rs",
+      "sha256": "d906c49ea86b06fbef62e29a0f6ce5ab39894797ceb9630d2b2d2d88bb4220fe"
+    },
+    {
+      "path": "crates/tapid-store/src/maintenance/directory/windows.rs",
+      "sha256": "1532c96b84437bce639a877054438129837607c8bf56c5f3228267ace1a8ce5c"
+    },
+    {
+      "path": "crates/tapid-store/src/maintenance_tests.rs",
+      "sha256": "ed6e6809a1719e1997b0ab62aba5a9942248efc988f5533496aaa36e6a8d920d"
+    },
+    {
+      "path": "crates/tapid-store/src/tests.rs",
+      "sha256": "f7e2c49fdb65add92fe64d639505aec92ee15d31fa6d5217d9fe247805b7e09e"
+    },
+    {
+      "path": "crates/tapid-test-support/Cargo.toml",
+      "sha256": "43cba54085896c536640c6b2781e612b1e5eef25a8b437c2eb377d1654a3ce12"
+    },
+    {
+      "path": "crates/tapid-test-support/src/lib.rs",
+      "sha256": "1e0577f222e0bdd2ba544591ae408530877a74858e269954abc609c76a340daa"
+    },
+    {
+      "path": "crates/tapid-transparency/Cargo.toml",
+      "sha256": "1bb641c1a08c84dfde5c78d91e46c11b3a24d8dc4b00063401bd540ba554d566"
+    },
+    {
+      "path": "crates/tapid-transparency/src/lib.rs",
+      "sha256": "597d6547ce61fe8234d396423f2fb5612304a98aa4b606d1729bdd675b60c479"
+    },
+    {
+      "path": "scripts/dev.ts",
+      "sha256": "e406f4e2644c97c4c319018c865e3bf167ceef20c8643ff9f43f431fcbcc7744"
+    },
+    {
+      "path": "tests/integration/Cargo.lock",
+      "sha256": "3237e1385ec1a657af71a4cfb05bbc0865ab3ffa14c7e2a208ad77e9a3d289e6"
+    },
+    {
+      "path": "tests/integration/Cargo.toml",
+      "sha256": "f2af921ce2745b39ef21c071708c5120de2627a0b34b10f4d7abc7b6234b6f9b"
+    }
+  ],
+  "sourceFingerprint": "75e29c93c19081d003e80a6375d8390d0699c3ed5b2427b08019d4dd1e514f08",
+  "binaries": [
+    {
+      "path": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+      "sha256": "9eb6190480340e6d602d53ba64220c410ebe420c9d3b3750494a77f9a938102f"
+    },
+    {
+      "path": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/Probe",
+      "sha256": "7543a4f9d03d2afb25302e6f430655559c1f8f09799b9fe58eabdfad03efa090"
+    },
+    {
+      "path": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/Worker",
+      "sha256": "d5d704c2ad61374d2b9903dfb538c014ee511f282e787eff0f8d82b306a906c4"
+    },
+    {
+      "path": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib",
+      "sha256": "a997e765922a34b1d809955e70b502346c44a26e82b4d56d581bf8f0b8f103a7"
+    }
+  ],
+  "environment": {
+    "PATH_prefix": "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin",
+    "CARGO_TARGET_DIR": "target"
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exitCode": 0
+    },
+    {
+      "name": "example-tests",
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "test",
+        "-p",
+        "tapid-runner",
+        "--example",
+        "macos_managed_tree_probe",
+        "--locked"
+      ],
+      "exitCode": 0
+    },
+    {
+      "name": "focused-rejection",
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "test",
+        "-p",
+        "tapid-runner",
+        "--lib",
+        "--locked",
+        "managed_tree_and_every_resource_limit_fail_closed"
+      ],
+      "exitCode": 0
+    },
+    {
+      "name": "build",
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "build",
+        "-p",
+        "tapid-runner",
+        "--example",
+        "macos_managed_tree_probe",
+        "--locked",
+        "--message-format=json"
+      ],
+      "exitCode": 0
+    },
+    {
+      "name": "workspace-clippy",
+      "exitCode": 0,
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ]
+    },
+    {
+      "name": "workspace-tests",
+      "exitCode": 101,
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "test",
+        "--workspace",
+        "--all-features",
+        "--locked"
+      ]
+    },
+    {
+      "name": "integration-tests",
+      "exitCode": 0,
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "test",
+        "--manifest-path",
+        "tests/integration/Cargo.toml",
+        "--locked"
+      ]
+    },
+    {
+      "name": "runner-tests",
+      "exitCode": 101,
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "scripts/dev.ts",
+        "test",
+        "-p",
+        "tapid-runner",
+        "--all-features",
+        "--locked"
+      ]
+    },
+    {
+      "name": "architecture",
+      "exitCode": 0,
+      "command": [
+        "/Users/doug/.relay/toolchains/node-v22.23.3-darwin-arm64/bin/node",
+        "--experimental-strip-types",
+        "tools/check_architecture.ts"
+      ]
+    }
+  ],
+  "nativeCommands": [
+    {
+      "command": [
+        "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+        "cleanup"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": [
+        "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+        "limits"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": [
+        "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+        "lineage"
+      ],
+      "exitCode": 0
+    },
+    {
+      "command": [
+        "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+        "rejection"
+      ],
+      "exitCode": 2
+    },
+    {
+      "command": [
+        "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/debug/examples/macos_managed_tree_probe",
+        "authority"
+      ],
+      "exitCode": 2
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "architecture.txt",
+      "sha256": "8f1e1ac47ca70edd3828adb0689585190380117edf69ff4d717128264ba6500d"
+    },
+    {
+      "path": "authority.txt",
+      "sha256": "1bfa48444454943bc32a2e083c1b1bfd5128afa52e7f8809f4c2e8bc72e98041"
+    },
+    {
+      "path": "build.jsonl",
+      "sha256": "e879efcd7132bf4b9df2b14166762562ac0c2d5da0c87dcd353181c7faeea112"
+    },
+    {
+      "path": "cleanup.txt",
+      "sha256": "8484d0a09f0b3b6f7e8f2b13b6981d9ff42612b1d0edd2ce08114533551ea83c"
+    },
+    {
+      "path": "clippy.txt",
+      "sha256": "722eddf82cfa14134501f64de959d588d9c68a85e2189328f5669f57604cd19c"
+    },
+    {
+      "path": "environment.json",
+      "sha256": "f4a2cafa9e6d98cecfc7f1edbc551a82ffed123b308b0869fbff46f8b3fb2c3d"
+    },
+    {
+      "path": "example-tests.txt",
+      "sha256": "ce4c010d75a92637cd97616367834fef72fb4732230770d6380e39dbad1afb8c"
+    },
+    {
+      "path": "final-checks.json",
+      "sha256": "49ba64ad0ed6574eb1155cb15cdf8f43938496b489c70f7eefc9fe65b1db4324"
+    },
+    {
+      "path": "fmt.txt",
+      "sha256": "a3680b6601c39b586ea892ad2bbaa58a7f72b62a64f73917b09aa8c5f188110e"
+    },
+    {
+      "path": "focused-rejection.txt",
+      "sha256": "9fd6782b5632384895a193a8a4bee606137782bb8fe7d2a63dd6429c520fb67f"
+    },
+    {
+      "path": "integration-tests.txt",
+      "sha256": "2c9cdc82f1e0030b67ad86277ae89b73e3822dd77c73bf36d375c74ffdc65809"
+    },
+    {
+      "path": "limits.txt",
+      "sha256": "b3978a231d50d2e9f14f6ada740b1845b66551713c538682da8020ce494c412e"
+    },
+    {
+      "path": "lineage.txt",
+      "sha256": "091ccf78c082d61a65f91326602fd1e9ae8b8725b04110cf4fd196f9b012204f"
+    },
+    {
+      "path": "native-commands.json",
+      "sha256": "abe25f2be55f9e62b91fd02a8c7d20e2b9d6a8ba14cb3a451f4476cc7c16cc0d"
+    },
+    {
+      "path": "rejection.txt",
+      "sha256": "6b55254390fdadd4b54086bc756c0fde42175eac7ac061f57af4b2ce09dcf9f2"
+    },
+    {
+      "path": "runner-tests.txt",
+      "sha256": "ffb74d9d55a6bed71ed50b51e1702b8b4a05186e5f354f3699484ffff084a5a8"
+    },
+    {
+      "path": "workspace-tests.txt",
+      "sha256": "864352a01fd68fa9ae0f669eda8d48c14949a1f0c1b89d494ebe49961540c0fd"
+    },
+    {
+      "path": "xpc-final.json",
+      "sha256": "8afd1fbcac1054b6e98bf700032fa682bfc976899dc10594ef9db11e986de907"
+    }
+  ],
+  "limitations": [
+    "No clean-revision acceptance",
+    "No macOS 26 execution",
+    "No authoritative descendant boundary",
+    "No candidate tree accounting or cleanup guarantee",
+    "Seatbelt setup denied",
+    "XPC connection invalid before acknowledgement; native log access sandbox-denied",
+    "Broker/helper, rapid-reparent, rlimit comparison and transport edge-case coding remains",
+    "Workspace and runner test runs failed; see actual logs"
+  ]
+}

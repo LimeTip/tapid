@@ -1,0 +1,2 @@
+xpc_transport_controls=0 expected=15 candidate_enforcement=none
+probe setup failure: XPC transport controls incomplete

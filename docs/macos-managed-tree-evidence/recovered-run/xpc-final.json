@@ -1,0 +1,116 @@
+[
+  {
+    "command": [
+      "/usr/bin/clang",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fblocks",
+      "-dynamiclib",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/bridge.c",
+      "-o",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib: replacing existing signature\n"
+  },
+  {
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib: replacing existing signature\n"
+  },
+  {
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "--entitlements",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/entitlements.plist",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc: replacing existing signature\n"
+  },
+  {
+    "command": [
+      "/usr/bin/codesign",
+      "--force",
+      "--sign",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app: replacing existing signature\n"
+  },
+  {
+    "command": [
+      "/usr/bin/codesign",
+      "--verify",
+      "--deep",
+      "--strict",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app"
+    ],
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "/usr/bin/codesign",
+      "-d",
+      "--entitlements",
+      "-",
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc"
+    ],
+    "exitCode": 0,
+    "stdout": "[Dict]\n\t[Key] com.apple.security.app-sandbox\n\t[Value]\n\t\t[Bool] true\n",
+    "stderr": "Executable=/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/Worker\n"
+  },
+  {
+    "command": [
+      "/Users/doug/.relay/data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/Probe",
+      "xpc"
+    ],
+    "exitCode": 2,
+    "stdout": "candidate=app-sandbox-xpc control_bits=-1 expected=15 authoritative_boundary=none lifecycle=unverified accounting=unverified\n",
+    "stderr": "XPC connection error: <dictionary: 0x1f2de0b60> { count = 1, transaction: 0, voucher = 0x0, contents =\n\t\"XPCErrorDescription\" => <string: 0x1f2de0ca0> { string cache = 0x0, length = 18, contents = \"Connection invalid\" }\n}\nXPC reply error: <dictionary: 0x1f2de0b60> { count = 1, transaction: 0, voucher = 0x0, contents =\n\t\"XPCErrorDescription\" => <string: 0x1f2de0ca0> { string cache = 0x0, length = 18, contents = \"Connection invalid\" }\n}\nprobe setup failure: XPC setup or paired authority controls incomplete; no enforcement verdict\n"
+  },
+  {
+    "command": [
+      "/usr/bin/log",
+      "show",
+      "--last",
+      "1m",
+      "--style",
+      "compact",
+      "--predicate",
+      "process == \"Worker\" OR (process == \"launchd\" AND eventMessage CONTAINS \"org.tapid.research\")"
+    ],
+    "exitCode": 64,
+    "stdout": "",
+    "stderr": "log: Cannot run while sandboxed\n"
+  }
+]

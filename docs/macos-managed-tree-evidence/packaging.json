@@ -1,0 +1,109 @@
+[
+  {
+    "exe": "/usr/bin/clang",
+    "args": [
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fblocks",
+      "-dynamiclib",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/bridge.c",
+      "-o",
+      "target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "exe": "/usr/bin/codesign",
+    "args": [
+      "--force",
+      "--sign",
+      "-",
+      "target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": "target/macos-managed-tree-research/Probe.app/Contents/MacOS/libprobe.dylib: replacing existing signature\n"
+  },
+  {
+    "exe": "/usr/bin/codesign",
+    "args": [
+      "--force",
+      "--sign",
+      "-",
+      "target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": "target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/libprobe.dylib: replacing existing signature\n"
+  },
+  {
+    "exe": "/usr/bin/codesign",
+    "args": [
+      "--force",
+      "--sign",
+      "-",
+      "--entitlements",
+      "crates/tapid-runner/examples/macos_managed_tree_probe/xpc/entitlements.plist",
+      "target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/../"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": "target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/../: replacing existing signature\n"
+  },
+  {
+    "exe": "/usr/bin/codesign",
+    "args": [
+      "--force",
+      "--sign",
+      "-",
+      "target/macos-managed-tree-research/Probe.app/Contents/../"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": "target/macos-managed-tree-research/Probe.app/Contents/../: replacing existing signature\n"
+  },
+  {
+    "exe": "/usr/bin/codesign",
+    "args": [
+      "-d",
+      "--entitlements",
+      "-",
+      "target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/../"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "[Dict]\n\t[Key] com.apple.security.app-sandbox\n\t[Value]\n\t\t[Bool] true\n",
+    "stderr": "Executable=/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/XPCServices/org.tapid.research.worker.xpc/Contents/MacOS/Worker\n"
+  },
+  {
+    "exe": "/usr/bin/codesign",
+    "args": [
+      "--verify",
+      "--deep",
+      "--strict",
+      "target/macos-managed-tree-research/Probe.app/Contents/../"
+    ],
+    "status": 0,
+    "signal": null,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "exe": "/Users/doug/.t3/scratch/2026-10-20-i-tried-paperclip-but-that-4804e911/.data/worktrees/7c3919aa-533c-4251-b984-bdaec485b570/target/macos-managed-tree-research/Probe.app/Contents/MacOS/Probe",
+    "args": [
+      "xpc"
+    ],
+    "status": 2,
+    "signal": null,
+    "stdout": "candidate=app-sandbox-xpc control_bits=-1 expected=15 authoritative_boundary=none lifecycle=unverified accounting=unverified\n",
+    "stderr": "XPC connection error: <dictionary: 0x1f2de0b60> { count = 1, transaction: 0, voucher = 0x0, contents =\n\t\"XPCErrorDescription\" => <string: 0x1f2de0ca0> { string cache = 0x0, length = 18, contents = \"Connection invalid\" }\n}\nXPC reply error: <dictionary: 0x1f2de0b60> { count = 1, transaction: 0, voucher = 0x0, contents =\n\t\"XPCErrorDescription\" => <string: 0x1f2de0ca0> { string cache = 0x0, length = 18, contents = \"Connection invalid\" }\n}\nprobe setup failure: XPC setup or paired authority controls incomplete; no enforcement verdict\n"
+  }
+]

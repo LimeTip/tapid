@@ -1,0 +1,185 @@
+candidate=unsandboxed-diagnostic requested=observed-lineage enforced=none authoritative_boundary=none candidate_cleanup=none
+worker acknowledged child=82745; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82747 ppid=1 pgid=82747 sid=82747
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=0 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82747 ppid=1 pgid=82747 sid=82747\n" delayed_marker=true elapsed_us=488423 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82764; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82766 ppid=1 pgid=82766 sid=82766
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=1 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82766 ppid=1 pgid=82766 sid=82766\n" delayed_marker=true elapsed_us=436341 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82781; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82783 ppid=1 pgid=82783 sid=82783
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=2 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82783 ppid=1 pgid=82783 sid=82783\n" delayed_marker=true elapsed_us=468893 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82818; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82820 ppid=1 pgid=82820 sid=82820
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=3 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82820 ppid=1 pgid=82820 sid=82820\n" delayed_marker=true elapsed_us=400985 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82826; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82828 ppid=1 pgid=82828 sid=82828
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=4 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82828 ppid=1 pgid=82828 sid=82828\n" delayed_marker=true elapsed_us=519682 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82839; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82842 ppid=1 pgid=82842 sid=82842
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=5 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82842 ppid=1 pgid=82842 sid=82842\n" delayed_marker=true elapsed_us=489939 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82851; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82853 ppid=1 pgid=82853 sid=82853
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=6 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82853 ppid=1 pgid=82853 sid=82853\n" delayed_marker=true elapsed_us=400674 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
+worker acknowledged child=82869; exiting without candidate cleanup
+--- research case ---
+verdict = "counterexample"
+
+[observation]
+case = "double-fork"
+candidate = "unsandboxed-diagnostic"
+requested = "cleanup on worker exit"
+available = "process observations only; no authoritative boundary"
+observed = """
+pid=82871 ppid=1 pgid=82871 sid=82871
+ delayed_marker=true"""
+enforced = "none"
+threshold = 300
+units = "milliseconds delayed work; not an enforced limit"
+setup_ready = true
+positive_control = true
+candidate_available = true
+violation_observed = true
+candidate_cleanup = "none"
+rescue = "finite child workload; not candidate cleanup"
+
+iteration=7 case=double-fork worker_status=exit status: 0 acknowledgement="pid=82871 ppid=1 pgid=82871 sid=82871\n" delayed_marker=true elapsed_us=368820 verdict=diagnostic-only harness_rescue=finite-child-self-expiry
