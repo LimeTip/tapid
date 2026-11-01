@@ -26,3 +26,18 @@ Lifecycle outputs carry store-local HMAC-SHA256 attestations over their recipe a
 `Store::cache_info` reports counts and logical byte sizes for published digest-named artifacts and marked trees without creating files or recovering transactions. `Store::clean_cache` explicitly evicts that recognized data under an exclusive store lock. Staging, lifecycle keys, journals, and unrecognized entries remain with their owners. Maintenance refuses busy locks, symlinked roots/namespaces/locks, pending recovery, and populated stores without a lock. Artifact ingestion also holds the store lock, so eviction cannot race publication. A `CacheCleanup` error means eviction started and may have removed some data; retry is safe. Installed project materializations and authoritative lockfiles are not cache data.
 
 Cache maintenance pins the store root and cache namespaces before traversal. Unix traversal and recursive removal use descriptor-relative no-follow operations. Windows holds directory and ancestor handles without delete sharing, rejects reparse points during traversal, and deletes entries through their own handles. Candidate identities are checked before deletion, so a swapped parent cannot redirect cleanup outside the inspected directories.
+
+Normal store-lock acquisition has one five-second monotonic budget per acquisition
+call, including shared reads, exclusive publication, recovery escalation, and
+reacquisition retries. Nonblocking attempts poll at intervals of at most 25 ms,
+capped by remaining time. Expiry returns an I/O `WouldBlock` error (the CLI's
+`STORE_BUSY`). No new attempt starts after expiry; an in-flight attempt may
+complete. Scheduler and filesystem latency can delay return beyond five seconds.
+Separate acquisitions receive separate budgets: this is not a whole-command or
+aggregate waiting deadline. Recovery already started under a lock finishes even
+if the budget expires. Lock ownership and publication isolation are unchanged;
+recovery work, filesystem operations, network requests, and lifecycle execution
+are not time-limited by this policy. Long legitimate holders can cause contention
+failures, and polling provides no fairness guarantee. Five seconds is an initial
+responsiveness policy, not a measured optimum. Cache maintenance continues to
+refuse contention immediately rather than waiting.
