@@ -28,6 +28,54 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn section_edits_preserve_overlapping_declarations_and_metadata() {
+        let original = PackageManifest::parse(r#"{"name":"app","version":"1.0.0","license":"MIT","scripts":{"test":"node test.js"},"dependencies":{"local":"npm:runtime@^1"},"devDependencies":{"local":"npm:dev@^2"},"optionalDependencies":{"local":"npm:optional@^3"},"peerDependencies":{"local":"npm:peer@^4"}}"#).unwrap();
+        for kind in [
+            DependencyKind::Dependencies,
+            DependencyKind::DevDependencies,
+            DependencyKind::OptionalDependencies,
+            DependencyKind::PeerDependencies,
+        ] {
+            let inserted = original
+                .clone()
+                .insert_dependency_kind(kind, "extra", "npm:actual@^5")
+                .unwrap();
+            let updated = inserted
+                .insert_dependency_kind(kind, "local", "npm:new@^6")
+                .unwrap();
+            let removed = updated.remove_dependency_kind(kind, "local").unwrap();
+            for (section, values) in removed.dependency_sections() {
+                if section == kind {
+                    assert!(!values.contains_key("local"));
+                    assert_eq!(values["extra"], "npm:actual@^5");
+                } else {
+                    assert_eq!(
+                        values,
+                        original
+                            .dependency_sections()
+                            .find(|(original_section, _)| *original_section == section)
+                            .unwrap()
+                            .1
+                    );
+                }
+            }
+            assert_eq!(removed.license(), Some("MIT"));
+            assert_eq!(removed.scripts()["test"], "node test.js");
+            assert!(
+                removed
+                    .clone()
+                    .remove_dependency_kind(kind, "local")
+                    .is_err()
+            );
+            assert!(
+                removed
+                    .insert_dependency_kind(kind, "../invalid", "*")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn parses_supported_metadata() {
         let manifest = PackageManifest::parse(r#"{"name":"example-app","version":"1.2.3","private":true,"dependencies":{"kleur":"^4.1.5"},"scripts":{"test":"cargo test"}}"#).unwrap();
         assert_eq!(manifest.name().as_str(), "example-app");

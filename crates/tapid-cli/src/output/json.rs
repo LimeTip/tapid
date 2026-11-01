@@ -4,6 +4,8 @@ use crate::application::outcome::{
 };
 mod cache;
 mod dependency;
+mod dependency_edits;
+pub(crate) use dependency_edits::dependency_edits;
 mod explain;
 mod lock_graph;
 pub(crate) use lock_graph::lock_graph;

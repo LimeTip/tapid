@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 mod cache;
 mod ci;
+mod dependency_edits;
 mod explain;
 pub(crate) mod init;
 pub(crate) mod install;
@@ -139,6 +140,8 @@ pub(crate) enum Command {
   tapid add --peer 'react@^19.0.0'"
     )]
     Add(lifecycle::AddArgs),
+    /// Apply a version-1 JSON batch with one recoverable install.
+    EditDependencies(dependency_edits::Args),
     /// Remove packages from package.json and reinstall dependencies.
     #[command(
         long_about = "Remove one or more declared packages from package.json, then resolve and install the remaining dependency graph and write tapid.lock. Pass package names as declared in the manifest, without version requirements.",
@@ -212,6 +215,7 @@ impl Command {
             Self::Install(_) => "install",
             Self::Ci(_) => "ci",
             Self::Add(_) => "add",
+            Self::EditDependencies(_) => "edit-dependencies",
             Self::Remove(_) => "remove",
             Self::Update(_) => "update",
             Self::Outdated(_) => "outdated",
@@ -239,6 +243,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
                     | Command::Install(_)
                     | Command::Explain(_)
                     | Command::Add(_)
+                    | Command::EditDependencies(_)
                     | Command::Remove(_)
                     | Command::Update(_)
                     | Command::Outdated(_)
@@ -279,6 +284,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Install(args)) => install::run(args, json),
         Some(Command::Ci(args)) => ci::run(args, json),
         Some(Command::Add(args)) => lifecycle::add(args, json),
+        Some(Command::EditDependencies(args)) => dependency_edits::run(args, json),
         Some(Command::Remove(args)) => lifecycle::remove(args, json),
         Some(Command::Update(args)) => lifecycle::update(args, json),
         Some(Command::Outdated(args)) => lifecycle::outdated(args, json),

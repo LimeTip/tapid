@@ -11,6 +11,8 @@ use tapid_manifest::{DependencyKind, PackageManifest, Workspace};
 use tapid_registry_client::{HttpsTransport, JsrRegistry, NpmRegistry};
 use tapid_resolver::Requirement;
 
+pub(crate) mod batch;
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleAction {

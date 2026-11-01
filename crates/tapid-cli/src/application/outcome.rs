@@ -176,6 +176,17 @@ impl OperationalError {
         self
     }
 
+    pub(crate) fn at_edit(mut self, index: usize) -> Self {
+        let indices = &mut self
+            .diagnostic
+            .get_or_insert_with(Default::default)
+            .edit_indices;
+        indices.push(index);
+        indices.sort_unstable();
+        indices.dedup();
+        self
+    }
+
     pub(crate) fn for_package(mut self, package: DiagnosticPackage) -> Self {
         self.diagnostic.get_or_insert_with(Default::default).package = Some(package);
         self

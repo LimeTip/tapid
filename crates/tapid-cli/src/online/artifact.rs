@@ -51,6 +51,10 @@ impl ArtifactFetcher<'_> {
                 "locked artifact has no pinned archive URL; regenerate tapid.lock with tapid update and review the resulting changes",
             ));
         }
+        #[cfg(test)]
+        crate::application::dependency_edit_evaluation::observe(|counts| {
+            counts.artifact_requests += 1
+        });
         let bytes = if let Some(bytes) = &record.copied_archive {
             std::borrow::Cow::Borrowed(bytes.as_slice())
         } else {

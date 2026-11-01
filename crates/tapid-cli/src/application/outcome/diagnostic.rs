@@ -189,6 +189,8 @@ impl CandidateExclusions {
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct DiagnosticContext {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) edit_indices: Vec<usize>,
     pub(crate) package: Option<DiagnosticPackage>,
     pub(crate) declaration: Option<Declaration>,
     pub(crate) peer: Option<PeerDiagnostic>,

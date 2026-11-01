@@ -6,20 +6,7 @@ use std::process::ExitCode;
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
-    if !report.candidate_exclusions.is_empty() {
-        result["data"]["candidate_exclusions"] =
-            serde_json::to_value(&report.candidate_exclusions).expect("bounded exclusions");
-        let mut fields = Vec::new();
-        super::diagnostic::exclusion_truncation(
-            &report.candidate_exclusions,
-            "/data/candidate_exclusions",
-            &mut fields,
-        );
-        result["truncated_fields"]
-            .as_array_mut()
-            .unwrap()
-            .extend(fields.into_iter().map(Value::String));
-    }
+    candidate_exclusions(&mut result, &report.candidate_exclusions);
     if operation == "update" {
         let mut truncated = Vec::new();
         let changes = report
@@ -58,4 +45,24 @@ pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     fields.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     fields.dedup();
     emit(result, 0)
+}
+
+pub(super) fn candidate_exclusions(
+    result: &mut Value,
+    exclusions: &crate::application::outcome::CandidateExclusions,
+) {
+    if !exclusions.is_empty() {
+        result["data"]["candidate_exclusions"] =
+            serde_json::to_value(exclusions).expect("bounded exclusions");
+        let mut fields = Vec::new();
+        super::diagnostic::exclusion_truncation(
+            exclusions,
+            "/data/candidate_exclusions",
+            &mut fields,
+        );
+        result["truncated_fields"]
+            .as_array_mut()
+            .unwrap()
+            .extend(fields.into_iter().map(Value::String));
+    }
 }

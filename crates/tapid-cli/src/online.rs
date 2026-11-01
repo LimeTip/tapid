@@ -909,6 +909,8 @@ pub(crate) fn resolve_and_fetch_with_lock(
     update: Option<crate::application::lifecycle::UpdateRequest<'_>>,
     mut progress: impl FnMut(crate::application::install::Progress),
 ) -> ResolveAndFetchOutput {
+    #[cfg(test)]
+    crate::application::dependency_edit_evaluation::observe(|counts| counts.graph_operations += 1);
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
         candidate_exclusions,

@@ -46,9 +46,38 @@ pub(crate) struct PackageChanges {
     pub(crate) changed: usize,
     pub(crate) reused: usize,
     pub(crate) removed: usize,
+    pub(crate) records: Vec<GraphChange>,
+    pub(crate) omitted: usize,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum GraphChange {
+    Package {
+        identity: String,
+        action: &'static str,
+    },
+    Workspace {
+        identity: String,
+        action: &'static str,
+    },
+    Root {
+        name: String,
+        before: Option<String>,
+        after: Option<String>,
+    },
+}
+
+pub(crate) const MAX_GRAPH_CHANGES: usize = 256;
+
 impl PackageChanges {
+    fn record(&mut self, record: GraphChange) {
+        if self.records.len() < MAX_GRAPH_CHANGES {
+            self.records.push(record);
+        } else {
+            self.omitted += 1;
+        }
+    }
     fn between(previous: Option<&[u8]>, current: &Lockfile) -> Option<Self> {
         let previous = match previous {
             Some(bytes) => Some(Lockfile::from_json(std::str::from_utf8(bytes).ok()?).ok()?),
@@ -60,15 +89,71 @@ impl PackageChanges {
         let mut changes = Self::default();
         for (key, package) in after {
             match before.get(key) {
-                None => changes.added += 1,
+                None => {
+                    changes.added += 1;
+                    changes.record(GraphChange::Package {
+                        identity: key.to_owned(),
+                        action: "added",
+                    });
+                }
                 Some(prior) if prior == package => changes.reused += 1,
-                Some(_) => changes.changed += 1,
+                Some(_) => {
+                    changes.changed += 1;
+                    changes.record(GraphChange::Package {
+                        identity: key.to_owned(),
+                        action: "changed",
+                    });
+                }
             }
         }
-        changes.removed = before
+        for key in before.keys().filter(|key| !after.contains_key(*key)) {
+            changes.removed += 1;
+            changes.record(GraphChange::Package {
+                identity: key.to_owned(),
+                action: "removed",
+            });
+        }
+        let empty = BTreeMap::new();
+        let before_workspace = previous
+            .as_ref()
+            .map_or(&empty, Lockfile::workspace_packages);
+        let after_workspace = current.workspace_packages();
+        for (key, package) in after_workspace {
+            let action = match before_workspace.get(key) {
+                None => "added",
+                Some(prior) if prior == package => continue,
+                Some(_) => "changed",
+            };
+            changes.record(GraphChange::Workspace {
+                identity: key.to_owned(),
+                action,
+            });
+        }
+        for key in before_workspace
             .keys()
-            .filter(|key| !after.contains_key(*key))
-            .count();
+            .filter(|key| !after_workspace.contains_key(*key))
+        {
+            changes.record(GraphChange::Workspace {
+                identity: key.to_owned(),
+                action: "removed",
+            });
+        }
+        let empty = BTreeMap::new();
+        let before_roots = previous.as_ref().map_or(&empty, Lockfile::root_bindings);
+        let after_roots = current.root_bindings();
+        let names = before_roots
+            .keys()
+            .chain(after_roots.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in names {
+            if before_roots.get(name) != after_roots.get(name) {
+                changes.record(GraphChange::Root {
+                    name: name.to_owned(),
+                    before: before_roots.get(name).cloned(),
+                    after: after_roots.get(name).cloned(),
+                });
+            }
+        }
         Some(changes)
     }
 }
@@ -716,6 +801,8 @@ fn perform_install(
             .mark_committed()
             .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
         session.committed = true;
+        #[cfg(test)]
+        super::dependency_edit_evaluation::observe(|counts| counts.durable_decisions += 1);
         session.outcome.state = ChangeState::Committed;
         crate::filesystem::activation::test_crash_at("commit_decision");
         publication.commit().map_err(|error| {
@@ -1102,6 +1189,8 @@ fn materialize_with_lock(
                 crate::filesystem::lifecycle_journal::validate_member_root(project_dir, root)
                     .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
             }
+            #[cfg(test)]
+            super::dependency_edit_evaluation::observe(|counts| counts.activations += 1);
             crate::filesystem::activation::activate_node_modules_with_preflight(
                 root,
                 stage,
@@ -1133,6 +1222,8 @@ fn stage_layout(
     activation_lock: &ActivationLock,
     mut progress: impl FnMut(Progress),
 ) -> Result<PathBuf, OperationalError> {
+    #[cfg(test)]
+    outcome_tests::checkpoint("before_stage", workspace_root, activation_lock.owner_line())?;
     if project != workspace_root {
         crate::filesystem::lifecycle_journal::validate_member_root(workspace_root, project)
             .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
@@ -1149,6 +1240,8 @@ fn stage_layout(
     let stage = activation_lock
         .create_stage(project)
         .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+    #[cfg(test)]
+    super::dependency_edit_evaluation::observe(|counts| counts.materializations += 1);
     if let Err(error) = crate::filesystem::tree::materialize_stage_with_workspace_links(
         &stage,
         &plan,
