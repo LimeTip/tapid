@@ -1,9 +1,11 @@
+mod dependency_authority;
 mod policy_ceiling;
 mod request;
 mod uncontained;
 #[cfg(any(windows, test))]
 #[path = "windows_evidence.rs"]
 mod windows_evidence;
+pub use dependency_authority::PreparedDependencyAuthority;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
 #[cfg(any(windows, test))]
@@ -1494,6 +1496,7 @@ fn resolve_policy(
     read.extend(executable_search_paths);
     read.extend(additions.read);
     write.extend(additions.write);
+    request.validate_executable_write_authority(&write)?;
 
     Ok(ResolvedSandboxPolicy {
         assurance: request.policy().assurance(),

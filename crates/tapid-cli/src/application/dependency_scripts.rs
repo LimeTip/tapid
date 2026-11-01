@@ -111,12 +111,12 @@ pub(super) fn apply(
         }
     }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
+    let mut system_authority: Option<tapid_runner::PreparedDependencyAuthority> = None;
     let order = if policy.approvals().is_empty() && !overrides.allow_unapproved {
         lock.packages().keys().cloned().collect()
     } else {
         dependency_order(lock)?
     };
-    let mut system_identity = None;
     for key in order {
         let package = lock.packages()[&key].clone();
         let typed: tapid_lockfile::LockfilePackageKey = key.parse().map_err(error)?;
@@ -298,6 +298,7 @@ pub(super) fn apply(
                     overrides.without_containment,
                     selected.is_none() && requires_install && hook == "install",
                     &mut failure_reason,
+                    None,
                 )
                 .inspect_err(|_| {
                     outcome.lifecycle.as_mut().unwrap().disposition(
@@ -316,26 +317,30 @@ pub(super) fn apply(
                 bypassed = true;
                 continue;
             }
-            if system_identity.is_none() {
-                system_identity = Some(tapid_runner::dependency_toolchain_identity().map_err(
-                    |cause| {
-                        let reason = if cause.category()
-                            == tapid_runner::ExecutionErrorCategory::UnsupportedContainment
-                        {
-                            "containment_unavailable"
-                        } else {
-                            "tool_verification_failed"
-                        };
-                        outcome.lifecycle.as_mut().unwrap().disposition(
-                            observed_hook,
-                            "blocked",
-                            Some(reason),
-                        );
-                        containment_error(cause)
-                    },
-                )?);
+            let authority = if let Some(previous) = &system_authority {
+                tapid_runner::PreparedDependencyAuthority::with_tools(previous, approval.tools())
+            } else {
+                tapid_runner::PreparedDependencyAuthority::prepare(approval.tools())
             }
-            let toolchain = tool_identity(approval, system_identity.as_ref().unwrap())
+            .map_err(|cause| {
+                let reason = if cause.category()
+                    == tapid_runner::ExecutionErrorCategory::UnsupportedContainment
+                {
+                    "containment_unavailable"
+                } else {
+                    "tool_verification_failed"
+                };
+                outcome.lifecycle.as_mut().unwrap().disposition(
+                    observed_hook,
+                    "blocked",
+                    Some(reason),
+                );
+                containment_error(cause)
+            })?;
+            system_authority = Some(authority.clone());
+            let toolchain = authority
+                .recipe_identity()
+                .map_err(containment_error)
                 .inspect_err(|_| {
                     outcome.lifecycle.as_mut().unwrap().disposition(
                         observed_hook,
@@ -345,7 +350,7 @@ pub(super) fn apply(
                 })?;
             let graph =
                 serde_json::to_string(&(&source_graph, &completed, &outputs)).map_err(error)?;
-            let recipe = policy.derived_key(approval, &toolchain, &graph);
+            let recipe = policy.derived_key(approval, toolchain, &graph);
             let previous = cached
                 .as_ref()
                 .and_then(|l| l.packages().get(&key))
@@ -414,6 +419,7 @@ pub(super) fn apply(
                 false,
                 false,
                 &mut failure_reason,
+                Some(&authority),
             )
             .inspect_err(|_| {
                 outcome.lifecycle.as_mut().unwrap().disposition(
@@ -524,9 +530,6 @@ impl Drop for BuildStage {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn tool_bytes(tool: &tapid_runner::LifecycleTool) -> Result<Vec<u8>, OperationalError> {
-    Ok(verified_tool(tool)?.2)
-}
 fn verified_tool(
     tool: &tapid_runner::LifecycleTool,
 ) -> Result<(PathBuf, fs::File, Vec<u8>), OperationalError> {
@@ -559,21 +562,6 @@ fn read_executable(file: &mut fs::File) -> Result<Vec<u8>, OperationalError> {
         return Err(error("lifecycle tool exceeds 512 MiB"));
     }
     Ok(bytes)
-}
-fn tool_identity(
-    approval: &DependencyLifecycleApproval,
-    system: &str,
-) -> Result<String, OperationalError> {
-    let mut hash = Sha256::new();
-    hash.update(system.as_bytes());
-    for tool in approval.tools() {
-        tool_bytes(tool)?;
-        for value in [tool.name(), tool.path(), tool.digest()] {
-            hash.update((value.len() as u64).to_le_bytes());
-            hash.update(value.as_bytes());
-        }
-    }
-    Ok(format!("sha256-{:x}", hash.finalize()))
 }
 fn copy_build_source(source: &Path, build: &Path) -> Result<(), OperationalError> {
     if build.exists() {
@@ -634,6 +622,7 @@ fn run_hook(
     without_containment: bool,
     implicit_node_gyp: bool,
     failure_reason: &mut &'static str,
+    authority: Option<&tapid_runner::PreparedDependencyAuthority>,
 ) -> Result<(), OperationalError> {
     let tools = stage.0.join(".tools");
     if tools.exists() {
@@ -783,8 +772,20 @@ fn run_hook(
         }
     }
     builder = builder.executable_search_paths(search_paths);
+    // Retain the same approved bytes used by the recipe, including secondary
+    // executables. Node additionally receives its platform-specific PATH binding.
+    for tool in approval.tools() {
+        builder = builder.verified_executable(
+            fs::canonicalize(prepared_tools.get(tool.name()).unwrap()).map_err(error)?,
+            tool.digest(),
+        );
+    }
+
     if let Some(node) = approval.tools().iter().find(|tool| tool.name() == "node") {
         builder = builder.trusted_node_runtime(prepared_tools.get(node.name()).unwrap());
+    }
+    if let Some(authority) = authority {
+        builder = builder.dependency_authority(authority);
     }
     let request = builder.build().map_err(error)?;
     if without_containment {

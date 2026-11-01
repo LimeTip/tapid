@@ -1,14 +1,24 @@
 //! Validated execution requests, runtime identity, and platform argument/environment limits.
 
 use super::*;
+use sha2::{Digest, Sha256};
+use std::io::Read;
 
 #[cfg(windows)]
-fn windows_file_identity(path: &Path) -> Result<(u32, u64), ExecutionError> {
-    use std::os::windows::io::AsRawHandle;
-    let file =
-        fs::File::open(path).map_err(|error| path_error("trusted Node runtime", path, error))?;
-    windows_handle_identity(file.as_raw_handle() as isize)
+#[derive(Debug)]
+struct WindowsRuntimePin {
+    _file: fs::File,
+    identity: (u32, u64),
 }
+
+#[cfg(windows)]
+impl PartialEq for WindowsRuntimePin {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+}
+#[cfg(windows)]
+impl Eq for WindowsRuntimePin {}
 
 #[cfg(windows)]
 pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), ExecutionError> {
@@ -37,17 +47,36 @@ pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), Execu
     Ok((information.dwVolumeSerialNumber, file_index))
 }
 
-/// Canonical trusted Node executable with its native file identity captured at construction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Canonical executable identity shared by declared tools and trusted Node bindings.
+#[derive(Clone, Debug)]
 pub(super) struct TrustedNodeRuntime {
     pub(super) path: PathBuf,
+    digest: [u8; 32],
     #[cfg(unix)]
     pub(super) identity: NativeIdentity,
+    #[cfg(unix)]
+    _file: std::sync::Arc<fs::File>,
     #[cfg(windows)]
-    pub(super) volume_serial_number: u32,
-    #[cfg(windows)]
-    pub(super) file_index: u64,
+    pin: std::sync::Arc<WindowsRuntimePin>,
 }
+
+impl PartialEq for TrustedNodeRuntime {
+    fn eq(&self, other: &Self) -> bool {
+        if self.path != other.path || self.digest != other.digest {
+            return false;
+        }
+        #[cfg(unix)]
+        if self.identity != other.identity {
+            return false;
+        }
+        #[cfg(windows)]
+        if self.pin != other.pin {
+            return false;
+        }
+        true
+    }
+}
+impl Eq for TrustedNodeRuntime {}
 
 impl TrustedNodeRuntime {
     pub(super) fn checked(path: &Path) -> Result<Self, ExecutionError> {
@@ -57,13 +86,65 @@ impl TrustedNodeRuntime {
                 "trusted Node runtime must be canonical and named node or node.exe",
             ));
         }
-        let metadata = fs::metadata(&canonical)
+        Self::checked_executable(path)
+    }
+
+    pub(super) fn checked_executable(path: &Path) -> Result<Self, ExecutionError> {
+        let canonical = canonical_path(path, "trusted executable")?;
+        if canonical != path {
+            return Err(invalid_request("trusted executable path must be canonical"));
+        }
+        let mut options = fs::OpenOptions::new();
+
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A replaced target must not block on a FIFO or follow a new link.
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Retain ordinary read/image access but reject writers and deletion
+            // for every request clone, through verified Job cleanup.
+            options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+        }
+        let file = options
+            .open(&canonical)
+            .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
+        let metadata = file
+            .metadata()
             .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
         if !metadata.is_file() {
             return Err(invalid_request(
                 "trusted Node runtime must be a regular file",
             ));
         }
+        // Bound both reported size and actual reads, including a file growing
+        // after metadata inspection. Stream bytes without allocating the image.
+        const MAX_RUNTIME_BYTES: u64 = 512 * 1024 * 1024;
+        if metadata.len() > MAX_RUNTIME_BYTES {
+            return Err(invalid_request("trusted Node runtime exceeds 512 MiB"));
+        }
+        let mut input = (&file).take(MAX_RUNTIME_BYTES + 1);
+        let mut hash = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|error| path_error("trusted Node runtime", &canonical, error))?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > MAX_RUNTIME_BYTES {
+                return Err(invalid_request("trusted Node runtime exceeds 512 MiB"));
+            }
+            hash.update(&buffer[..read]);
+        }
+        let digest = hash.finalize().into();
         #[cfg(unix)]
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -72,6 +153,8 @@ impl TrustedNodeRuntime {
             }
             Ok(Self {
                 path: canonical,
+                digest,
+                _file: std::sync::Arc::new(file),
                 identity: NativeIdentity {
                     device: metadata.dev(),
                     inode: metadata.ino(),
@@ -80,15 +163,22 @@ impl TrustedNodeRuntime {
         }
         #[cfg(windows)]
         {
-            let (volume_serial_number, file_index) = windows_file_identity(&canonical)?;
+            use std::os::windows::io::AsRawHandle;
+            let identity = windows_handle_identity(file.as_raw_handle() as isize)?;
             Ok(Self {
                 path: canonical,
-                volume_serial_number,
-                file_index,
+                digest,
+                pin: std::sync::Arc::new(WindowsRuntimePin {
+                    _file: file,
+                    identity,
+                }),
             })
         }
         #[cfg(not(any(unix, windows)))]
-        Ok(Self { path: canonical })
+        Ok(Self {
+            path: canonical,
+            digest,
+        })
     }
 
     pub(super) fn validate(&self, search_paths: &[PathBuf]) -> Result<(), ExecutionError> {
@@ -112,7 +202,20 @@ impl TrustedNodeRuntime {
                 "search paths must contain the trusted runtime parent",
             ));
         }
-        let current = Self::checked(&self.path).map_err(|_| {
+        self.validate_identity()
+    }
+
+    pub(super) fn digest_string(&self) -> String {
+        let hex: String = self
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("sha256-{hex}")
+    }
+
+    pub(super) fn validate_identity(&self) -> Result<(), ExecutionError> {
+        let current = Self::checked_executable(&self.path).map_err(|_| {
             ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
                 "trusted Node runtime identity changed after request construction",
@@ -152,6 +255,7 @@ fn is_node_executable_name(path: &Path) -> bool {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
+    dependency_authority: Option<PreparedDependencyAuthority>,
     #[cfg(windows)]
     pub(super) windows_compatibility:
         Option<std::sync::Arc<platform_backend::compatibility::Binding>>,
@@ -162,6 +266,7 @@ pub struct ExecutionRequest {
     pub(super) arguments: Vec<OsString>,
     pub(super) executable_search_paths: Vec<PathBuf>,
     pub(super) trusted_node_runtime: Option<TrustedNodeRuntime>,
+    verified_executables: Vec<TrustedNodeRuntime>,
     pub(super) windows_verbatim_arguments: bool,
     pub(super) allow_process_memory_stats: bool,
     pub(super) project_root: PathBuf,
@@ -174,10 +279,12 @@ pub struct ExecutionRequest {
 impl ExecutionRequest {
     pub fn builder(program: impl Into<OsString>) -> ExecutionRequestBuilder {
         ExecutionRequestBuilder {
+            dependency_authority: None,
             program: program.into(),
             arguments: Vec::new(),
             executable_search_paths: Vec::new(),
             trusted_node_runtime: None,
+            verified_executables: Vec::new(),
             windows_verbatim_arguments: false,
             allow_process_memory_stats: false,
             project_root: PathBuf::from("."),
@@ -211,12 +318,98 @@ impl ExecutionRequest {
             .as_path()
     }
     pub(super) fn validate_trusted_node_runtime(&self) -> Result<(), ExecutionError> {
+        if let Some(authority) = &self.dependency_authority {
+            authority.validate_executables(&self.verified_executables)?;
+        }
+        // Check secondary tools even when macOS uses a reserved Node binding.
+        for executable in &self.verified_executables {
+            executable.validate_identity()?;
+            if let Some(index) = self.executable_search_paths.iter().position(|directory| {
+                executable
+                    .path
+                    .parent()
+                    .is_some_and(|parent| platform_paths_semantically_equal(directory, parent))
+            }) {
+                // Absolute-only tools need no PATH contract. For tools exposed
+                // through PATH, reject earlier candidates without opening them:
+                // a hostile candidate may be a FIFO or device. Include the
+                // approved directory because Windows resolves `tool` before
+                // `tool.exe`, even within that directory.
+                let names = vec![executable.path.file_name().unwrap()];
+                #[cfg(windows)]
+                let names = {
+                    let mut names = names;
+                    if executable
+                        .path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+                    {
+                        names.push(executable.path.file_stem().unwrap());
+                    }
+                    names
+                };
+                for directory in &self.executable_search_paths[..=index] {
+                    for name in &names {
+                        let candidate = directory.join(name);
+                        match fs::symlink_metadata(&candidate) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Ok(_)
+                                if fs::canonicalize(&candidate).ok().is_some_and(|path| {
+                                    platform_paths_semantically_equal(&path, &executable.path)
+                                }) => {}
+                            _ => {
+                                return Err(ExecutionError::new(
+                                    ExecutionErrorCategory::PolicyViolation,
+                                    "declared executable is shadowed or its earlier PATH candidate cannot be inspected",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         #[cfg(target_os = "macos")]
         if let Some(binding) = &self.reserved_node {
             return binding.validate();
         }
         if let Some(runtime) = &self.trusted_node_runtime {
             runtime.validate(&self.executable_search_paths)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_executable_write_authority(
+        &self,
+        write: &[ResolvedGrant],
+    ) -> Result<(), ExecutionError> {
+        for executable in &self.verified_executables {
+            #[cfg(unix)]
+            if !write.is_empty() {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = fs::metadata(&executable.path)
+                    .map_err(|error| path_error("declared executable", &executable.path, error))?;
+                // Canonical paths cannot locate every hard-link alias inside a
+                // writable subtree. Reject ambiguous topology without scanning
+                // potentially unbounded, attacker-controlled directory trees.
+                if metadata.nlink() != 1 {
+                    return Err(ExecutionError::new(
+                        ExecutionErrorCategory::PolicyViolation,
+                        "declared executable with child write authority must have exactly one hard link",
+                    ));
+                }
+            }
+            if write.iter().any(|grant| {
+                executable
+                    .path
+                    .ancestors()
+                    .any(|ancestor| platform_paths_semantically_equal(ancestor, &grant.path))
+            }) {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::PolicyViolation,
+                    "declared executable must be outside child write authority",
+                ));
+            }
         }
         Ok(())
     }
@@ -458,10 +651,12 @@ impl ExecutionRequest {
 /// Builder for an [`ExecutionRequest`].
 #[derive(Clone, Debug)]
 pub struct ExecutionRequestBuilder {
+    dependency_authority: Option<PreparedDependencyAuthority>,
     program: OsString,
     arguments: Vec<OsString>,
     executable_search_paths: Vec<PathBuf>,
     trusted_node_runtime: Option<PathBuf>,
+    verified_executables: Vec<(PathBuf, String)>,
     windows_verbatim_arguments: bool,
     allow_process_memory_stats: bool,
     project_root: PathBuf,
@@ -472,6 +667,11 @@ pub struct ExecutionRequestBuilder {
 }
 
 impl ExecutionRequestBuilder {
+    /// Binds execution to the same prepared inputs used for the output recipe.
+    pub fn dependency_authority(mut self, authority: &PreparedDependencyAuthority) -> Self {
+        self.dependency_authority = Some(authority.clone());
+        self
+    }
     pub fn arg(mut self, argument: impl Into<OsString>) -> Self {
         self.arguments.push(argument.into());
         self
@@ -496,9 +696,25 @@ impl ExecutionRequestBuilder {
         self
     }
 
-    /// Binds the exact canonical Node executable to the first child PATH directory.
+    /// Binds the canonical Node executable and its bytes to the child PATH.
+    /// Windows retains a read-only handle denying write/delete sharing until all
+    /// request clones are dropped. This does not bind libraries or loader inputs.
     pub fn trusted_node_runtime(mut self, path: impl Into<PathBuf>) -> Self {
         self.trusted_node_runtime = Some(path.into());
+        self
+    }
+
+    /// Retains a canonical declared executable against its approved SHA-256 digest.
+    /// At most 64 images of at most 512 MiB each are accepted. Bytes and native
+    /// identity are rechecked before execution; Windows also retains read-only
+    /// handles denying write/delete sharing across request clones. This does not
+    /// bind libraries, directory entries, or loader resolution.
+    pub fn verified_executable(
+        mut self,
+        path: impl Into<PathBuf>,
+        digest: impl Into<String>,
+    ) -> Self {
+        self.verified_executables.push((path.into(), digest.into()));
         self
     }
 
@@ -599,12 +815,29 @@ impl ExecutionRequestBuilder {
                 Ok(working_directory)
             })
             .transpose()?;
+        if self.verified_executables.len() > 64 {
+            return Err(invalid_request(
+                "execution request exceeds 64 declared executables",
+            ));
+        }
+        let mut verified_executables = Vec::new();
+        for (path, expected) in &self.verified_executables {
+            let executable = TrustedNodeRuntime::checked_executable(path)?;
+            if expected != &executable.digest_string() {
+                return Err(ExecutionError::new(
+                    ExecutionErrorCategory::PolicyViolation,
+                    "declared executable bytes do not match the approved digest",
+                ));
+            }
+            verified_executables.push(executable);
+        }
         let trusted_node_runtime = self
             .trusted_node_runtime
             .as_deref()
             .map(TrustedNodeRuntime::checked)
             .transpose()?;
         let request = ExecutionRequest {
+            dependency_authority: self.dependency_authority,
             #[cfg(windows)]
             windows_compatibility: None,
             #[cfg(target_os = "macos")]
@@ -614,6 +847,7 @@ impl ExecutionRequestBuilder {
             arguments: self.arguments,
             executable_search_paths: self.executable_search_paths,
             trusted_node_runtime,
+            verified_executables,
             windows_verbatim_arguments: self.windows_verbatim_arguments,
             allow_process_memory_stats: self.allow_process_memory_stats,
             project_root: self.project_root,
