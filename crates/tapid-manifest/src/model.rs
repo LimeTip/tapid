@@ -212,6 +212,27 @@ impl PackageManifest {
         .into_iter()
     }
 
+    /// Iterate install declarations before profile filtering, preserving independent kinds.
+    /// Optional declarations replace regular declarations of the same local name.
+    /// Peer declarations are constraints and are not installation requests.
+    pub fn effective_install_declarations(
+        &self,
+    ) -> impl Iterator<Item = (DependencyKind, &str, &str)> {
+        self.dependency_sections()
+            .filter(|(kind, _)| *kind != DependencyKind::PeerDependencies)
+            .flat_map(move |(kind, declarations)| {
+                declarations.iter().filter_map(move |(name, requirement)| {
+                    if kind == DependencyKind::Dependencies
+                        && self.optional_dependencies.contains_key(name)
+                    {
+                        None
+                    } else {
+                        Some((kind, name.as_str(), requirement.as_str()))
+                    }
+                })
+            })
+    }
+
     pub fn dependency_kind(&self, name: &str) -> Option<DependencyKind> {
         self.dependency_sections()
             .find_map(|(kind, dependencies)| dependencies.contains_key(name).then_some(kind))

@@ -10,12 +10,14 @@ pub(crate) use preview::{GraphPackage, GraphSnapshot, resolve as resolve_preview
 mod locked;
 use crate::application::outcome::{ErrorKind, OperationalError};
 pub(crate) use locked::{
-    PreparedLockedInstall, hydrate_locked, prepare_locked_install,
+    PreparedLockedInstall, hydrate_locked, prepare_locked_install, prepare_native_locked,
     validate_locked_artifact_sources, validate_locked_routes,
 };
 mod npm_import;
 pub(crate) use npm_import::{fetch_imported, imported_workspace_manifests};
 mod resolution;
+mod selection;
+pub(crate) use selection::PreparedNativeProfile;
 mod update;
 #[cfg(test)]
 use resolution::{
@@ -166,8 +168,12 @@ struct FixturePackage {
     #[serde(default)]
     integrity: Option<String>,
     artifact: String,
+    #[serde(default, rename = "artifactUrl")]
+    artifact_url: Option<String>,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependencies")]
     peer_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "optionalPeerDependencies")]
@@ -180,6 +186,9 @@ struct Fixture {
 
 #[derive(Clone)]
 struct PackageRecord {
+    // Legacy locked records retain exact targets but cannot establish edge kinds.
+    complete_dependency_kinds: bool,
+    fixture_artifact_url: Option<String>,
     git_reference: Option<String>,
     copied_archive: Option<std::sync::Arc<Vec<u8>>>,
     dist_tags: BTreeSet<String>,
@@ -272,6 +281,7 @@ pub(crate) struct WorkspacePeerDependency {
 }
 
 pub(crate) struct WorkspaceMaterialization {
+    pub manifests: BTreeMap<String, PackageManifest>,
     pub links: WorkspaceLinkPlan,
     pub locked: Vec<LockedWorkspacePackage>,
     pub members: BTreeMap<String, (LocalWorkspaceSource, PackageVersion)>,
@@ -316,6 +326,7 @@ pub(crate) fn workspace_materialization_from_discovered(
     if root != canonical_project {
         return Err("resolved workspace root does not match install project root".into());
     }
+    let mut manifests = BTreeMap::new();
     let mut packages = Vec::new();
     let mut locked = Vec::new();
     let mut members = BTreeMap::new();
@@ -364,6 +375,7 @@ pub(crate) fn workspace_materialization_from_discovered(
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("/");
+        manifests.insert(relative_posix.clone(), manifest.clone());
         let version = manifest.version().clone();
         let source =
             LocalWorkspaceSource::new(&relative_posix, member.name(), &version.to_string())
@@ -460,75 +472,68 @@ pub(crate) fn workspace_materialization_from_discovered(
                 provider,
             });
         }
-        for dependency_map in [
-            manifest.dependencies(),
-            manifest.dev_dependencies(),
-            manifest.optional_dependencies(),
-        ] {
-            for (name, range) in dependency_map {
-                let Some((source, version)) = members.get(name) else {
-                    if range.starts_with("workspace:") {
-                        return Err(format!(
+        for (_, name, range) in manifest.effective_install_declarations() {
+            let Some((source, version)) = members.get(name) else {
+                if range.starts_with("workspace:") {
+                    return Err(format!(
                             "workspace dependency '{}' in member '{}' has no local workspace target; refusing registry fallback",
                             name,
                             member.name()
                         ).into());
-                    }
-                    if copied::declaration(range)
-                        .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                        .is_some()
-                    {
-                        return Err(format!(
+                }
+                if copied::declaration(range)
+                    .map_err(|reason| format!("dependency '{name}': {reason}"))?
+                    .is_some()
+                {
+                    return Err(format!(
                             "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
                         ).into());
-                    }
-                    let requirement = range.parse::<Requirement>().map_err(|error| {
-                        format!(
-                            "invalid workspace member dependency '{name}' range '{range}': {error}"
-                        )
-                    })?;
-                    let (manifest_registry, local_package) = dep_parts(name)?;
-                    if manifest_registry.to_string() == JSR && requirement.is_alias() {
-                        return Err(format!(
-                            "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                        )
-                        .into());
-                    }
-                    if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
-                        return Err(format!(
+                }
+                let requirement = range.parse::<Requirement>().map_err(|error| {
+                    format!("invalid workspace member dependency '{name}' range '{range}': {error}")
+                })?;
+                let (manifest_registry, local_package) = dep_parts(name)?;
+                if manifest_registry.to_string() == JSR && requirement.is_alias() {
+                    return Err(format!(
+                        "npm alias '{name}@{range}' cannot use a JSR dependency name"
+                    )
+                    .into());
+                }
+                if manifest_registry.as_str() == JSR && requirement.dist_tag().is_some() {
+                    return Err(format!(
                             "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
                         ).into());
-                    }
-                    let package = requirement.package_name(&local_package).clone();
-                    let registry = registry_for_requirement(registry_config, name, &requirement)?;
-                    registry_dependencies.push(WorkspaceRegistryDependency {
-                        member_key: locked[package_index].key(),
-                        manifest_name: local_package.to_string(),
-                        registry,
-                        package,
-                        requirement,
-                    });
-                    continue;
-                };
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
+                }
+                let package = requirement.package_name(&local_package).clone();
+                let registry = registry_for_requirement(registry_config, name, &requirement)?;
+                registry_dependencies.push(WorkspaceRegistryDependency {
+                    member_key: locked[package_index].key(),
+                    manifest_name: local_package.to_string(),
+                    registry,
+                    package,
+                    requirement,
+                });
+                continue;
+            };
+            let requirement = workspace_requirement(range, version)?;
+            if !requirement.matches(version) {
+                return Err(format!(
                         "workspace dependency '{}@{}' in member '{}' does not match local member version {}",
                         name,
                         range,
                         member.name(),
                         version
                     ).into());
-                }
-                let target = LockfilePackageKey::workspace(source.clone()).to_string();
-                locked[package_index]
-                    .add_dependency(name, &target)
-                    .map_err(|error| error.to_string())?;
             }
+            let target = LockfilePackageKey::workspace(source.clone()).to_string();
+            locked[package_index]
+                .add_dependency(name, &target)
+                .map_err(|error| error.to_string())?;
         }
     }
     let links = plan_workspace_links(root, packages).map_err(|error| error.to_string())?;
     Ok(WorkspaceMaterialization {
+        manifests,
         links,
         locked,
         members,
@@ -640,6 +645,8 @@ fn remote_records(
     Ok(artifacts
         .into_iter()
         .map(|a| PackageRecord {
+            complete_dependency_kinds: true,
+            fixture_artifact_url: None,
             git_reference: None,
             copied_archive: None,
             dist_tags: a.dist_tags,
@@ -791,66 +798,15 @@ fn workspace_root_resolution(
         .iter()
         .map(LockedWorkspacePackage::key)
         .collect::<Vec<_>>();
-    for (kind, map) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-    ] {
-        for (name, range) in map {
-            if let Some((source, version)) = workspace.members.get(name) {
-                let requirement = workspace_requirement(range, version)?;
-                if !requirement.matches(version) {
-                    return Err(format!(
-                        "workspace dependency '{name}@{range}' does not match local member version {version}"
-                    ));
-                }
-                let (_, package) = dependency_identity(registry_config, name)?;
-                if overrides
-                    .get(&package)
-                    .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
-                {
-                    return Err(format!(
-                        "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
-                    ));
-                }
-                let local_name = name
-                    .parse::<PackageName>()
-                    .map_err(|error| error.to_string())?;
-                register_local_root_identity(
-                    &mut local_root_identities,
-                    local_name,
-                    format!("workspace:{}", source.path()),
-                )?;
-                workspace_root_keys.push(LockfilePackageKey::workspace(source.clone()).to_string());
-                continue;
-            }
-            if range.starts_with("workspace:") {
+    for (kind, name, range) in manifest.effective_install_declarations() {
+        if let Some((source, version)) = workspace.members.get(name) {
+            let requirement = workspace_requirement(range, version)?;
+            if !requirement.matches(version) {
                 return Err(format!(
-                    "workspace dependency '{name}@{range}' has no matching local workspace member; refusing registry fallback"
+                    "workspace dependency '{name}@{range}' does not match local member version {version}"
                 ));
             }
-            if copied::declaration(range)
-                .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                .is_some()
-            {
-                continue;
-            }
-            let requirement = range.parse::<Requirement>().map_err(|error| {
-                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
-            })?;
-            let (manifest_registry, local_package) = dep_parts(name)?;
-            if manifest_registry.to_string() == JSR && requirement.is_alias() {
-                return Err(format!(
-                    "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                ));
-            }
-            let package = requirement.package_name(&local_package).clone();
-            let registry = registry_for_requirement(registry_config, name, &requirement)?;
-            register_local_root_identity(
-                &mut local_root_identities,
-                local_package.clone(),
-                format!("registry:{registry}|{package}"),
-            )?;
+            let (_, package) = dependency_identity(registry_config, name)?;
             if overrides
                 .get(&package)
                 .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
@@ -859,9 +815,57 @@ fn workspace_root_resolution(
                     "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
                 ));
             }
-            direct_root_identities.insert((registry.clone(), package.clone()));
-            roots.push(Dependency::new(registry, local_package, requirement));
+            let local_name = name
+                .parse::<PackageName>()
+                .map_err(|error| error.to_string())?;
+            register_local_root_identity(
+                &mut local_root_identities,
+                local_name,
+                format!("workspace:{}", source.path()),
+            )?;
+            workspace_root_keys.push(LockfilePackageKey::workspace(source.clone()).to_string());
+            continue;
         }
+        if range.starts_with("workspace:") {
+            return Err(format!(
+                "workspace dependency '{name}@{range}' has no matching local workspace member; refusing registry fallback"
+            ));
+        }
+        if copied::declaration(range)
+            .map_err(|reason| format!("dependency '{name}': {reason}"))?
+            .is_some()
+        {
+            continue;
+        }
+        let requirement = range.parse::<Requirement>().map_err(|error| {
+            format!(
+                "invalid {} dependency '{name}' range '{range}': {error}",
+                kind.field_name()
+            )
+        })?;
+        let (manifest_registry, local_package) = dep_parts(name)?;
+        if manifest_registry.to_string() == JSR && requirement.is_alias() {
+            return Err(format!(
+                "npm alias '{name}@{range}' cannot use a JSR dependency name"
+            ));
+        }
+        let package = requirement.package_name(&local_package).clone();
+        let registry = registry_for_requirement(registry_config, name, &requirement)?;
+        register_local_root_identity(
+            &mut local_root_identities,
+            local_package.clone(),
+            format!("registry:{registry}|{package}"),
+        )?;
+        if overrides
+            .get(&package)
+            .is_some_and(|override_requirement| override_requirement.raw != requirement.raw)
+        {
+            return Err(format!(
+                "unsupported direct dependency override for '{package}': npm requires the override range to match the declared dependency range"
+            ));
+        }
+        direct_root_identities.insert((registry.clone(), package.clone()));
+        roots.push(Dependency::new(registry, local_package, requirement));
     }
     for dependency in &workspace.registry_dependencies {
         let (_, local_name) = dep_parts(&dependency.manifest_name)?;
@@ -897,6 +901,31 @@ fn workspace_root_resolution(
     })
 }
 
+/// Resolve the complete selection before preparing only the requested closure.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_native_install(
+    project: &Path,
+    manifest: &PackageManifest,
+    store: &Store,
+    fixture: Option<&Path>,
+    config: &crate::registry::RegistryConfig,
+    profile: tapid_lockfile::InstallProfile,
+    progress: impl FnMut(crate::application::install::Progress),
+) -> Result<
+    (
+        PreparedNativeProfile,
+        crate::application::outcome::CandidateExclusions,
+    ),
+    OperationalError,
+> {
+    let workspace = workspace_materialization(project, config)?;
+    let graph = graph::resolve_package_graph(
+        project, manifest, workspace, fixture, false, config, None, None, progress,
+    )?;
+    let prepared = graph.prepare_native_profile(project, manifest, config, store, profile)?;
+    Ok((prepared, graph.candidate_exclusions))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_and_fetch_with_lock(
     project: &Path,
@@ -911,6 +940,7 @@ pub(crate) fn resolve_and_fetch_with_lock(
 ) -> ResolveAndFetchOutput {
     let workspace = workspace_materialization(project, registry_config)?;
     let graph::ResolvedGraph {
+        workspace_manifests: _,
         candidate_exclusions,
         metadata_lookups: _,
         resolution,

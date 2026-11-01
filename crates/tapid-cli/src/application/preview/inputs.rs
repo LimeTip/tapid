@@ -186,6 +186,7 @@ impl Inputs {
             InstallMode::Online => ("online", Value::Null),
             InstallMode::Refresh => ("refresh", Value::Null),
             InstallMode::Offline => ("offline", Value::Null),
+            InstallMode::Prune => ("prune", Value::Null),
             InstallMode::Frozen => ("frozen", Value::Null),
             InstallMode::Ci => ("ci", Value::Null),
             InstallMode::CiOffline => ("ci_offline", Value::Null),

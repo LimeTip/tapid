@@ -23,6 +23,9 @@ use tapid_lockfile::Lockfile;
 use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
+#[path = "install_native.rs"]
+mod native;
+
 #[derive(Clone, Copy)]
 pub(crate) struct ManifestEdit<'a> {
     pub(crate) expected: &'a PackageManifest,
@@ -31,6 +34,7 @@ pub(crate) struct ManifestEdit<'a> {
 
 #[derive(Debug)]
 pub(crate) struct InstallReport {
+    pub(crate) profile: Option<tapid_lockfile::InstallProfile>,
     pub(crate) candidate_exclusions: crate::application::outcome::CandidateExclusions,
     pub(crate) package_count: usize,
     pub(crate) replayed: bool,
@@ -74,6 +78,7 @@ impl PackageChanges {
 }
 
 struct InstallSession {
+    profile: Option<tapid_lockfile::InstallProfile>,
     candidate_exclusions: super::outcome::CandidateExclusions,
     hook_stages: Vec<super::dependency_scripts::BuildStage>,
     journal: Option<crate::filesystem::lifecycle_journal::LifecycleJournal>,
@@ -88,6 +93,7 @@ struct InstallSession {
 impl InstallSession {
     fn new(project: &Path) -> Self {
         Self {
+            profile: None,
             hook_stages: Vec::new(),
             journal: None,
             lock_backup: None,
@@ -160,6 +166,7 @@ pub(crate) enum InstallMode<'a> {
     Refresh,
     Update(super::lifecycle::UpdateRequest<'a>),
     Offline,
+    Prune,
     Frozen,
     Ci,
     CiOffline,
@@ -230,6 +237,7 @@ pub(crate) enum ManifestMutation<'a> {
 }
 
 pub(crate) struct InstallRequest<'a> {
+    pub(crate) profile: tapid_lockfile::InstallProfile,
     pub(crate) project_dir: &'a Path,
     pub(crate) target_manifest_path: &'a Path,
     pub(crate) mutation: ManifestMutation<'a>,
@@ -276,6 +284,7 @@ pub(crate) fn run_with_execution(
     }
     match perform_install(&mut session, request, overrides, report_replay_progress) {
         Ok((package_count, replayed)) => Ok(InstallReport {
+            profile: session.profile,
             candidate_exclusions: session.candidate_exclusions,
             package_count,
             replayed,
@@ -293,6 +302,7 @@ fn perform_install(
     mut report_replay_progress: impl FnMut(Progress),
 ) -> Result<(usize, bool), OperationalError> {
     let InstallRequest {
+        profile,
         target_manifest_path,
         mutation,
         store_root,
@@ -306,7 +316,10 @@ fn perform_install(
         ManifestMutation::AddPackage(package) => (None, Some(package)),
         ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
     };
-    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
+    let offline = matches!(
+        mode,
+        InstallMode::Offline | InstallMode::CiOffline | InstallMode::Prune
+    );
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
     if overrides.enabled() && (offline || frozen || allow_unverified_registry_artifacts) {
@@ -442,11 +455,75 @@ fn perform_install(
         .as_deref()
         .map(|bytes| parse_install_lock(bytes, &lock_path, ci, overrides))
         .transpose()?;
+    if current_lock.is_none()
+        && profile != tapid_lockfile::InstallProfile::default()
+        && matches!(mode, InstallMode::Online)
+        && package.is_none()
+        && manifest_override.is_none()
+        && !allow_unverified_registry_artifacts
+        && !overrides.enabled()
+    {
+        return native::fresh(
+            session,
+            &project_dir,
+            &manifest_path,
+            &original_manifest,
+            &current_manifest,
+            profile,
+            &lifecycle_policy,
+            store_root,
+            registry_fixture,
+            &mut report_replay_progress,
+        );
+    }
     let (previous_lock, mut imported) = match current_lock {
         Some(InstallLock::Native(lock)) => (Some(lock), None),
         Some(InstallLock::Imported(lock)) => (None, Some(lock)),
+        Some(InstallLock::Profile(selection)) => {
+            let profile = if matches!(mode, InstallMode::Prune) {
+                crate::filesystem::installed_profile::load_profile(
+                    &project_dir,
+                    &selection,
+                    &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                )
+                .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?
+            } else {
+                profile
+            };
+            if package.is_some()
+                || manifest_override.is_some()
+                || matches!(mode, InstallMode::Refresh | InstallMode::Update(_))
+                || allow_unverified_registry_artifacts
+                || overrides.enabled()
+            {
+                return Err(OperationalError::new(
+                    ErrorKind::InvalidRequest,
+                    "native profile selection mutation and execution overrides require profile integration",
+                ));
+            }
+            return native::replay(
+                session,
+                &project_dir,
+                &manifest_path,
+                &original_manifest,
+                original_lock.as_deref().expect("classified existing lock"),
+                &selection,
+                profile,
+                &lifecycle_policy,
+                store_root,
+                offline,
+                registry_fixture,
+                &mut report_replay_progress,
+            );
+        }
         None => (None, None),
     };
+    if profile != tapid_lockfile::InstallProfile::default() {
+        return Err(OperationalError::new(
+            ErrorKind::InvalidRequest,
+            "non-full profiles require a complete native schema-11 selection",
+        ));
+    }
     if package.is_some() || manifest_override.is_some() || matches!(mode, InstallMode::Refresh) {
         imported = None;
     }
@@ -967,6 +1044,7 @@ fn perform_install(
         true,
         activation_lock,
         true,
+        None,
         &mut report_replay_progress,
     )?;
     crate::filesystem::activation::test_crash_at("activation_complete");
@@ -988,6 +1066,7 @@ fn perform_install(
 enum InstallLock {
     Native(Lockfile),
     Imported(tapid_lockfile::ImportedNpmLockfile),
+    Profile(tapid_lockfile::NativeSelection),
 }
 
 fn parse_install_lock(
@@ -998,10 +1077,14 @@ fn parse_install_lock(
 ) -> Result<InstallLock, OperationalError> {
     let input = std::str::from_utf8(bytes)
         .map_err(|error| OperationalError::from_source(ErrorKind::Lockfile, error))?;
-    let lock = if serde_json::from_str::<serde_json::Value>(input)
+    let version = serde_json::from_str::<serde_json::Value>(input)
         .ok()
-        .is_some_and(|value| value["lockfileVersion"] == 8)
-    {
+        .and_then(|value| value["lockfileVersion"].as_u64());
+    let lock = if version == Some(tapid_lockfile::PROFILE_LOCKFILE_VERSION.into()) {
+        tapid_lockfile::NativeSelection::from_json(input)
+            .map(InstallLock::Profile)
+            .map_err(OperationalError::from)?
+    } else if version == Some(8) {
         tapid_lockfile::ImportedNpmLockfile::from_json(input)
             .map(InstallLock::Imported)
             .map_err(|error| OperationalError::new(ErrorKind::Lockfile, error.to_string()))?
@@ -1038,6 +1121,40 @@ fn read_lock(path: &Path) -> Result<Lockfile, OperationalError> {
     })
 }
 
+/// Stage source layouts and their descriptive profile together. This does not
+/// publish store content, authorize lifecycle outputs or activate project state.
+#[allow(dead_code)]
+pub(crate) fn stage_native_profile(
+    project: &Path,
+    prepared: &online::PreparedNativeProfile,
+    profile: tapid_lockfile::InstallProfile,
+    activation: &ActivationLock,
+    progress: impl FnMut(Progress),
+) -> Result<PathBuf, OperationalError> {
+    let layout = prepared.layout(project, profile)?;
+    let stage = stage_layout(
+        project,
+        project,
+        &layout.input,
+        &layout.trees,
+        &layout.workspace.links,
+        false,
+        activation,
+        progress,
+    )?;
+    if let Err(error) = crate::filesystem::installed_profile::stage_profile(
+        &stage,
+        &prepared.selection,
+        profile,
+        &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        activation.owner_line(),
+    ) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(OperationalError::new(ErrorKind::Materialization, error));
+    }
+    Ok(stage)
+}
+
 fn materialize_install(
     project_dir: &Path,
     input: NamedLayoutInput,
@@ -1055,6 +1172,7 @@ fn materialize_install(
         false,
         activation_lock,
         preserve_previous,
+        None,
         &mut progress,
     )
 }
@@ -1068,6 +1186,10 @@ fn materialize_with_lock(
     replayed: bool,
     activation_lock: &ActivationLock,
     preserve_previous: bool,
+    profile: Option<(
+        &tapid_lockfile::NativeSelection,
+        tapid_lockfile::InstallProfile,
+    )>,
     mut progress: impl FnMut(Progress),
 ) -> Result<(), OperationalError> {
     let mut stages = Vec::new();
@@ -1097,6 +1219,18 @@ fn materialize_with_lock(
             &mut progress,
         )?;
         stages.push((project_dir.to_owned(), stage, workspace_plan.links));
+        if let Some((selection, profile)) = profile {
+            for (_, stage, _) in &stages {
+                crate::filesystem::installed_profile::stage_profile(
+                    stage,
+                    selection,
+                    profile,
+                    &format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                    activation_lock.owner_line(),
+                )
+                .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
+            }
+        }
         for (root, stage, links) in &stages {
             if root != project_dir {
                 crate::filesystem::lifecycle_journal::validate_member_root(project_dir, root)

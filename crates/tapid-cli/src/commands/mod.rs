@@ -11,6 +11,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod lock;
 pub(crate) mod manifest;
 mod npm_import;
+mod profile;
 mod release_verification;
 pub(crate) mod run;
 mod sandbox;
@@ -117,7 +118,7 @@ pub(crate) enum Command {
     /// Install dependencies, optionally adding one package first.
     #[command(
         visible_alias = "i",
-        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Offline installs replay verified trees without network access. Frozen installs preserve lockfile selections; imported npm locks can fetch pinned tarballs for their first verification. Dependency lifecycle scripts are denied by default. Exact tapid.lifecycle.toml approvals can build verified derived outputs on supported Linux ManagedTree hosts; offline/frozen replay never executes hooks.",
+        long_about = "Install dependencies into node_modules and write tapid.lock. Optionally add one package to dependencies in package.json first.\n\nOnline installs resolve dependencies using registry metadata. Use --production or --omit dev|optional to materialize a native schema-11 profile; --include overrides omission. Existing legacy/imported locks reject non-full profiles. Native workspace profiles and profile dry runs are unsupported. NODE_ENV does not select a profile. Offline installs replay verified trees without network access. Frozen installs preserve lockfile selections; imported npm locks can fetch pinned tarballs for their first verification. Dependency lifecycle scripts are denied by default. Exact tapid.lifecycle.toml approvals can build verified derived outputs on supported Linux ManagedTree hosts; offline/frozen replay never executes hooks.",
         after_help = "Examples:
   tapid install
   tapid install 'react@^19.0.0'
@@ -127,7 +128,7 @@ pub(crate) enum Command {
     Install(install::Args),
     /// Install exact locked dependencies without changing package.json or tapid.lock.
     #[command(
-        long_about = "Install the exact dependency graph in tapid.lock. Requires matching project and workspace manifests and download URLs for every registry package, including with --offline. Explicit local registry fixtures can supply artifacts without URLs. Missing verified trees are downloaded and verified without version resolution. Atomically replaces managed node_modules. Dependency lifecycle scripts do not run."
+        long_about = "Install the exact dependency graph in tapid.lock. Requires matching project and workspace manifests and download URLs for every registry package, including with --offline. Explicit local registry fixtures can supply artifacts without URLs. Missing verified trees are downloaded and verified without version resolution. Atomically replaces managed node_modules. --production and --omit dev|optional select a native schema-11 materialization profile; --include overrides omission. Legacy/imported locks reject non-full profiles. Native workspace activation is unsupported. NODE_ENV does not select a profile. Dependency lifecycle scripts do not run."
     )]
     Ci(ci::Args),
     /// Add packages to package.json and install dependencies.

@@ -111,10 +111,20 @@ pub(super) fn apply(
         }
     }
     let mut completed = BTreeMap::<String, Vec<DerivedHookOutput>>::new();
-    let order = if policy.approvals().is_empty() && !overrides.allow_unapproved {
-        lock.packages().keys().cloned().collect()
-    } else {
+    // An approval outside this materialized graph cannot execute a hook and
+    // must not impose build-order restrictions on default-denied source trees.
+    // Keep stale approvals for retained names on the strict validation path.
+    let requires_dependency_order = overrides.allow_unapproved
+        || lock.packages().values().any(|package| {
+            policy
+                .approvals()
+                .iter()
+                .any(|approval| approval.package() == package.name())
+        });
+    let order = if requires_dependency_order {
         dependency_order(lock)?
+    } else {
+        lock.packages().keys().cloned().collect()
     };
     let mut system_identity = None;
     for key in order {

@@ -94,6 +94,7 @@ impl Reporter {
                 self.started.elapsed().as_secs_f64()
             );
         }
+        report_profile(report);
         for line in Self::lifecycle_lines(&report.outcome) {
             println!("{line}");
         }
@@ -208,6 +209,25 @@ impl Reporter {
             _ => return,
         };
         eprintln!("{hint}");
+    }
+}
+
+/// Render only schema-11 profiles, whose complete edge evidence is known.
+pub(crate) fn report_profile(report: &InstallReport) {
+    if let Some(profile) = report.profile {
+        println!(
+            "Dependency profile: dev={}, optional={}",
+            if profile.include_dev {
+                "included"
+            } else {
+                "omitted"
+            },
+            if profile.include_optional {
+                "included"
+            } else {
+                "omitted"
+            }
+        );
     }
 }
 

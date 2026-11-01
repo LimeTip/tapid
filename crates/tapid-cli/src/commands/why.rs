@@ -48,12 +48,12 @@ pub(crate) fn run(args: Args, json: bool) -> ExitCode {
                     }
                     println!("[{}] {line}", index + 1);
                 }
-                for warning in &report.warnings {
-                    println!("warning: {warning}");
-                }
                 if report.truncated {
                     println!("Additional paths were omitted or traversal reached a safety bound.");
                 }
+            }
+            for warning in &report.warnings {
+                println!("warning: {warning}");
             }
             if report.paths.is_empty() && !report.truncated {
                 ExitCode::from(1)

@@ -10,7 +10,7 @@ use tapid_linker::{
     VerifiedTreeReference,
 };
 use tapid_lockfile::Lockfile;
-use tapid_manifest::{DependencyKind, PackageManifest};
+use tapid_manifest::PackageManifest;
 use tapid_store::Store;
 
 fn replay_progress_checkpoint(completed: usize, total: usize) -> bool {
@@ -657,20 +657,15 @@ fn replay_root_identities_with_config(
     String,
 > {
     let mut identities = std::collections::BTreeMap::new();
-    for (kind, map) in manifest.dependency_sections() {
-        if kind == DependencyKind::PeerDependencies {
+    for (_, name, requirement) in manifest.effective_install_declarations() {
+        let (registry, package) = registry_config.identity_for_spec(name)?;
+        if requirement.starts_with("workspace:") {
             continue;
         }
-        for (name, requirement) in map {
-            let (registry, package) = registry_config.identity_for_spec(name)?;
-            if requirement.starts_with("workspace:") {
-                continue;
-            }
-            identities
-                .entry((registry, package))
-                .or_insert_with(Vec::new)
-                .push(requirement.parse().map_err(|error| format!("{error:?}"))?);
-        }
+        identities
+            .entry((registry, package))
+            .or_insert_with(Vec::new)
+            .push(requirement.parse().map_err(|error| format!("{error:?}"))?);
     }
     Ok(identities)
 }
@@ -830,6 +825,19 @@ mod replay_tests {
             .unwrap()];
 
         assert!(replay_root_keys(&legacy_lock(), &manifest, &keys).is_err());
+    }
+
+    #[test]
+    fn legacy_root_reconstruction_applies_optional_override() {
+        let manifest = PackageManifest::parse(
+            r#"{"name":"root","version":"1.0.0","dependencies":{"debug":"3.0.0"},"optionalDependencies":{"debug":"4.0.0"}}"#,
+        )
+        .unwrap();
+        let roots = replay_root_identities(&manifest).unwrap();
+        let key = "https://registry.npmjs.org|debug@4.0.0|peer=-|platform=-"
+            .parse()
+            .unwrap();
+        assert!(replay_root_matches(&roots, &key));
     }
 
     #[test]

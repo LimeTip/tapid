@@ -138,6 +138,7 @@ fn stage(
     )?;
     let report = install::run(
         install::InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: &environment,
             target_manifest_path: Path::new("package.json"),
             mutation: install::ManifestMutation::None,

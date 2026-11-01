@@ -10,6 +10,7 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
     project.write("package.json", original).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -34,6 +35,1154 @@ fn missing_replay_lock_has_a_typed_unchanged_outcome() {
 
 const ARTIFACT: &str = "base64:H4sIAGAyj2oC/+3NsQoCMQyA4c4+hWSWmki5wbcpUg8V2+OqLuK7W3U4cBYR/L/lT7JkiJtD7NNyeNXva8nuw7TpQni2ea9qsGl+3M26lbm5ui8411Mc23v3n66S4zHJWralyEIuaay7kttuXr3KbeYAAAAAAAAAAAAAAAAAAL/oDtGfbE0AKAAA";
 const INTEGRITY: &str = "sha512-Z12EKCpZh3kuBL3pKV8o2ZuPciIuehb1HyMTRvu6Al6OCWioeFUYjtqd4t0Hr2/7GRSqyuzJ99duHhJSIFKIZQ==";
+
+fn native_selection_fixture() -> (TempProject, PathBuf, String) {
+    let project = TempProject::new("native-selection-application").unwrap();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","dependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let fixture = project
+        .write(
+            "registry.json",
+            include_bytes!("../../tests/fixtures/npm-import/registry.json"),
+        )
+        .unwrap();
+    let records: serde_json::Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let record = records["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "shared" && p["version"] == "1.0.0")
+        .unwrap();
+    let key = tapid_lockfile::LockfilePackageKey::new(
+        "https://registry.npmjs.org".parse().unwrap(),
+        "shared".parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+        &Default::default(),
+        &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+    )
+    .to_string();
+    let selection = serde_json::json!({
+        "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+        "rootManifestDigest": online::root_digest(project.path()).unwrap(),"workspaceManifestDigests":{},
+        "declarations":[{"workspace":null,"name":"shared","kind":"required","target":key}],
+        "packages":{key:{"sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/shared-1.0.0.tgz","artifactIntegrity":record["integrity"]},"dependencies":{},"peerProviders":{}}}
+    }).to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    (project, fixture, selection)
+}
+
+fn native_approval_policy(project: &TempProject, package: &str) -> String {
+    format!(
+        r#"schema = 1
+[[approvals]]
+package = "{package}"
+version = "1.0.0"
+archive-digest = "{INTEGRITY}"
+hook = "install"
+script-digest = "sha256-{}"
+system-toolchain = true
+read = ["."]
+write = ["."]
+network = false
+environment = {{}}
+timeout-seconds = 5
+max-output-bytes = 1024
+max-processes = 32
+max-memory-bytes = 134217728
+tools = [{{name="sh", path={}, digest="sha256-{}"}}]
+"#,
+        "0".repeat(64),
+        serde_json::to_string(&project.path().join("unused-sh")).unwrap(),
+        "0".repeat(64)
+    )
+}
+
+#[test]
+fn native_replay_checks_exact_retained_hook_approval_before_activation() {
+    let (project, fixture, original) = native_selection_fixture();
+    let registry = include_bytes!("../../tests/fixtures/native-profile-hook.json");
+    project.write("registry.json", registry).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(registry).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let mut selection: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let key = selection["packages"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    selection["packages"][&key]["sourceEvidence"]["artifactIntegrity"] = integrity.into();
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let store = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::default(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Ci,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    run(request(), |_| {}).unwrap();
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let installed = fs::read(project.path().join("node_modules/shared/package.json")).unwrap();
+    // The archive pin matches; the script pin deliberately does not. No tool or
+    // containment backend should be consulted before exact authorization fails.
+    let policy = native_approval_policy(&project, "shared").replace(INTEGRITY, integrity);
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure.error.to_string().contains("script"),
+        "{}",
+        failure.error
+    );
+    let report = failure.outcome.lifecycle.as_ref().unwrap();
+    assert_eq!(
+        report.packages[0].hooks[0].reason,
+        Some("approval_rejected")
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/package.json")).unwrap(),
+        installed
+    );
+    assert!(!project.path().join("unused-sh").exists());
+}
+
+#[test]
+fn native_replay_authenticates_retained_hook_outputs_or_rejects_unsupported_toolchains() {
+    use sha2::{Digest, Sha256};
+    let (project, fixture, original) = native_selection_fixture();
+    let registry = include_bytes!("../../tests/fixtures/native-profile-hook.json");
+    project.write("registry.json", registry).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(registry).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let key = wire["packages"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    wire["packages"][&key]["sourceEvidence"]["artifactIntegrity"] = integrity.into();
+    let original = wire.to_string();
+    project.write("tapid.lock", original.as_bytes()).unwrap();
+    let store_path = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::default(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store_path),
+        mode: InstallMode::CiOffline,
+        registry_fixture: None,
+        allow_unverified_registry_artifacts: false,
+    };
+    let store = Store::new(store_path.clone());
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    let prepared = online::prepare_native_locked(
+        &selection,
+        &store,
+        &crate::registry::RegistryConfig::default(),
+        Some(&fixture),
+        project.path(),
+        false,
+        tapid_lockfile::InstallProfile::default(),
+    )
+    .unwrap();
+    let mut evidence = prepared
+        .lifecycle_sources(
+            &online::root_digest(project.path()).unwrap(),
+            tapid_lockfile::InstallProfile::default(),
+        )
+        .unwrap();
+    prepared.transaction.publish().unwrap().commit().unwrap();
+    let mut source = evidence.packages()[&key].clone();
+    source
+        .set_artifact_url("https://registry.npmjs.org/shared-1.0.0.tgz")
+        .unwrap();
+    wire["packages"][&key]["sourceEvidence"] =
+        serde_json::to_value(tapid_lockfile::NativeSourceEvidence::Verified {
+            package: Box::new(source),
+        })
+        .unwrap();
+    let original = wire.to_string();
+    project.write("tapid.lock", original.as_bytes()).unwrap();
+    // Seed trusted store evidence through its authentication API. No dependency
+    // code executes: the source hook exits 97 if it is accidentally launched.
+    let tool = b"pinned replay-only tool";
+    project.write("unused-sh", tool).unwrap();
+    let script_digest = format!("sha256-{:x}", Sha256::digest(b"exit 97"));
+    let tool_digest = format!("sha256-{:x}", Sha256::digest(tool));
+    let policy_text = native_approval_policy(&project, "shared")
+        .replace(INTEGRITY, integrity)
+        .replacen(&format!("sha256-{}", "0".repeat(64)), &script_digest, 1)
+        .replace(&format!("sha256-{}", "0".repeat(64)), &tool_digest);
+    project
+        .write("tapid.lifecycle.toml", policy_text.as_bytes())
+        .unwrap();
+    let policy = tapid_runner::DependencyLifecyclePolicy::parse(policy_text.as_bytes()).unwrap();
+    let system = match tapid_runner::dependency_toolchain_identity() {
+        Ok(identity) => identity,
+        Err(cause) if cfg!(target_os = "linux") => {
+            panic!("Linux toolchain identity must be available: {cause}")
+        }
+        Err(_) => {
+            project.write("node_modules/KEEP", b"unchanged").unwrap();
+            let failure = run(request(), |_| {}).unwrap_err();
+            assert!(
+                failure
+                    .error
+                    .to_string()
+                    .contains("toolchain identity currently requires Linux"),
+                "{}",
+                failure.error
+            );
+            assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+            assert_eq!(
+                fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+                b"unchanged"
+            );
+            assert_eq!(
+                fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+                original
+            );
+            return;
+        }
+    };
+    let mut toolchain = Sha256::new();
+    toolchain.update(system.as_bytes());
+    for value in ["sh", policy.approvals()[0].tools()[0].path(), &tool_digest] {
+        toolchain.update((value.len() as u64).to_le_bytes());
+        toolchain.update(value.as_bytes());
+    }
+    let graph = serde_json::to_string(&(
+        evidence.source_graph().to_json().unwrap(),
+        BTreeMap::<String, Vec<tapid_lockfile::DerivedHookOutput>>::new(),
+        Vec::<tapid_lockfile::DerivedHookOutput>::new(),
+    ))
+    .unwrap();
+    let recipe = policy.derived_key(
+        policy.approvals().first().unwrap(),
+        &format!("sha256-{:x}", toolchain.finalize()),
+        &graph,
+    );
+    project
+        .write(
+            "output/package.json",
+            br#"{"name":"shared","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    project
+        .write("output/built.txt", b"authenticated output")
+        .unwrap();
+    let digest = tapid_archive::canonical_tree_digest(&project.path().join("output")).unwrap();
+    store
+        .activate_verified_tree(&digest.parse().unwrap(), &project.path().join("output"))
+        .unwrap();
+    let attestation = store
+        .attest_lifecycle_output(&recipe.parse().unwrap(), &digest.parse().unwrap())
+        .unwrap();
+    evidence
+        .set_derived_hooks(
+            &key,
+            vec![
+                tapid_lockfile::DerivedHookOutput::new("install", &recipe, &digest, &attestation)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+    let mut package = evidence.packages()[&key].clone();
+    package
+        .set_artifact_url("https://registry.npmjs.org/shared-1.0.0.tgz")
+        .unwrap();
+    wire["packages"][&key]["sourceEvidence"] =
+        serde_json::to_value(tapid_lockfile::NativeSourceEvidence::Verified {
+            package: Box::new(package),
+        })
+        .unwrap();
+    let accepted = wire.to_string();
+    project.write("tapid.lock", accepted.as_bytes()).unwrap();
+    let report = run(request(), |_| {}).unwrap();
+    let lifecycle = report.outcome.lifecycle.unwrap();
+    assert_eq!(lifecycle.reused, 1);
+    assert_eq!(lifecycle.executed, 0);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"authenticated output"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        accepted
+    );
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    // Reassigning the output to a forged tag must not activate source fallback.
+    wire["packages"][&key]["sourceEvidence"]["package"]["derivedHooks"][0]["attestation"] =
+        format!("hmac-sha256-{}", "0".repeat(64)).into();
+    let forged = wire.to_string();
+    project.write("tapid.lock", forged.as_bytes()).unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("missing or mismatched verified lifecycle output"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"authenticated output"
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        forged
+    );
+}
+
+#[test]
+fn native_replay_rejects_retained_outputs_without_approval_through_lifecycle_validation() {
+    let (project, fixture, original) = native_selection_fixture();
+    let store_path = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::default(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store_path),
+        mode: InstallMode::Ci,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    run(request(), |_| {}).unwrap();
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let manifest = fs::read(project.path().join("node_modules/shared/package.json")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    let store = Store::new(store_path.clone());
+    let prepared = online::prepare_native_locked(
+        &selection,
+        &store,
+        &crate::registry::RegistryConfig::default(),
+        Some(&fixture),
+        project.path(),
+        false,
+        tapid_lockfile::InstallProfile::default(),
+    )
+    .unwrap();
+    let mut evidence = prepared
+        .lifecycle_sources(
+            &online::root_digest(project.path()).unwrap(),
+            tapid_lockfile::InstallProfile::default(),
+        )
+        .unwrap();
+    let key = evidence.packages().keys().next().unwrap().clone();
+    evidence
+        .set_derived_hooks(
+            &key,
+            vec![
+                tapid_lockfile::DerivedHookOutput::new(
+                    "install",
+                    &format!("sha256-{}", "b".repeat(64)),
+                    &format!("sha256-{}", "c".repeat(64)),
+                    &format!("hmac-sha256-{}", "d".repeat(64)),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+    let mut wire: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let mut package = evidence.packages()[&key].clone();
+    package
+        .set_artifact_url("https://registry.npmjs.org/shared-1.0.0.tgz")
+        .unwrap();
+    wire["packages"][&key]["sourceEvidence"] =
+        serde_json::to_value(tapid_lockfile::NativeSourceEvidence::Verified {
+            package: Box::new(package),
+        })
+        .unwrap();
+    drop(prepared);
+    let claimed = wire.to_string();
+    project.write("tapid.lock", claimed.as_bytes()).unwrap();
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("lifecycle approval was removed or changed"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(failure.outcome.lifecycle.is_some());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        claimed
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/package.json")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn native_replay_omitted_approval_needs_no_sources_but_restoration_does() {
+    let (project, fixture, _) = native_selection_fixture();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","devDependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    let mut selection: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+    selection["rootManifestDigest"] = online::root_digest(project.path()).unwrap().into();
+    selection["declarations"][0]["kind"] = "dev".into();
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let policy = native_approval_policy(&project, "shared");
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    fs::remove_file(&fixture).unwrap();
+    let store = project.path().join("store");
+    let request = |profile| InstallRequest {
+        profile,
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Ci,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    let report = run(
+        request(tapid_lockfile::InstallProfile::production()),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 0);
+    let metadata = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    let failure = run(request(tapid_lockfile::InstallProfile::default()), |_| {}).unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::InvalidData);
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        metadata
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+    assert!(!project.path().join("unused-sh").exists());
+}
+
+#[test]
+fn native_replay_omitted_approval_does_not_require_acyclic_retained_sources() {
+    let (project, fixture, _) = native_selection_fixture();
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"a":"1.0.0"},"devDependencies":{"devtool":"1.0.0"}}"#).unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("../../tests/fixtures/aliased-root-cycle.json"),
+        )
+        .unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let key = |name: &str| {
+        tapid_lockfile::LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            name.parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+            &Default::default(),
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string()
+    };
+    let mut packages = serde_json::Map::new();
+    for (name, dependency) in [("a", "b"), ("b", "a")] {
+        let record = registry["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name && p["version"] == "1.0.0")
+            .unwrap();
+        packages.insert(key(name), serde_json::json!({
+            "sourceEvidence":{"state":"pending","artifactUrl":format!("https://registry.npmjs.org/{name}-1.0.0.tgz"),"artifactIntegrity":record["integrity"]},
+            "dependencies":{dependency:{"kind":"required","target":key(dependency)}},"peerProviders":{}
+        }));
+    }
+    packages.insert(key("devtool"), serde_json::json!({
+        "sourceEvidence":{"state":"pending","artifactUrl":"https://registry.npmjs.org/devtool-1.0.0.tgz","artifactIntegrity":INTEGRITY},
+        "dependencies":{},"peerProviders":{}
+    }));
+    let selection = serde_json::json!({
+        "lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0",
+        "rootManifestDigest":online::root_digest(project.path()).unwrap(),"workspaceManifestDigests":{},
+        "declarations":[
+            {"workspace":null,"name":"a","kind":"required","target":key("a")},
+            {"workspace":null,"name":"devtool","kind":"dev","target":key("devtool")}
+        ],"packages":packages
+    });
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    let policy = native_approval_policy(&project, "devtool");
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let report = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::production(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 2);
+    assert!(project.path().join("node_modules/a/package.json").is_file());
+    assert!(!project.path().join("node_modules/devtool").exists());
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
+#[test]
+fn native_selection_cold_ci_activates_sources_without_rewriting_selection() {
+    let (project, fixture, selection) = native_selection_fixture();
+    let report = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(report.replayed);
+    assert_eq!(report.package_count, 1);
+    assert_eq!(report.outcome.state, ChangeState::Committed);
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/.tapid-profile.json")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+
+    let installed = fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap();
+    // A warm tree cannot independently authorize the archive-to-tree mapping for
+    // a pending selection. Offline replay must leave the active generation alone.
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Offline,
+            registry_fixture: None,
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Store);
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        installed
+    );
+
+    let mut records: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    for record in records["packages"].as_array_mut().unwrap() {
+        record["artifact"] = "base64:dGFtcGVyZWQ=".into();
+    }
+    fs::write(&fixture, records.to_string()).unwrap();
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(
+        fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+        installed
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
+#[test]
+fn native_selection_profiles_switch_without_fetching_omitted_archives_or_rewriting_lock() {
+    for (manifest, kind, omitted) in [
+        (
+            r#"{"name":"app","version":"1.0.0","devDependencies":{"shared":"1.0.0"}}"#,
+            "dev",
+            tapid_lockfile::InstallProfile::production(),
+        ),
+        (
+            r#"{"name":"app","version":"1.0.0","dependencies":{"shared":"2.0.0"},"optionalDependencies":{"shared":"1.0.0"}}"#,
+            "optional",
+            tapid_lockfile::InstallProfile {
+                include_dev: true,
+                include_optional: false,
+            },
+        ),
+    ] {
+        let (project, fixture, _) = native_selection_fixture();
+        project.write("package.json", manifest.as_bytes()).unwrap();
+        let mut selection: serde_json::Value =
+            serde_json::from_slice(&fs::read(project.path().join("tapid.lock")).unwrap()).unwrap();
+        selection["rootManifestDigest"] = online::root_digest(project.path()).unwrap().into();
+        selection["declarations"][0]["kind"] = kind.into();
+        let selection = selection.to_string();
+        project.write("tapid.lock", selection.as_bytes()).unwrap();
+        let fixture_bytes = fs::read(&fixture).unwrap();
+        for profile in [
+            tapid_lockfile::InstallProfile::default(),
+            omitted,
+            tapid_lockfile::InstallProfile::default(),
+        ] {
+            let materialized = profile != omitted;
+            if materialized {
+                fs::write(&fixture, &fixture_bytes).unwrap();
+            } else {
+                fs::remove_file(&fixture).unwrap();
+            }
+            let report = run(
+                InstallRequest {
+                    profile,
+                    project_dir: project.path(),
+                    target_manifest_path: Path::new("package.json"),
+                    mutation: ManifestMutation::None,
+                    store_root: Some(&project.path().join("store")),
+                    mode: InstallMode::Ci,
+                    registry_fixture: Some(&fixture),
+                    allow_unverified_registry_artifacts: false,
+                },
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(report.package_count, usize::from(materialized));
+            assert_eq!(
+                project
+                    .path()
+                    .join("node_modules/shared/package.json")
+                    .is_file(),
+                materialized
+            );
+            assert_eq!(
+                fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+                selection
+            );
+            let state: serde_json::Value = serde_json::from_slice(
+                &fs::read(project.path().join("node_modules/.tapid-profile.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["includeDev"], profile.include_dev);
+            assert_eq!(state["includeOptional"], profile.include_optional);
+            if !materialized {
+                let report = run(
+                    InstallRequest {
+                        profile: tapid_lockfile::InstallProfile::default(),
+                        project_dir: project.path(),
+                        target_manifest_path: Path::new("package.json"),
+                        mutation: ManifestMutation::None,
+                        store_root: Some(&project.path().join("store")),
+                        mode: InstallMode::Prune,
+                        registry_fixture: None,
+                        allow_unverified_registry_artifacts: false,
+                    },
+                    |_| {},
+                )
+                .unwrap();
+                assert_eq!(report.package_count, 0);
+                assert_eq!(
+                    fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+                    selection
+                );
+                let path = project.path().join("node_modules/.tapid-profile.json");
+                let mut forged: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                forged["generation"] = "stale".into();
+                let forged = serde_json::to_vec(&forged).unwrap();
+                fs::write(&path, &forged).unwrap();
+                let failure = run(
+                    InstallRequest {
+                        profile: tapid_lockfile::InstallProfile::default(),
+                        project_dir: project.path(),
+                        target_manifest_path: Path::new("package.json"),
+                        mutation: ManifestMutation::None,
+                        store_root: Some(&project.path().join("store")),
+                        mode: InstallMode::Prune,
+                        registry_fixture: None,
+                        allow_unverified_registry_artifacts: false,
+                    },
+                    |_| {},
+                )
+                .unwrap_err();
+                assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+                assert_eq!(fs::read(&path).unwrap(), forged);
+            }
+        }
+    }
+}
+
+#[test]
+fn fresh_production_selection_omits_artifacts_and_can_restore_full_from_immutable_pins() {
+    let (project, fixture, _) = native_selection_fixture();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","devDependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let archive_fixture = fs::read(&fixture).unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_slice(&archive_fixture).unwrap();
+    for package in metadata["packages"].as_array_mut().unwrap() {
+        package["artifact"] = format!(
+            "https://registry.npmjs.org/{}-{}.tgz",
+            package["name"].as_str().unwrap(),
+            package["version"].as_str().unwrap()
+        )
+        .into();
+    }
+    fs::write(&fixture, metadata.to_string()).unwrap();
+    let report = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::production(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(!report.replayed);
+    assert_eq!(report.package_count, 0);
+    assert!(!project.path().join("node_modules/shared").exists());
+    let lock = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&lock).unwrap();
+    assert_eq!(selection.packages().len(), 1);
+    fs::write(&fixture, archive_fixture).unwrap();
+    let report = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 1);
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        lock
+    );
+}
+
+#[test]
+fn native_production_replay_retains_shared_aliases_and_required_peer_providers() {
+    let (project, fixture, _) = native_selection_fixture();
+    let manifest = br#"{"name":"app","version":"1.0.0","dependencies":{"runtime":"npm:shared@2.0.0","consumer":"1.0.0"},"devDependencies":{"parent":"1.0.0","shared":"1.0.0"}}"#;
+    project.write("package.json", manifest).unwrap();
+    let fixture_bytes = fs::read(&fixture).unwrap();
+    let records: serde_json::Value = serde_json::from_slice(&fixture_bytes).unwrap();
+    let key = |name: &str, version: &str, peers: &tapid_core::PeerContext| {
+        tapid_lockfile::LockfilePackageKey::new(
+            "https://registry.npmjs.org".parse().unwrap(),
+            name.parse().unwrap(),
+            version.parse().unwrap(),
+            peers,
+            &tapid_core::PlatformContext::new(None, None, None).unwrap(),
+        )
+        .to_string()
+    };
+    let shared1 = key("shared", "1.0.0", &Default::default());
+    let shared2 = key("shared", "2.0.0", &Default::default());
+    let parent = key("parent", "1.0.0", &Default::default());
+    let peers = tapid_core::PeerContext::default()
+        .with("shared".parse().unwrap(), "1.0.0".parse().unwrap());
+    let consumer = key("consumer", "1.0.0", &peers);
+    let mut packages = serde_json::Map::new();
+    for (name, version, encoded) in [
+        ("shared", "1.0.0", &shared1),
+        ("shared", "2.0.0", &shared2),
+        ("parent", "1.0.0", &parent),
+        ("consumer", "1.0.0", &consumer),
+    ] {
+        let record = records["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name && r["version"] == version)
+            .unwrap();
+        packages.insert(encoded.clone(), serde_json::json!({"sourceEvidence":{"state":"pending","artifactUrl":format!("https://registry.npmjs.org/{name}-{version}.tgz"),"artifactIntegrity":record["integrity"]},"dependencies":{},"peerProviders":{}}));
+    }
+    packages.get_mut(&parent).unwrap()["dependencies"] =
+        serde_json::json!({"shared":{"kind":"required","target":shared2}});
+    packages.get_mut(&consumer).unwrap()["peerProviders"] = serde_json::json!({"shared":shared1});
+    let selection = serde_json::json!({"lockfileVersion":11,"resolverVersion":"0","linkerVersion":"0", "rootManifestDigest":online::root_digest(project.path()).unwrap(),"workspaceManifestDigests":{},
+        "declarations":[{"workspace":null,"name":"runtime","kind":"required","target":shared2},{"workspace":null,"name":"consumer","kind":"required","target":consumer},{"workspace":null,"name":"parent","kind":"dev","target":parent},{"workspace":null,"name":"shared","kind":"dev","target":shared1}], "packages":packages}).to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    for profile in [
+        tapid_lockfile::InstallProfile::default(),
+        tapid_lockfile::InstallProfile::production(),
+        tapid_lockfile::InstallProfile::default(),
+    ] {
+        let mut records = records.clone();
+        if !profile.include_dev {
+            for record in records["packages"].as_array_mut().unwrap() {
+                if record["name"] == "parent" {
+                    record["artifact"] = "missing-omitted-parent.tgz".into();
+                }
+            }
+        }
+        fs::write(&fixture, records.to_string()).unwrap();
+        let report = run(
+            InstallRequest {
+                profile,
+                project_dir: project.path(),
+                target_manifest_path: Path::new("package.json"),
+                mutation: ManifestMutation::None,
+                store_root: Some(&project.path().join("store")),
+                mode: InstallMode::Frozen,
+                registry_fixture: Some(&fixture),
+                allow_unverified_registry_artifacts: false,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            report.package_count,
+            if profile.include_dev { 4 } else { 3 }
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/runtime/package.json")
+                .is_file()
+        );
+        assert!(
+            project
+                .path()
+                .join("node_modules/consumer/package.json")
+                .is_file()
+        );
+        assert_eq!(
+            project
+                .path()
+                .join("node_modules/parent/package.json")
+                .is_file(),
+            profile.include_dev
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+            selection
+        );
+    }
+}
+
+#[test]
+fn native_profile_rejects_forged_omitted_declaration_kind_before_source_access() {
+    let (project, fixture, lock) = native_selection_fixture();
+    let mut selection: serde_json::Value = serde_json::from_str(&lock).unwrap();
+    selection["declarations"][0]["kind"] = "dev".into();
+    let selection = selection.to_string();
+    project.write("tapid.lock", selection.as_bytes()).unwrap();
+    project.write("node_modules/KEEP", b"previous").unwrap();
+    fs::remove_file(&fixture).unwrap();
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::production(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Lockfile);
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(!project.path().join("store").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"previous"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
+#[test]
+fn fresh_profile_activation_failure_restores_absent_lock_and_previous_layout() {
+    let (project, fixture, _) = native_selection_fixture();
+    project
+        .write(
+            "package.json",
+            br#"{"name":"app","version":"1.0.0","devDependencies":{"shared":"1.0.0"}}"#,
+        )
+        .unwrap();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let mut records: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    for record in records["packages"].as_array_mut().unwrap() {
+        record["artifact"] = format!(
+            "https://registry.npmjs.org/{}-{}.tgz",
+            record["name"].as_str().unwrap(),
+            record["version"].as_str().unwrap()
+        )
+        .into();
+    }
+    fs::write(&fixture, records.to_string()).unwrap();
+    project.write("node_modules/KEEP", b"user data").unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::production(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Materialization);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(failure.recovery_error.is_none());
+    assert!(!project.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/.tapid-profile.json")
+            .exists()
+    );
+    assert!(!project.path().join("store/trees").exists());
+}
+
+#[test]
+fn non_full_legacy_profile_rejects_without_touching_lock_layout_or_store() {
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let store = project.path().join("store");
+    run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&store),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    project.write("node_modules/KEEP", b"previous").unwrap();
+    fs::remove_file(&fixture).unwrap();
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::production(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("unopened-store")),
+            mode: InstallMode::Online,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::InvalidRequest);
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"previous"
+    );
+    assert!(!project.path().join("unopened-store").exists());
+}
+
+#[test]
+fn native_selection_stale_manifest_rejects_before_store_or_archive_access() {
+    let (project, fixture, selection) = native_selection_fixture();
+    fs::remove_file(&fixture).unwrap();
+    project
+        .write("package.json", br#"{"name":"changed","version":"1.0.0"}"#)
+        .unwrap();
+    project
+        .write("node_modules/sentinel", b"old installation")
+        .unwrap();
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Frozen,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::LockManifestMismatch);
+    assert!(failure.error.to_string().contains("manifest digest"));
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(!project.path().join("store").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/sentinel")).unwrap(),
+        b"old installation"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+}
+
+#[test]
+fn native_selection_activation_failure_rolls_back_published_sources() {
+    let (project, fixture, selection) = native_selection_fixture();
+    project.write("node_modules/KEEP", b"user data").unwrap();
+    let failure = run(
+        InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
+            project_dir: project.path(),
+            target_manifest_path: Path::new("package.json"),
+            mutation: ManifestMutation::None,
+            store_root: Some(&project.path().join("store")),
+            mode: InstallMode::Ci,
+            registry_fixture: Some(&fixture),
+            allow_unverified_registry_artifacts: false,
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Materialization);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(failure.recovery_error.is_none());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        selection
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/.tapid-profile.json")
+            .exists()
+    );
+    assert!(!project.path().join("store/trees").exists());
+}
 
 fn project_with_fixture(label: &str, integrity: &str) -> (TempProject, PathBuf) {
     let project = TempProject::new(label).unwrap();
@@ -100,6 +1249,7 @@ fn install_reclassifies_the_lock_after_recovery() {
 
         let result = run_with_execution(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -166,6 +1316,7 @@ fn failed_resolution_reports_rollback_and_preserves_its_category() {
     let original = fs::read(project.path().join("package.json")).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("missing@1.0.0"),
@@ -200,6 +1351,7 @@ fn integrity_failure_is_typed_and_rolls_back_the_manifest() {
     let original = fs::read(project.path().join("package.json")).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -282,6 +1434,7 @@ fn install_reads_lifecycle_policy_after_acquiring_the_project_lock() {
     let _fault = inject(Fault::PolicyChanged);
     let result = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -305,6 +1458,7 @@ fn failure_after_commit_keeps_the_committed_manifest_lock_and_packages() {
     let _fault = inject(Fault::AfterCommit);
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -358,6 +1512,7 @@ fn committed_cleanup_failure_preserves_the_decision_and_requires_no_repeat() {
     let _fault = inject(Fault::CleanupPending);
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -400,6 +1555,7 @@ fn obstructed_rollback_is_recovery_required_instead_of_rolled_back() {
     let _fault = inject(Fault::RollbackPending);
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -431,6 +1587,7 @@ fn replay_preserves_the_lock_mismatch_category() {
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -447,6 +1604,7 @@ fn replay_preserves_the_lock_mismatch_category() {
     project.write("package.json", &manifest).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -481,6 +1639,7 @@ fn competing_activation_returns_typed_contention_without_changes() {
     let _lock = ActivationLock::acquire(project.path()).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -503,6 +1662,7 @@ fn missing_replay_tree_preserves_the_store_error_category() {
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -517,6 +1677,7 @@ fn missing_replay_tree_preserves_the_store_error_category() {
     fs::remove_dir_all(store.join("trees")).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -550,6 +1711,7 @@ fn materialization_failure_preserves_previous_project_and_store_state() {
     project.write("node_modules/KEEP", b"user data").unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -595,6 +1757,7 @@ fn peer_failure_preserves_the_resolver_source() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -637,6 +1800,7 @@ fn invalid_archive_is_typed_without_activating_any_packages() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -660,6 +1824,7 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
     let store = project.path().join("store");
     let report = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -697,6 +1862,7 @@ fn successful_install_and_replay_report_effective_project_changes_and_warnings()
     assert_eq!(changes.added + changes.reused + changes.removed, 0);
     let replay = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -733,6 +1899,7 @@ fn failed_previous_recovery_reports_project_outputs_for_install_and_outdated() {
         let failure = if command == "install" {
             run(
                 InstallRequest {
+                    profile: tapid_lockfile::InstallProfile::default(),
                     project_dir: project.path(),
                     target_manifest_path: Path::new("package.json"),
                     mutation: ManifestMutation::None,
@@ -788,6 +1955,7 @@ fn invalid_fixture_package_fields_preserve_the_registry_metadata_category() {
         fs::write(&fixture, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let failure = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -838,6 +2006,7 @@ fn invalid_fixture_artifact_preserves_metadata_and_transport_categories() {
         fs::write(&fixture, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let failure = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::AddPackage("plugin@1.0.0"),
@@ -878,6 +2047,7 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
         let store = project.path().join("store");
         run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -928,6 +2098,7 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
         fs::write(&fixture, metadata.to_string()).unwrap();
         let report = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -960,6 +2131,7 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
         ] {
             let failure = run(
                 InstallRequest {
+                    profile: tapid_lockfile::InstallProfile::default(),
                     project_dir: project.path(),
                     target_manifest_path: Path::new("package.json"),
                     mutation: ManifestMutation::None,
@@ -984,6 +2156,7 @@ fn online_platform_fallback_discards_only_incompatible_locked_selections() {
             .unwrap();
         let failure = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -1012,6 +2185,7 @@ fn repeated_online_install_preserves_locked_selection() {
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1032,6 +2206,7 @@ fn repeated_online_install_preserves_locked_selection() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1050,6 +2225,7 @@ fn repeated_online_install_preserves_locked_selection() {
     fs::remove_file(&fixture).unwrap();
     let replay = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1080,6 +2256,7 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1111,6 +2288,7 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
     let cold = project.path().join("cold-store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1125,6 +2303,7 @@ fn frozen_install_hydrates_exact_artifact_from_cold_store() {
     assert_eq!(fs::read(&lock_path).unwrap(), original_lock);
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1150,6 +2329,7 @@ fn changed_roots_keep_compatible_locked_versions() {
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1172,6 +2352,7 @@ fn changed_roots_keep_compatible_locked_versions() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("other@*"),
@@ -1192,6 +2373,7 @@ fn changed_roots_keep_compatible_locked_versions() {
     );
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1223,6 +2405,7 @@ fn pinned_fixture_project(label: &str) -> (TempProject, PathBuf, PathBuf) {
     let warm = project.path().join("warm-store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1311,6 +2494,7 @@ fn frozen_hydration_failures_preserve_lock_and_installed_tree() {
         let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
         let failure = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -1351,6 +2535,7 @@ fn frozen_hydration_rejects_missing_private_credentials_before_network() {
     project.write("tapid.toml", b"[registries.default]\nurl='https://private.example'\ntoken-env='TAPID_FROZEN_TEST_MISSING_TOKEN_193'\n").unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1372,6 +2557,7 @@ fn offline_cold_store_never_uses_supplied_artifacts() {
     let (project, fixture, cold) = pinned_fixture_project("offline-cold");
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1398,6 +2584,7 @@ fn frozen_hydration_rolls_back_publication_when_activation_fails() {
         .unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1430,6 +2617,7 @@ fn adding_a_root_does_not_require_metadata_for_unchanged_locked_packages() {
     fs::write(&fixture, metadata.to_string()).unwrap();
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("other@*"),
@@ -1473,6 +2661,7 @@ fn online_compatibility_refetches_unverified_locks_and_preserves_verified_select
             let store = project.path().join("store");
             run(
                 InstallRequest {
+                    profile: tapid_lockfile::InstallProfile::default(),
                     project_dir: project.path(),
                     target_manifest_path: Path::new("package.json"),
                     mutation: ManifestMutation::None,
@@ -1496,6 +2685,7 @@ fn online_compatibility_refetches_unverified_locks_and_preserves_verified_select
                 assert!(
                     run(
                         InstallRequest {
+                            profile: tapid_lockfile::InstallProfile::default(),
                             project_dir: project.path(),
                             target_manifest_path: Path::new("package.json"),
                             mutation: ManifestMutation::None,
@@ -1527,6 +2717,7 @@ fn online_compatibility_refetches_unverified_locks_and_preserves_verified_select
             }
             let report = run(
                 InstallRequest {
+                    profile: tapid_lockfile::InstallProfile::default(),
                     project_dir: project.path(),
                     target_manifest_path: Path::new("package.json"),
                     mutation: ManifestMutation::None,
@@ -1593,6 +2784,7 @@ fn compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_
         let store = project.path().join("store");
         run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -1613,6 +2805,7 @@ fn compatibility_checks_fresh_integrity_before_promoting_an_existing_unverified_
         fs::write(&fixture, metadata.to_string()).unwrap();
         let result = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -1667,6 +2860,7 @@ fn fetching_another_version_preserves_locked_dependency_edges() {
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1702,6 +2896,7 @@ fn fetching_another_version_preserves_locked_dependency_edges() {
     project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0","plugin-next":"npm:plugin@2.0.0"}}"#).unwrap();
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1759,6 +2954,7 @@ fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package
     let store = project.path().join("store");
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1773,6 +2969,7 @@ fn unrelated_root_changes_preserve_direct_and_transitive_versions_of_one_package
     // Broadening a requirement does not require changing its valid selection.
     run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::AddPackage("plugin@*"),
@@ -1806,6 +3003,7 @@ fn frozen_rejects_invalid_root_bindings_before_downloading() {
     fs::write(&lock_path, lock.to_string()).unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1852,6 +3050,7 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
         let store = project.path().join("store");
         run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -1867,6 +3066,7 @@ fn changed_peer_roots_rebind_compatible_ranges_and_release_incompatible_pins() {
         fs::write(&fixture, metadata.to_string()).unwrap();
         run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::AddPackage(&format!("react@{provider}")),
@@ -1904,6 +3104,7 @@ fn frozen_refuses_corrupt_warm_content_without_redownloading() {
     .unwrap();
     let failure = run(
         InstallRequest {
+            profile: tapid_lockfile::InstallProfile::default(),
             project_dir: project.path(),
             target_manifest_path: Path::new("package.json"),
             mutation: ManifestMutation::None,
@@ -1975,6 +3176,7 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
         for mode in [InstallMode::Online, InstallMode::Frozen] {
             let report = run(
                 InstallRequest {
+                    profile: tapid_lockfile::InstallProfile::default(),
                     project_dir: project.path(),
                     target_manifest_path: Path::new("package.json"),
                     mutation: ManifestMutation::None,
@@ -2023,6 +3225,7 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
     for mode in [InstallMode::Online, InstallMode::Frozen] {
         let failure = run(
             InstallRequest {
+                profile: tapid_lockfile::InstallProfile::default(),
                 project_dir: project.path(),
                 target_manifest_path: Path::new("package.json"),
                 mutation: ManifestMutation::None,
@@ -2047,4 +3250,261 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
             installed
         );
     }
+}
+
+#[test]
+fn fresh_native_profile_validates_retained_approvals_and_rolls_back_before_activation() {
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    project
+        .write(
+            "registry.json",
+            include_bytes!("../../tests/fixtures/native-profile-hook.json"),
+        )
+        .unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let mut metadata = registry.clone();
+    metadata["packages"][0]["artifactUrl"] = "https://registry.npmjs.org/shared-1.0.0.tgz".into();
+    project
+        .write("registry.json", metadata.to_string().as_bytes())
+        .unwrap();
+    let policy = native_approval_policy(&project, "shared").replace(INTEGRITY, integrity);
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    project
+        .write("node_modules/KEEP", b"previous generation")
+        .unwrap();
+    let store = project.path().join("store");
+    let request = || InstallRequest {
+        profile: tapid_lockfile::InstallProfile::production(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Online,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    let failure = run(request(), |_| {}).unwrap_err();
+    assert!(
+        failure.error.to_string().contains("script"),
+        "{}",
+        failure.error
+    );
+    assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+    assert!(!project.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"previous generation"
+    );
+}
+
+#[test]
+fn fresh_native_profile_records_sources_and_ignores_unselected_approvals_for_offline_replay() {
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    for record in metadata["packages"].as_array_mut().unwrap() {
+        record["artifactUrl"] = format!(
+            "https://registry.npmjs.org/{}-{}.tgz",
+            record["name"].as_str().unwrap(),
+            record["version"].as_str().unwrap()
+        )
+        .into();
+    }
+    project
+        .write("registry.json", metadata.to_string().as_bytes())
+        .unwrap();
+    project
+        .write(
+            "tapid.lifecycle.toml",
+            native_approval_policy(&project, "unselected").as_bytes(),
+        )
+        .unwrap();
+    let store = project.path().join("store");
+    let request = |mode, registry_fixture| InstallRequest {
+        profile: tapid_lockfile::InstallProfile::production(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts: false,
+    };
+    project
+        .write("node_modules/KEEP", b"previous generation")
+        .unwrap();
+    let failure = run(
+        request(InstallMode::Online, Some(fixture.as_path())),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.kind, ErrorKind::Materialization);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(!project.path().join("tapid.lock").exists());
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"previous generation"
+    );
+    let trees = store.join("trees");
+    assert!(!trees.exists() || fs::read_dir(trees).unwrap().next().is_none());
+    fs::remove_dir_all(project.path().join("node_modules")).unwrap();
+    let report = run(
+        request(InstallMode::Online, Some(fixture.as_path())),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(report.package_count, 1);
+    let original = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    assert!(selection.packages().values().all(|p| matches!(
+        p.source_evidence,
+        tapid_lockfile::NativeSourceEvidence::Verified { .. }
+    )));
+    fs::remove_file(&fixture).unwrap();
+    let replay = run(request(InstallMode::CiOffline, None), |_| {}).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        original
+    );
+    assert!(
+        project
+            .path()
+            .join("node_modules/shared/package.json")
+            .is_file()
+    );
+}
+
+#[test]
+fn fresh_native_profile_builds_authenticated_output_and_replays_without_execution() {
+    use sha2::{Digest, Sha256};
+    let (project, fixture, _) = native_selection_fixture();
+    fs::remove_file(project.path().join("tapid.lock")).unwrap();
+    let bytes = include_bytes!("../../tests/fixtures/native-profile-build.json");
+    project.write("registry.json", bytes).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+    let integrity = registry["packages"][0]["integrity"].as_str().unwrap();
+    let script_digest = format!("sha256-{:x}", Sha256::digest(b"printf built > built.txt"));
+    // The shell is an explicitly pinned immutable tool, never user-home state.
+    #[cfg(unix)]
+    let shell = Path::new("/bin/sh");
+    #[cfg(windows)]
+    let shell = project.path().join("unused-shell");
+    #[cfg(windows)]
+    let shell = shell.as_path();
+    let tool_digest = fs::read(shell)
+        .map(|bytes| format!("sha256-{:x}", Sha256::digest(bytes)))
+        .unwrap_or_else(|_| format!("sha256-{}", "0".repeat(64)));
+    let policy = native_approval_policy(&project, "shared")
+        .replace(INTEGRITY, integrity)
+        .replacen(&format!("sha256-{}", "0".repeat(64)), &script_digest, 1)
+        .replace(&format!("sha256-{}", "0".repeat(64)), &tool_digest)
+        .replace(
+            &serde_json::to_string(&project.path().join("unused-sh")).unwrap(),
+            &serde_json::to_string(shell).unwrap(),
+        );
+    project
+        .write("tapid.lifecycle.toml", policy.as_bytes())
+        .unwrap();
+    let store = project.path().join("store");
+    let request = |mode, registry_fixture| InstallRequest {
+        profile: tapid_lockfile::InstallProfile::production(),
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode,
+        registry_fixture,
+        allow_unverified_registry_artifacts: false,
+    };
+    if cfg!(target_os = "linux") {
+        // An unmanaged prior layout forces activation to reject after approved
+        // outputs have been staged and published. Source and derived trees must
+        // roll back together with the newly written complete selection.
+        project
+            .write("node_modules/KEEP", b"previous generation")
+            .unwrap();
+        let failure = run(
+            request(InstallMode::Online, Some(fixture.as_path())),
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(failure.error.kind, ErrorKind::Materialization);
+        assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+        assert!(!project.path().join("tapid.lock").exists());
+        assert_eq!(
+            fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+            b"previous generation"
+        );
+        let trees = store.join("trees");
+        assert!(!trees.exists() || fs::read_dir(trees).unwrap().next().is_none());
+        fs::remove_dir_all(project.path().join("node_modules")).unwrap();
+    }
+    let result = run(
+        request(InstallMode::Online, Some(fixture.as_path())),
+        |_| {},
+    );
+    if !cfg!(target_os = "linux") {
+        let failure = result.unwrap_err();
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("toolchain identity currently requires Linux"),
+            "{}",
+            failure.error
+        );
+        assert_eq!(failure.outcome.state, ChangeState::Unchanged);
+        assert!(!project.path().join("tapid.lock").exists());
+        assert!(!project.path().join("node_modules").exists());
+        return;
+    }
+    let installed = result.unwrap();
+    assert_eq!(
+        installed.outcome.lifecycle.as_ref().unwrap().packages[0].hooks[0].disposition,
+        "executed"
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"built"
+    );
+    let original = fs::read_to_string(project.path().join("tapid.lock")).unwrap();
+    let selection = tapid_lockfile::NativeSelection::from_json(&original).unwrap();
+    let tapid_lockfile::NativeSourceEvidence::Verified { package } = &selection
+        .packages()
+        .values()
+        .next()
+        .unwrap()
+        .source_evidence
+    else {
+        panic!("source evidence missing")
+    };
+    assert_eq!(package.derived_hooks().len(), 1);
+    let output = &package.derived_hooks()[0];
+    Store::new(store.clone())
+        .verified_lifecycle_snapshot(
+            &output.key().parse().unwrap(),
+            &output.tree_digest().parse().unwrap(),
+            output.attestation(),
+        )
+        .unwrap();
+    fs::remove_file(&fixture).unwrap();
+    let replay = run(request(InstallMode::CiOffline, None), |_| {}).unwrap();
+    assert_eq!(
+        replay.outcome.lifecycle.as_ref().unwrap().packages[0].hooks[0].disposition,
+        "reused"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+        original
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/shared/built.txt")).unwrap(),
+        b"built"
+    );
 }

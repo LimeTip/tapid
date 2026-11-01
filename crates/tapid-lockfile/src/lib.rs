@@ -6,6 +6,8 @@ mod error;
 mod inspection;
 mod model;
 mod npm_import;
+mod profile;
+mod selection_json;
 mod validation;
 
 #[cfg(test)]
@@ -38,4 +40,11 @@ const PROVENANCE_LEGACY_LOCKFILE_VERSION: u32 = 5;
 pub use npm_import::{
     ImportedNpmArtifactReceipt, ImportedNpmEntryPoints, ImportedNpmGraph, ImportedNpmLockfile,
     ImportedNpmPackage, NpmImportError,
+};
+
+pub use profile::{
+    Declaration as NativeDeclaration, DeclarationKind as NativeDeclarationKind,
+    Dependency as NativeDependency, DependencyKind as NativeDependencyKind, InstallProfile,
+    NativeSelection, PROFILE_LOCKFILE_VERSION, SelectedPackage as NativeSelectedPackage,
+    SourceEvidence as NativeSourceEvidence,
 };

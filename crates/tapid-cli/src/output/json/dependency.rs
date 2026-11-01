@@ -6,6 +6,10 @@ use std::process::ExitCode;
 pub(crate) fn installed(report: &InstallReport, operation: &str) -> ExitCode {
     let mut result = envelope(operation, "success", Some(&report.outcome));
     result["data"] = json!({"package_count": report.package_count, "replayed": report.replayed});
+    if let Some(profile) = report.profile {
+        result["data"]["profile"] =
+            json!({"include_dev":profile.include_dev,"include_optional":profile.include_optional});
+    }
     if !report.candidate_exclusions.is_empty() {
         result["data"]["candidate_exclusions"] =
             serde_json::to_value(&report.candidate_exclusions).expect("bounded exclusions");

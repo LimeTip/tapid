@@ -899,37 +899,34 @@ pub(crate) fn manifest_overrides(
 pub(crate) fn manifest_roots(manifest: &PackageManifest) -> Result<Vec<Dependency>, String> {
     let overrides = manifest_overrides(manifest)?;
     let mut roots = Vec::new();
-    for (kind, map) in [
-        ("dependencies", manifest.dependencies()),
-        ("devDependencies", manifest.dev_dependencies()),
-        ("optionalDependencies", manifest.optional_dependencies()),
-    ] {
-        for (name, range) in map {
-            if copied::declaration(range)
-                .map_err(|reason| format!("dependency '{name}': {reason}"))?
-                .is_some()
-            {
-                continue;
-            }
-            if range.starts_with("workspace:") {
-                continue;
-            }
-            let (registry, package) = dep_parts(name)?;
-            let requirement = range.parse::<Requirement>().map_err(|error| {
-                format!("invalid {kind} dependency '{name}' range '{range}': {error}")
-            })?;
-            if registry.as_str() == JSR && requirement.is_alias() {
-                return Err(format!(
-                    "npm alias '{name}@{range}' cannot use a JSR dependency name"
-                ));
-            }
-            if registry.as_str() == JSR && requirement.dist_tag().is_some() {
-                return Err(format!(
-                    "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
-                ));
-            }
-            roots.push(Dependency::new(registry.into(), package, requirement));
+    for (kind, name, range) in manifest.effective_install_declarations() {
+        if copied::declaration(range)
+            .map_err(|reason| format!("dependency '{name}': {reason}"))?
+            .is_some()
+        {
+            continue;
         }
+        if range.starts_with("workspace:") {
+            continue;
+        }
+        let (registry, package) = dep_parts(name)?;
+        let requirement = range.parse::<Requirement>().map_err(|error| {
+            format!(
+                "invalid {} dependency '{name}' range '{range}': {error}",
+                kind.field_name()
+            )
+        })?;
+        if registry.as_str() == JSR && requirement.is_alias() {
+            return Err(format!(
+                "npm alias '{name}@{range}' cannot use a JSR dependency name"
+            ));
+        }
+        if registry.as_str() == JSR && requirement.dist_tag().is_some() {
+            return Err(format!(
+                "unsupported JSR dist-tag dependency '{name}@{range}': npm dist-tags only are supported"
+            ));
+        }
+        roots.push(Dependency::new(registry.into(), package, requirement));
     }
     for dependency in &roots {
         if dependency.registry.to_string() == NPM
