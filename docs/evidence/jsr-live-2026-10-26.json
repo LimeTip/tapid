@@ -1,0 +1,424 @@
+{
+  "cliInstallStderr": "",
+  "cliInstallStdout": "Installed 2 package(s) in 5.79s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 2 added, 0 changed, 0 reused, 0 removed\nChanged: node_modules, tapid.lock\n",
+  "cliSha256": "9498014ab605655e81bdb51fefd49e231ff27715dbaa44530566a7962f6307ab",
+  "coldProxyAttempts": 3,
+  "coldProxyControl": "failed as required",
+  "coldProxyStderr": "Install failed during registry access.\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: not_performed (0 package(s) inspected). Application readiness is not established.\nerror: cannot fetch metadata for https://[redacted]@std/internal: Transport(Http(\"connection failure after 3 attempts: error sending request for url (https://npm.jsr.io/@jsr/std__internal)\"))\ndiagnostic: REGISTRY_TRANSPORT_FAILED\nProject files unchanged.\nCheck the registry address and network connection before retrying.\n",
+  "frozenReplay": "passed",
+  "install": "passed",
+  "lock": {
+    "linkerVersion": "0",
+    "lockfileVersion": 7,
+    "packages": {
+      "https://jsr.io|@std/internal@1.0.14|peer=-|platform=os=;cpu=;libc=": {
+        "artifactIntegrity": "sha512-JT8b/t40WcR9q0GDwRZUooY7aXeXnFal8iidE/5TckdAFtvpVAsaJ71/Xgf1SfoChs41s6CZkuCYM8toaNgdvA==",
+        "artifactUrl": "https://npm.jsr.io/~/11/@jsr/std__internal/1.0.14.tgz",
+        "dependencies": {},
+        "name": "@std/internal",
+        "platformContext": "os=;cpu=;libc=",
+        "registry": "https://jsr.io",
+        "registryIntegrityDeclared": true,
+        "treeDigest": "sha256-e6f5fe5bf5728b90271105873d32f4e84f8f5edd4ee8afa7e58fbd5872f737f1",
+        "unpackedDigest": "sha256-e6f5fe5bf5728b90271105873d32f4e84f8f5edd4ee8afa7e58fbd5872f737f1",
+        "version": "1.0.14"
+      },
+      "https://jsr.io|@std/path@1.1.6|peer=-|platform=os=;cpu=;libc=": {
+        "artifactIntegrity": "sha512-H1Cmg6z8jFyIsQbVV+vZB4eOx4k6Qg8lyUM6l7nZysj5MZumg89kb0M1bsPBTGQis3fw6mJFkJELo5+AK6oCFA==",
+        "artifactUrl": "https://npm.jsr.io/~/11/@jsr/std__path/1.1.6.tgz",
+        "dependencies": {
+          "@jsr/std__internal": "https://jsr.io|@std/internal@1.0.14|peer=-|platform=os=;cpu=;libc="
+        },
+        "dependencyAliases": {
+          "@jsr/std__internal": "@std/internal"
+        },
+        "name": "@std/path",
+        "platformContext": "os=;cpu=;libc=",
+        "registry": "https://jsr.io",
+        "registryIntegrityDeclared": true,
+        "treeDigest": "sha256-6cbe49c615d30f26425e6c2acf206489f14208d18f7f2b94b43a9277507a27c3",
+        "unpackedDigest": "sha256-6cbe49c615d30f26425e6c2acf206489f14208d18f7f2b94b43a9277507a27c3",
+        "version": "1.1.6"
+      }
+    },
+    "resolverVersion": "0",
+    "rootBindings": {
+      "@std/internal": "https://jsr.io|@std/internal@1.0.14|peer=-|platform=os=;cpu=;libc=",
+      "@std/path": "https://jsr.io|@std/path@1.1.6|peer=-|platform=os=;cpu=;libc="
+    },
+    "rootManifestDigest": "sha256-32ae865f2484d2354221059a5f9c1a78acfc26028af210dfbf901b47f4ea1626",
+    "roots": [
+      "https://jsr.io|@std/internal@1.0.14|peer=-|platform=os=;cpu=;libc=",
+      "https://jsr.io|@std/path@1.1.6|peer=-|platform=os=;cpu=;libc="
+    ]
+  },
+  "nodeExports": "passed",
+  "nodeInstallStdout": "TAPID_JSR_NODE_OK\n",
+  "nodeVersion": "v22.23.3",
+  "offlineReplay": "passed",
+  "packages": [
+    {
+      "archiveBytes": 86709,
+      "artifactUrl": "https://npm.jsr.io/~/11/@jsr/std__path/1.1.6.tgz",
+      "computedIntegrity": "sha512-H1Cmg6z8jFyIsQbVV+vZB4eOx4k6Qg8lyUM6l7nZysj5MZumg89kb0M1bsPBTGQis3fw6mJFkJELo5+AK6oCFA==",
+      "declaredIntegrity": "sha512-H1Cmg6z8jFyIsQbVV+vZB4eOx4k6Qg8lyUM6l7nZysj5MZumg89kb0M1bsPBTGQis3fw6mJFkJELo5+AK6oCFA==",
+      "generatedManifest": {
+        "_jsr_revision": 11,
+        "dependencies": {
+          "@jsr/std__internal": "^1.0.14"
+        },
+        "exports": {
+          ".": {
+            "default": "./mod.js",
+            "types": "./_dist/mod.d.ts"
+          },
+          "./basename": {
+            "default": "./basename.js",
+            "types": "./_dist/basename.d.ts"
+          },
+          "./common": {
+            "default": "./common.js",
+            "types": "./_dist/common.d.ts"
+          },
+          "./constants": {
+            "default": "./constants.js",
+            "types": "./_dist/constants.d.ts"
+          },
+          "./dirname": {
+            "default": "./dirname.js",
+            "types": "./_dist/dirname.d.ts"
+          },
+          "./extname": {
+            "default": "./extname.js",
+            "types": "./_dist/extname.d.ts"
+          },
+          "./format": {
+            "default": "./format.js",
+            "types": "./_dist/format.d.ts"
+          },
+          "./from-file-url": {
+            "default": "./from_file_url.js",
+            "types": "./_dist/from_file_url.d.ts"
+          },
+          "./glob-to-regexp": {
+            "default": "./glob_to_regexp.js",
+            "types": "./_dist/glob_to_regexp.d.ts"
+          },
+          "./is-absolute": {
+            "default": "./is_absolute.js",
+            "types": "./_dist/is_absolute.d.ts"
+          },
+          "./is-glob": {
+            "default": "./is_glob.js",
+            "types": "./_dist/is_glob.d.ts"
+          },
+          "./join": {
+            "default": "./join.js",
+            "types": "./_dist/join.d.ts"
+          },
+          "./join-globs": {
+            "default": "./join_globs.js",
+            "types": "./_dist/join_globs.d.ts"
+          },
+          "./normalize": {
+            "default": "./normalize.js",
+            "types": "./_dist/normalize.d.ts"
+          },
+          "./normalize-glob": {
+            "default": "./normalize_glob.js",
+            "types": "./_dist/normalize_glob.d.ts"
+          },
+          "./parse": {
+            "default": "./parse.js",
+            "types": "./_dist/parse.d.ts"
+          },
+          "./posix": {
+            "default": "./posix/mod.js",
+            "types": "./_dist/posix/mod.d.ts"
+          },
+          "./posix/basename": {
+            "default": "./posix/basename.js",
+            "types": "./_dist/posix/basename.d.ts"
+          },
+          "./posix/common": {
+            "default": "./posix/common.js",
+            "types": "./_dist/posix/common.d.ts"
+          },
+          "./posix/constants": {
+            "default": "./posix/constants.js",
+            "types": "./_dist/posix/constants.d.ts"
+          },
+          "./posix/dirname": {
+            "default": "./posix/dirname.js",
+            "types": "./_dist/posix/dirname.d.ts"
+          },
+          "./posix/extname": {
+            "default": "./posix/extname.js",
+            "types": "./_dist/posix/extname.d.ts"
+          },
+          "./posix/format": {
+            "default": "./posix/format.js",
+            "types": "./_dist/posix/format.d.ts"
+          },
+          "./posix/from-file-url": {
+            "default": "./posix/from_file_url.js",
+            "types": "./_dist/posix/from_file_url.d.ts"
+          },
+          "./posix/glob-to-regexp": {
+            "default": "./posix/glob_to_regexp.js",
+            "types": "./_dist/posix/glob_to_regexp.d.ts"
+          },
+          "./posix/is-absolute": {
+            "default": "./posix/is_absolute.js",
+            "types": "./_dist/posix/is_absolute.d.ts"
+          },
+          "./posix/is-glob": {
+            "default": "./posix/is_glob.js",
+            "types": "./_dist/posix/is_glob.d.ts"
+          },
+          "./posix/join": {
+            "default": "./posix/join.js",
+            "types": "./_dist/posix/join.d.ts"
+          },
+          "./posix/join-globs": {
+            "default": "./posix/join_globs.js",
+            "types": "./_dist/posix/join_globs.d.ts"
+          },
+          "./posix/normalize": {
+            "default": "./posix/normalize.js",
+            "types": "./_dist/posix/normalize.d.ts"
+          },
+          "./posix/normalize-glob": {
+            "default": "./posix/normalize_glob.js",
+            "types": "./_dist/posix/normalize_glob.d.ts"
+          },
+          "./posix/parse": {
+            "default": "./posix/parse.js",
+            "types": "./_dist/posix/parse.d.ts"
+          },
+          "./posix/relative": {
+            "default": "./posix/relative.js",
+            "types": "./_dist/posix/relative.d.ts"
+          },
+          "./posix/resolve": {
+            "default": "./posix/resolve.js",
+            "types": "./_dist/posix/resolve.d.ts"
+          },
+          "./posix/to-file-url": {
+            "default": "./posix/to_file_url.js",
+            "types": "./_dist/posix/to_file_url.d.ts"
+          },
+          "./posix/to-namespaced-path": {
+            "default": "./posix/to_namespaced_path.js",
+            "types": "./_dist/posix/to_namespaced_path.d.ts"
+          },
+          "./relative": {
+            "default": "./relative.js",
+            "types": "./_dist/relative.d.ts"
+          },
+          "./resolve": {
+            "default": "./resolve.js",
+            "types": "./_dist/resolve.d.ts"
+          },
+          "./to-file-url": {
+            "default": "./to_file_url.js",
+            "types": "./_dist/to_file_url.d.ts"
+          },
+          "./to-namespaced-path": {
+            "default": "./to_namespaced_path.js",
+            "types": "./_dist/to_namespaced_path.d.ts"
+          },
+          "./types": {
+            "default": "./types.js",
+            "types": "./_dist/types.d.ts"
+          },
+          "./windows": {
+            "default": "./windows/mod.js",
+            "types": "./_dist/windows/mod.d.ts"
+          },
+          "./windows/basename": {
+            "default": "./windows/basename.js",
+            "types": "./_dist/windows/basename.d.ts"
+          },
+          "./windows/common": {
+            "default": "./windows/common.js",
+            "types": "./_dist/windows/common.d.ts"
+          },
+          "./windows/constants": {
+            "default": "./windows/constants.js",
+            "types": "./_dist/windows/constants.d.ts"
+          },
+          "./windows/dirname": {
+            "default": "./windows/dirname.js",
+            "types": "./_dist/windows/dirname.d.ts"
+          },
+          "./windows/extname": {
+            "default": "./windows/extname.js",
+            "types": "./_dist/windows/extname.d.ts"
+          },
+          "./windows/format": {
+            "default": "./windows/format.js",
+            "types": "./_dist/windows/format.d.ts"
+          },
+          "./windows/from-file-url": {
+            "default": "./windows/from_file_url.js",
+            "types": "./_dist/windows/from_file_url.d.ts"
+          },
+          "./windows/glob-to-regexp": {
+            "default": "./windows/glob_to_regexp.js",
+            "types": "./_dist/windows/glob_to_regexp.d.ts"
+          },
+          "./windows/is-absolute": {
+            "default": "./windows/is_absolute.js",
+            "types": "./_dist/windows/is_absolute.d.ts"
+          },
+          "./windows/is-glob": {
+            "default": "./windows/is_glob.js",
+            "types": "./_dist/windows/is_glob.d.ts"
+          },
+          "./windows/join": {
+            "default": "./windows/join.js",
+            "types": "./_dist/windows/join.d.ts"
+          },
+          "./windows/join-globs": {
+            "default": "./windows/join_globs.js",
+            "types": "./_dist/windows/join_globs.d.ts"
+          },
+          "./windows/normalize": {
+            "default": "./windows/normalize.js",
+            "types": "./_dist/windows/normalize.d.ts"
+          },
+          "./windows/normalize-glob": {
+            "default": "./windows/normalize_glob.js",
+            "types": "./_dist/windows/normalize_glob.d.ts"
+          },
+          "./windows/parse": {
+            "default": "./windows/parse.js",
+            "types": "./_dist/windows/parse.d.ts"
+          },
+          "./windows/relative": {
+            "default": "./windows/relative.js",
+            "types": "./_dist/windows/relative.d.ts"
+          },
+          "./windows/resolve": {
+            "default": "./windows/resolve.js",
+            "types": "./_dist/windows/resolve.d.ts"
+          },
+          "./windows/to-file-url": {
+            "default": "./windows/to_file_url.js",
+            "types": "./_dist/windows/to_file_url.d.ts"
+          },
+          "./windows/to-namespaced-path": {
+            "default": "./windows/to_namespaced_path.js",
+            "types": "./_dist/windows/to_namespaced_path.d.ts"
+          }
+        },
+        "homepage": "https://jsr.io/@std/path",
+        "name": "@jsr/std__path",
+        "type": "module",
+        "version": "1.1.6"
+      },
+      "metadataUrl": "https://npm.jsr.io/@jsr/std__path",
+      "selectedMetadata": {
+        "dependencies": {
+          "@jsr/std__internal": "^1.0.14"
+        },
+        "description": "Utilities for working with file system paths",
+        "dist": {
+          "integrity": "sha512-H1Cmg6z8jFyIsQbVV+vZB4eOx4k6Qg8lyUM6l7nZysj5MZumg89kb0M1bsPBTGQis3fw6mJFkJELo5+AK6oCFA==",
+          "shasum": "3228C54E0D00A3E591CBD8CA43B26031580E40FF",
+          "tarball": "https://npm.jsr.io/~/11/@jsr/std__path/1.1.6.tgz"
+        },
+        "name": "@jsr/std__path",
+        "version": "1.1.6"
+      },
+      "treeDigest": "sha256-6cbe49c615d30f26425e6c2acf206489f14208d18f7f2b94b43a9277507a27c3"
+    },
+    {
+      "archiveBytes": 30484,
+      "artifactUrl": "https://npm.jsr.io/~/11/@jsr/std__internal/1.0.14.tgz",
+      "computedIntegrity": "sha512-JT8b/t40WcR9q0GDwRZUooY7aXeXnFal8iidE/5TckdAFtvpVAsaJ71/Xgf1SfoChs41s6CZkuCYM8toaNgdvA==",
+      "declaredIntegrity": "sha512-JT8b/t40WcR9q0GDwRZUooY7aXeXnFal8iidE/5TckdAFtvpVAsaJ71/Xgf1SfoChs41s6CZkuCYM8toaNgdvA==",
+      "generatedManifest": {
+        "_jsr_revision": 11,
+        "dependencies": {},
+        "exports": {
+          ".": {
+            "default": "./mod.js",
+            "types": "./_dist/mod.d.ts"
+          },
+          "./assertion-state": {
+            "default": "./assertion_state.js",
+            "types": "./_dist/assertion_state.d.ts"
+          },
+          "./build-message": {
+            "default": "./build_message.js",
+            "types": "./_dist/build_message.d.ts"
+          },
+          "./diff": {
+            "default": "./diff.js",
+            "types": "./_dist/diff.d.ts"
+          },
+          "./diff-str": {
+            "default": "./diff_str.js",
+            "types": "./_dist/diff_str.d.ts"
+          },
+          "./format": {
+            "default": "./format.js",
+            "types": "./_dist/format.d.ts"
+          },
+          "./os": {
+            "default": "./os.js",
+            "types": "./_dist/os.d.ts"
+          },
+          "./styles": {
+            "default": "./styles.js",
+            "types": "./_dist/styles.d.ts"
+          },
+          "./truncate-build-message": {
+            "default": "./truncate_build_message.js",
+            "types": "./_dist/truncate_build_message.d.ts"
+          },
+          "./types": {
+            "default": "./types.js",
+            "types": "./_dist/types.d.ts"
+          }
+        },
+        "homepage": "https://jsr.io/@std/internal",
+        "name": "@jsr/std__internal",
+        "type": "module",
+        "version": "1.0.14"
+      },
+      "metadataUrl": "https://npm.jsr.io/@jsr/std__internal",
+      "selectedMetadata": {
+        "dependencies": {},
+        "description": "INTERNAL: The internal package for @std. Do not use this directly.",
+        "dist": {
+          "integrity": "sha512-JT8b/t40WcR9q0GDwRZUooY7aXeXnFal8iidE/5TckdAFtvpVAsaJ71/Xgf1SfoChs41s6CZkuCYM8toaNgdvA==",
+          "shasum": "FD5201A396047B23CA32D0E304D89F6524581CF1",
+          "tarball": "https://npm.jsr.io/~/11/@jsr/std__internal/1.0.14.tgz"
+        },
+        "name": "@jsr/std__internal",
+        "version": "1.0.14"
+      },
+      "treeDigest": "sha256-e6f5fe5bf5728b90271105873d32f4e84f8f5edd4ee8afa7e58fbd5872f737f1"
+    }
+  ],
+  "platform": "macos",
+  "replayProxyAttempts": 0,
+  "replayReceipts": [
+    {
+      "mode": "--offline",
+      "nodeStdout": "TAPID_JSR_NODE_OK\n",
+      "stderr": "",
+      "stdout": "Replayed lockfile: 2 package(s) in 0.34s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
+    },
+    {
+      "mode": "--frozen",
+      "nodeStdout": "TAPID_JSR_NODE_OK\n",
+      "stderr": "",
+      "stdout": "Replayed lockfile: 2 package(s) in 0.40s\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: complete (2 package(s) inspected). Application readiness is not established.\nLock selections: 0 added, 0 changed, 2 reused, 0 removed\nChanged: node_modules\n"
+    }
+  ],
+  "retrievedAtUnixSeconds": 1793074636
+}

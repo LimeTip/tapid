@@ -17,16 +17,33 @@ const step = (owner: string, name: string) => {
 };
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const testCacheInputs = '        with:\n          key: source-install-release-v1\n';
+const testCacheCondition = "        if: runner.os != 'Windows'\n";
 const assertTestBootstrap = (ci: string) => {
   for (const id of ['test', 'windows-msvc-cross-check', 'nextest', 'coverage', 'security', 'package']) {
     const inputs = id === 'test' ? testCacheInputs.trimEnd() : '';
     assert.equal(step(job(ci, id), 'Cache Rust build artifacts').trimEnd(),
-      `      - name: Cache Rust build artifacts\n        uses: ${pin}` + (inputs ? `\n${inputs}` : ''), `${id} cache inputs must remain exactly scoped`);
+      `      - name: Cache Rust build artifacts\n${id === 'test' ? testCacheCondition : ''}        uses: ${pin}` + (inputs ? `\n${inputs}` : ''), `${id} cache inputs must remain exactly scoped`);
   }
 };
 
 test('Test bootstrap has the stable release namespace and no other cache input changes', async () => {
   assertTestBootstrap(await source('.github/workflows/ci.yml'));
+});
+
+test('Test bootstrap requires caching only on non-Windows native legs', async () => {
+  const ci = await source('.github/workflows/ci.yml'); assertTestBootstrap(ci);
+  const native = job(ci, 'test'); const cache = step(native, 'Cache Rust build artifacts');
+  for (const condition of ['', '        if: true\n', '        if: false\n', "        if: runner.os == 'Windows'\n"]) {
+    const changed = cache.replace(testCacheCondition, condition);
+    assert.notEqual(changed, cache, `vacuous condition mutation: ${condition}`);
+    assert.throws(() => assertTestBootstrap(ci.replace(native, native.replace(cache, changed))));
+  }
+  for (const id of ['windows-msvc-cross-check', 'nextest', 'coverage', 'security', 'package']) {
+    const owner = job(ci, id); const other = step(owner, 'Cache Rust build artifacts');
+    const changed = other.replace('        uses:', `${testCacheCondition}        uses:`);
+    assert.notEqual(changed, other, `vacuous condition propagation: ${id}`);
+    assert.throws(() => assertTestBootstrap(ci.replace(owner, owner.replace(other, changed))), undefined, id);
+  }
 });
 
 test('Test bootstrap rejects omitted, wrong, unstable and overbroad keys', async () => {
@@ -188,13 +205,14 @@ const assertInstallerCache = (ci: string) => {
   }
   assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 4, 'compiler target is confined to two installer and two guard steps');
   // Strip the separately validated guard steps, then normalize the approved Test bootstrap,
-  // pin migration and two installer compiler env blocks.
+  // non-Windows cache condition, pin migration and two installer compiler env blocks.
   // All actual install commands, source-ref, fresh destination, help, uninstall,
   // native tests, standard Node prerequisites and TypeScript helpers retain the merged snapshot.
   // The reviewed native Windows key/write acceptance step is included in this snapshot.
   assertTestBootstrap(ci);
   const withoutGuard = guardNames.reduce((text, name) => text.replace(step(native, name), ''), native);
-  const original = withoutGuard.replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
+  const cache = step(withoutGuard, 'Cache Rust build artifacts');
+  const original = withoutGuard.replace(cache, cache.replace(testCacheCondition, '')).replace(testCacheInputs, '').replaceAll(compilerEnv, '').replaceAll(pin, 'Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2');
   assert.equal(digest(original), 'f530830f1bfb6c648463c728c67aba74bc522041b4bb1555ac1fc2cf4c48c13a');
 };
 const assertSourceInstallers = (sh: string, ps: string) => {

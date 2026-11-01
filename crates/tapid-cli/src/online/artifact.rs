@@ -149,6 +149,29 @@ impl ArtifactFetcher<'_> {
                 id.name, id.version, id.registry
             ))
         })?;
+        if id.registry.as_str() == JSR && !record.fixture {
+            let root = crate::filesystem::tree::package_content_root(&temp)?;
+            let manifest = crate::filesystem::read::read_bounded_file(
+                &root.join("package.json"),
+                tapid_manifest::MAX_MANIFEST_BYTES,
+            )
+            .map_err(|_| {
+                OperationalError::new(
+                    ErrorKind::RegistryMetadata,
+                    "generated JSR archive manifest must be a regular file no larger than 32 MiB",
+                )
+            })?;
+            tapid_registry_client::validate_jsr_artifact_manifest(
+                id.name.as_str(),
+                &id.version.to_string(),
+                &record.artifact,
+                &manifest,
+            )
+            .map_err(|error| {
+                OperationalError::from_source(ErrorKind::RegistryMetadata, error)
+                    .context("JSR archive does not match selected artifact")
+            })?;
+        }
         let tree_digest: ArtifactDigest = canonical_tree_digest(&temp)
             .map_err(|e| OperationalError::from_source(ErrorKind::Archive, e))?
             .parse()

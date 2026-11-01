@@ -32,6 +32,9 @@ when project declarations change.
 
 Installation of the existing locked graph with matching project declarations and
 no lock changes. Frozen installation permits retrieval of missing pinned content.
+Graphs containing JSR are an exception: every locked tree, including npm
+dependencies, must already be locally verified. See
+[ADR 0012](docs/adr/0012-local-only-jsr-replay.md).
 
 ### Offline installation
 

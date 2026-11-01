@@ -1,0 +1,346 @@
+{
+  "retrievedAt": "2026-10-26T21:01:48.613Z",
+  "scope": "Official metadata and archive acquisition only; no Tapid install, Node export execution, or replay success is established by this receipt.",
+  "packages": [
+    {
+      "metadataUrl": "https://npm.jsr.io/@jsr%2Fstd__path",
+      "selectedMetadata": {
+        "name": "@jsr/std__path",
+        "version": "1.1.6",
+        "description": "Utilities for working with file system paths",
+        "dist": {
+          "tarball": "https://npm.jsr.io/~/11/@jsr/std__path/1.1.6.tgz",
+          "shasum": "3228C54E0D00A3E591CBD8CA43B26031580E40FF",
+          "integrity": "sha512-H1Cmg6z8jFyIsQbVV+vZB4eOx4k6Qg8lyUM6l7nZysj5MZumg89kb0M1bsPBTGQis3fw6mJFkJELo5+AK6oCFA=="
+        },
+        "dependencies": {
+          "@jsr/std__internal": "^1.0.14"
+        }
+      },
+      "computedIntegrity": "sha512-H1Cmg6z8jFyIsQbVV+vZB4eOx4k6Qg8lyUM6l7nZysj5MZumg89kb0M1bsPBTGQis3fw6mJFkJELo5+AK6oCFA==",
+      "archiveBytes": 86709,
+      "generatedManifest": {
+        "name": "@jsr/std__path",
+        "version": "1.1.6",
+        "homepage": "https://jsr.io/@std/path",
+        "type": "module",
+        "dependencies": {
+          "@jsr/std__internal": "^1.0.14"
+        },
+        "exports": {
+          ".": {
+            "types": "./_dist/mod.d.ts",
+            "default": "./mod.js"
+          },
+          "./basename": {
+            "types": "./_dist/basename.d.ts",
+            "default": "./basename.js"
+          },
+          "./common": {
+            "types": "./_dist/common.d.ts",
+            "default": "./common.js"
+          },
+          "./constants": {
+            "types": "./_dist/constants.d.ts",
+            "default": "./constants.js"
+          },
+          "./dirname": {
+            "types": "./_dist/dirname.d.ts",
+            "default": "./dirname.js"
+          },
+          "./extname": {
+            "types": "./_dist/extname.d.ts",
+            "default": "./extname.js"
+          },
+          "./format": {
+            "types": "./_dist/format.d.ts",
+            "default": "./format.js"
+          },
+          "./from-file-url": {
+            "types": "./_dist/from_file_url.d.ts",
+            "default": "./from_file_url.js"
+          },
+          "./glob-to-regexp": {
+            "types": "./_dist/glob_to_regexp.d.ts",
+            "default": "./glob_to_regexp.js"
+          },
+          "./is-absolute": {
+            "types": "./_dist/is_absolute.d.ts",
+            "default": "./is_absolute.js"
+          },
+          "./is-glob": {
+            "types": "./_dist/is_glob.d.ts",
+            "default": "./is_glob.js"
+          },
+          "./join": {
+            "types": "./_dist/join.d.ts",
+            "default": "./join.js"
+          },
+          "./join-globs": {
+            "types": "./_dist/join_globs.d.ts",
+            "default": "./join_globs.js"
+          },
+          "./normalize": {
+            "types": "./_dist/normalize.d.ts",
+            "default": "./normalize.js"
+          },
+          "./normalize-glob": {
+            "types": "./_dist/normalize_glob.d.ts",
+            "default": "./normalize_glob.js"
+          },
+          "./parse": {
+            "types": "./_dist/parse.d.ts",
+            "default": "./parse.js"
+          },
+          "./posix": {
+            "types": "./_dist/posix/mod.d.ts",
+            "default": "./posix/mod.js"
+          },
+          "./posix/basename": {
+            "types": "./_dist/posix/basename.d.ts",
+            "default": "./posix/basename.js"
+          },
+          "./posix/common": {
+            "types": "./_dist/posix/common.d.ts",
+            "default": "./posix/common.js"
+          },
+          "./posix/constants": {
+            "types": "./_dist/posix/constants.d.ts",
+            "default": "./posix/constants.js"
+          },
+          "./posix/dirname": {
+            "types": "./_dist/posix/dirname.d.ts",
+            "default": "./posix/dirname.js"
+          },
+          "./posix/extname": {
+            "types": "./_dist/posix/extname.d.ts",
+            "default": "./posix/extname.js"
+          },
+          "./posix/format": {
+            "types": "./_dist/posix/format.d.ts",
+            "default": "./posix/format.js"
+          },
+          "./posix/from-file-url": {
+            "types": "./_dist/posix/from_file_url.d.ts",
+            "default": "./posix/from_file_url.js"
+          },
+          "./posix/glob-to-regexp": {
+            "types": "./_dist/posix/glob_to_regexp.d.ts",
+            "default": "./posix/glob_to_regexp.js"
+          },
+          "./posix/is-absolute": {
+            "types": "./_dist/posix/is_absolute.d.ts",
+            "default": "./posix/is_absolute.js"
+          },
+          "./posix/is-glob": {
+            "types": "./_dist/posix/is_glob.d.ts",
+            "default": "./posix/is_glob.js"
+          },
+          "./posix/join": {
+            "types": "./_dist/posix/join.d.ts",
+            "default": "./posix/join.js"
+          },
+          "./posix/join-globs": {
+            "types": "./_dist/posix/join_globs.d.ts",
+            "default": "./posix/join_globs.js"
+          },
+          "./posix/normalize": {
+            "types": "./_dist/posix/normalize.d.ts",
+            "default": "./posix/normalize.js"
+          },
+          "./posix/normalize-glob": {
+            "types": "./_dist/posix/normalize_glob.d.ts",
+            "default": "./posix/normalize_glob.js"
+          },
+          "./posix/parse": {
+            "types": "./_dist/posix/parse.d.ts",
+            "default": "./posix/parse.js"
+          },
+          "./posix/relative": {
+            "types": "./_dist/posix/relative.d.ts",
+            "default": "./posix/relative.js"
+          },
+          "./posix/resolve": {
+            "types": "./_dist/posix/resolve.d.ts",
+            "default": "./posix/resolve.js"
+          },
+          "./posix/to-file-url": {
+            "types": "./_dist/posix/to_file_url.d.ts",
+            "default": "./posix/to_file_url.js"
+          },
+          "./posix/to-namespaced-path": {
+            "types": "./_dist/posix/to_namespaced_path.d.ts",
+            "default": "./posix/to_namespaced_path.js"
+          },
+          "./relative": {
+            "types": "./_dist/relative.d.ts",
+            "default": "./relative.js"
+          },
+          "./resolve": {
+            "types": "./_dist/resolve.d.ts",
+            "default": "./resolve.js"
+          },
+          "./to-file-url": {
+            "types": "./_dist/to_file_url.d.ts",
+            "default": "./to_file_url.js"
+          },
+          "./to-namespaced-path": {
+            "types": "./_dist/to_namespaced_path.d.ts",
+            "default": "./to_namespaced_path.js"
+          },
+          "./types": {
+            "types": "./_dist/types.d.ts",
+            "default": "./types.js"
+          },
+          "./windows": {
+            "types": "./_dist/windows/mod.d.ts",
+            "default": "./windows/mod.js"
+          },
+          "./windows/basename": {
+            "types": "./_dist/windows/basename.d.ts",
+            "default": "./windows/basename.js"
+          },
+          "./windows/common": {
+            "types": "./_dist/windows/common.d.ts",
+            "default": "./windows/common.js"
+          },
+          "./windows/constants": {
+            "types": "./_dist/windows/constants.d.ts",
+            "default": "./windows/constants.js"
+          },
+          "./windows/dirname": {
+            "types": "./_dist/windows/dirname.d.ts",
+            "default": "./windows/dirname.js"
+          },
+          "./windows/extname": {
+            "types": "./_dist/windows/extname.d.ts",
+            "default": "./windows/extname.js"
+          },
+          "./windows/format": {
+            "types": "./_dist/windows/format.d.ts",
+            "default": "./windows/format.js"
+          },
+          "./windows/from-file-url": {
+            "types": "./_dist/windows/from_file_url.d.ts",
+            "default": "./windows/from_file_url.js"
+          },
+          "./windows/glob-to-regexp": {
+            "types": "./_dist/windows/glob_to_regexp.d.ts",
+            "default": "./windows/glob_to_regexp.js"
+          },
+          "./windows/is-absolute": {
+            "types": "./_dist/windows/is_absolute.d.ts",
+            "default": "./windows/is_absolute.js"
+          },
+          "./windows/is-glob": {
+            "types": "./_dist/windows/is_glob.d.ts",
+            "default": "./windows/is_glob.js"
+          },
+          "./windows/join": {
+            "types": "./_dist/windows/join.d.ts",
+            "default": "./windows/join.js"
+          },
+          "./windows/join-globs": {
+            "types": "./_dist/windows/join_globs.d.ts",
+            "default": "./windows/join_globs.js"
+          },
+          "./windows/normalize": {
+            "types": "./_dist/windows/normalize.d.ts",
+            "default": "./windows/normalize.js"
+          },
+          "./windows/normalize-glob": {
+            "types": "./_dist/windows/normalize_glob.d.ts",
+            "default": "./windows/normalize_glob.js"
+          },
+          "./windows/parse": {
+            "types": "./_dist/windows/parse.d.ts",
+            "default": "./windows/parse.js"
+          },
+          "./windows/relative": {
+            "types": "./_dist/windows/relative.d.ts",
+            "default": "./windows/relative.js"
+          },
+          "./windows/resolve": {
+            "types": "./_dist/windows/resolve.d.ts",
+            "default": "./windows/resolve.js"
+          },
+          "./windows/to-file-url": {
+            "types": "./_dist/windows/to_file_url.d.ts",
+            "default": "./windows/to_file_url.js"
+          },
+          "./windows/to-namespaced-path": {
+            "types": "./_dist/windows/to_namespaced_path.d.ts",
+            "default": "./windows/to_namespaced_path.js"
+          }
+        },
+        "_jsr_revision": 11
+      }
+    },
+    {
+      "metadataUrl": "https://npm.jsr.io/@jsr%2Fstd__internal",
+      "selectedMetadata": {
+        "name": "@jsr/std__internal",
+        "version": "1.0.14",
+        "description": "INTERNAL: The internal package for @std. Do not use this directly.",
+        "dist": {
+          "tarball": "https://npm.jsr.io/~/11/@jsr/std__internal/1.0.14.tgz",
+          "shasum": "FD5201A396047B23CA32D0E304D89F6524581CF1",
+          "integrity": "sha512-JT8b/t40WcR9q0GDwRZUooY7aXeXnFal8iidE/5TckdAFtvpVAsaJ71/Xgf1SfoChs41s6CZkuCYM8toaNgdvA=="
+        },
+        "dependencies": {}
+      },
+      "computedIntegrity": "sha512-JT8b/t40WcR9q0GDwRZUooY7aXeXnFal8iidE/5TckdAFtvpVAsaJ71/Xgf1SfoChs41s6CZkuCYM8toaNgdvA==",
+      "archiveBytes": 30484,
+      "generatedManifest": {
+        "name": "@jsr/std__internal",
+        "version": "1.0.14",
+        "homepage": "https://jsr.io/@std/internal",
+        "type": "module",
+        "dependencies": {},
+        "exports": {
+          ".": {
+            "types": "./_dist/mod.d.ts",
+            "default": "./mod.js"
+          },
+          "./assertion-state": {
+            "types": "./_dist/assertion_state.d.ts",
+            "default": "./assertion_state.js"
+          },
+          "./build-message": {
+            "types": "./_dist/build_message.d.ts",
+            "default": "./build_message.js"
+          },
+          "./diff-str": {
+            "types": "./_dist/diff_str.d.ts",
+            "default": "./diff_str.js"
+          },
+          "./diff": {
+            "types": "./_dist/diff.d.ts",
+            "default": "./diff.js"
+          },
+          "./format": {
+            "types": "./_dist/format.d.ts",
+            "default": "./format.js"
+          },
+          "./os": {
+            "types": "./_dist/os.d.ts",
+            "default": "./os.js"
+          },
+          "./styles": {
+            "types": "./_dist/styles.d.ts",
+            "default": "./styles.js"
+          },
+          "./truncate-build-message": {
+            "types": "./_dist/truncate_build_message.d.ts",
+            "default": "./truncate_build_message.js"
+          },
+          "./types": {
+            "types": "./_dist/types.d.ts",
+            "default": "./types.js"
+          }
+        },
+        "_jsr_revision": 11
+      }
+    }
+  ]
+}

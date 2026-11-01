@@ -918,6 +918,7 @@ fn perform_install(
             &registry_config,
             registry_fixture,
             &project_dir,
+            frozen,
         )?
     {
         session.mutated = true;

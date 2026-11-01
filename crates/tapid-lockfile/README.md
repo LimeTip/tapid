@@ -48,6 +48,11 @@ Schema 7 preserves alias names separately from actual package identities. `rootB
 
 CLI frozen installation can hydrate missing trees using recorded artifact URLs and registry-declared integrity provenance. It verifies archive integrity and the pinned tree digest without changing the graph or serialized lock. Offline requires existing verified trees. Locks lacking these archive fields can still replay warm content under the documented schema rules, but cannot hydrate cold content.
 
+Locks containing a logical JSR source are a deliberate exception: all locked
+trees, including npm dependencies, must be locally verified before frozen
+hydration begins. Missing or corrupt content fails without artifact retrieval.
+See [ADR 0012](../../docs/adr/0012-local-only-jsr-replay.md).
+
 Schema 9 adds ordered `derivedHooks` records with exact recipe keys, verified output tree digests, and store-local HMAC attestations. Source archive integrity and `treeDigest` retain their original meanings. Replay validates every recipe and output before selecting the final installed tree. Older schemas cannot contain derived-hook records. See [dependency lifecycle scripts](../../docs/dependency-lifecycle.md).
 
 `ImportedNpmLockfile` provides the separate schema 8 offline npm v3 import contract. It preserves validated npm placements, root and member-level links to declared workspace members, separate member registry entry points with local or hoisted placements, member manifest digests, and constraints. It records tree digests only after artifact verification, with each receipt bound to the imported tarball URL and integrity value. Ordinary `Lockfile` uses schema 7, or schema 9 with approved lifecycle outputs. Imported graph parsing uses existing semver/alias requirement validation without invoking resolution. `graph()` returns a shared `Arc<ImportedNpmGraph>` cached after validation; the cache is never serialized, and deserialized data is validated before caching. See [migration and rollback](../../docs/npm-lockfile-import.md) and [ADR 0008](../../docs/adr/0008-offline-npm-lock-import.md).
