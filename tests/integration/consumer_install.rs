@@ -335,3 +335,114 @@ fn local_npm_and_jsr_contracts_cover_replay_and_security_boundaries() {
     );
     assert!(fixture.url("/demo").starts_with("http://127.0.0.1:"));
 }
+
+#[test]
+fn contained_directory_capture_uses_verified_store_and_source_qualified_layout() {
+    use tapid_core::{PackageInstanceId, PackageSource, PeerContext, PlatformContext};
+    use tapid_linker::{
+        InstanceKey, NamedDependency, NamedLayoutInput, PackageInstance, VerifiedTreeReference,
+        plan_named_layout,
+    };
+
+    let project = TempProject::new("directory-consumer").unwrap();
+    project
+        .write(
+            "vendor/tool/package.json",
+            br#"{"name":"tool","version":"1.0.0","main":"index.js","bin":{"tool":"bin.js"}}"#,
+        )
+        .unwrap();
+    project
+        .write("vendor/tool/index.js", b"module.exports = 345;")
+        .unwrap();
+    project
+        .write(
+            "vendor/tool/bin.js",
+            b"#!/usr/bin/env node\nconsole.log(345);\n",
+        )
+        .unwrap();
+    let capture = || {
+        tapid_archive::capture_directory(
+            project.path(),
+            "vendor/tool",
+            &["node_modules", ".tapid", ".git"],
+            ArchiveLimits::default(),
+        )
+        .unwrap()
+    };
+    let archive = capture();
+    let archive_digest = sha256_digest(&archive);
+    let source = PackageSource::directory("vendor/tool", archive_digest.clone()).unwrap();
+    let other = PackageSource::directory("vendor/other", archive_digest.clone()).unwrap();
+    assert_ne!(
+        source, other,
+        "identical content retains its declared origin"
+    );
+    let unpack = project.path().join("unpack");
+    extract_to(
+        &archive,
+        ArchiveFormat::Tar,
+        &unpack,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    let tree_digest: ArtifactDigest = canonical_tree_digest(&unpack).unwrap().parse().unwrap();
+    let store = Store::new(project.path().join("store"));
+    store
+        .ingest_archive(
+            &archive,
+            &archive_digest,
+            &tree_digest,
+            ArchiveFormat::Tar,
+            ArchiveLimits::default(),
+        )
+        .unwrap();
+    let snapshot = store.verified_tree_snapshot(&tree_digest).unwrap();
+    let tree_root = store.verified_tree_path(&tree_digest).unwrap();
+    let instance = PackageInstance {
+        id: PackageInstanceId::from_source(
+            source,
+            "tool".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        ),
+        peer_context: PeerContext::default(),
+        platform_context: PlatformContext::new(None, None, None).unwrap(),
+        tree: VerifiedTreeReference::new(tree_digest.as_str(), &tree_root).unwrap(),
+    };
+    let key = InstanceKey::from(&instance);
+    let layout = plan_named_layout(
+        tapid_linker::ManagedRoot::new(project.path().join("node_modules")).unwrap(),
+        NamedLayoutInput {
+            instances: vec![instance],
+            root_dependencies: vec![NamedDependency {
+                name: "alias".parse().unwrap(),
+                child: key,
+            }],
+            dependency_edges: vec![],
+        },
+        if cfg!(windows) {
+            tapid_linker::Platform::Windows
+        } else {
+            tapid_linker::Platform::Unix
+        },
+    )
+    .unwrap();
+    assert!(!layout.entries.is_empty());
+    assert_eq!(
+        std::fs::read(tree_root.join("index.js")).unwrap(),
+        b"module.exports = 345;"
+    );
+    assert_eq!(
+        capture(),
+        archive,
+        "verified installation leaves source identity unchanged"
+    );
+    project
+        .write("vendor/tool/index.js", b"module.exports = 346;")
+        .unwrap();
+    assert_ne!(sha256_digest(&capture()), archive_digest);
+    assert_eq!(
+        std::fs::read(tree_root.join("index.js")).unwrap(),
+        b"module.exports = 345;"
+    );
+    drop(snapshot);
+}

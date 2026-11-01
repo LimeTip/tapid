@@ -306,7 +306,8 @@ fn perform_install(
         ManifestMutation::AddPackage(package) => (None, Some(package)),
         ManifestMutation::ReplaceManifest(manifest) => (Some(manifest), None),
     };
-    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline);
+    let offline = matches!(mode, InstallMode::Offline | InstallMode::CiOffline)
+        || matches!(mode, InstallMode::Update(request) if request.offline);
     let ci = matches!(mode, InstallMode::Ci | InstallMode::CiOffline);
     let frozen = matches!(mode, InstallMode::Frozen) || ci;
     if overrides.enabled() && (offline || frozen || allow_unverified_registry_artifacts) {
@@ -369,26 +370,41 @@ fn perform_install(
         ));
     }
     let preflight_manifest = read_manifest(&project_dir.join("package.json"))?;
-    online::validate_manifest_roots(&project_dir, &preflight_manifest)?;
+    let captures = online::CapturedSources::default();
+    let store = Store::new(match store_root {
+        Some(path) => path.to_owned(),
+        None => {
+            default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
+        }
+    });
+    online::validate_manifest_roots(
+        &project_dir,
+        &preflight_manifest,
+        &project_dir.join("package.json"),
+        &captures,
+    )?;
+    online::validate_directory_store(
+        &project_dir,
+        &preflight_manifest,
+        &project_dir.join("package.json"),
+        store.root(),
+    )?;
     if let Some(updated) = manifest_override {
-        online::validate_manifest_roots(&project_dir, updated.updated)?;
+        online::validate_manifest_roots(&project_dir, updated.updated, &manifest_path, &captures)?;
+        online::validate_directory_store(
+            &project_dir,
+            updated.updated,
+            &manifest_path,
+            store.root(),
+        )?;
     }
     if let Some(spec) = package {
         let (name, requirement) = package_spec::parse(spec);
-        if manifest_path != project_dir.join("package.json")
-            && online::copied_declaration(requirement)?.is_some()
-        {
-            return Err(OperationalError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "copied workspace member dependency '{name}' is unsupported; declare copied artifacts at the project root"
-                ),
-            ));
-        }
         let candidate = read_manifest(&manifest_path)?
             .with_dependency(name, requirement)
             .map_err(|error| OperationalError::from_source(ErrorKind::InvalidRequest, error))?;
-        online::validate_manifest_roots(&project_dir, &candidate)?;
+        online::validate_manifest_roots(&project_dir, &candidate, &manifest_path, &captures)?;
+        online::validate_directory_store(&project_dir, &candidate, &manifest_path, store.root())?;
     }
     let lock_path = project_dir.join("tapid.lock");
     // Preserve preflight rejection without activating anything. Pending recovery
@@ -406,6 +422,7 @@ fn perform_install(
     session.lock = Some(ActivationLock::acquire(&project_dir)?);
     let activation_lock = session.lock.as_ref().expect("project lock acquired");
     if activation_lock.recovered {
+        captures.clear();
         session
             .outcome
             .warnings
@@ -501,12 +518,12 @@ fn perform_install(
     } else {
         read_manifest(&root_manifest_path)?
     };
-    let store = Store::new(match store_root {
-        Some(path) => path.to_owned(),
-        None => {
-            default_store_root().map_err(|error| OperationalError::new(ErrorKind::Store, error))?
-        }
-    });
+    online::validate_directory_store(
+        &project_dir,
+        &root_manifest,
+        &project_dir.join("package.json"),
+        store.root(),
+    )?;
     let mut replayable = true;
     if let Some(lock) = &previous_lock {
         match lock.validate_replay(lock.root_manifest_digest()) {
@@ -531,8 +548,8 @@ fn perform_install(
         }
         _ => None,
     };
-    let preserve =
-        matches!(mode, InstallMode::Online) || update.is_some_and(|request| request.named);
+    let preserve = matches!(mode, InstallMode::Online)
+        || update.is_some_and(|request| request.named || request.offline);
     let replay_existing = if preserve && update.is_none() {
         if let Some(lock) = &previous_lock {
             let registry_config = crate::registry::RegistryConfig::load(&project_dir)
@@ -542,6 +559,7 @@ fn perform_install(
                 lock,
                 &registry_config,
                 &lifecycle_policy,
+                &captures,
             )? && replayable
                 && !overrides.enabled()
         } else {
@@ -553,7 +571,10 @@ fn perform_install(
     if imported.is_some() {
         session.outcome.lifecycle.as_mut().unwrap().reason = Some("imported_lock");
     }
-    if imported.is_some() || !offline && !frozen && !replay_existing {
+    if imported.is_some()
+        || update.is_some_and(|request| request.offline)
+        || !offline && !frozen && !replay_existing
+    {
         let registry_config = crate::registry::RegistryConfig::load(&project_dir)
             .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
         let online::PreparedInstall {
@@ -589,6 +610,7 @@ fn perform_install(
                     None
                 },
                 update,
+                &captures,
                 &mut report_replay_progress,
             )?
         };
@@ -768,7 +790,15 @@ fn perform_install(
         })?;
     let registry_config = crate::registry::RegistryConfig::load(&project_dir)
         .map_err(|error| OperationalError::new(ErrorKind::RegistryConfiguration, error))?;
-    let workspace = online::workspace_materialization(&project_dir, &registry_config)?;
+    let discovered = tapid_manifest::Workspace::discover_typed(&project_dir)
+        .map_err(|error| OperationalError::from_source(ErrorKind::InvalidData, error))?;
+    let workspace = online::workspace_materialization_with_captures(
+        &project_dir,
+        &registry_config,
+        None,
+        &discovered,
+        &captures,
+    )?;
     if !online::workspace_matches_lock(&workspace, &lock) {
         return Err(
             "workspace membership or member manifest changed; regenerate tapid.lock with an online install"
@@ -812,7 +842,7 @@ fn perform_install(
     }
     let mut workspace_plan = online::WorkspaceInstallPlan::from(workspace.links);
     workspace_plan
-        .include_owned_members()
+        .include_copied_member_roots(&project_dir, &lock)
         .map_err(|e| OperationalError::new(ErrorKind::Materialization, e))?;
     let journal = session.journal.as_mut().expect("replay journal created");
     journal
@@ -821,7 +851,7 @@ fn perform_install(
     journal
         .set_store_root(store.root())
         .map_err(|error| OperationalError::new(ErrorKind::Transaction, error))?;
-    online::validate_locked_files(&project_dir, &lock)?;
+    online::validate_locked_files_with_captures(&project_dir, &lock, &captures)?;
     if !online::validate_locked_routes(&lock, &registry_config)? {
         return Err(OperationalError::new(
             ErrorKind::Lockfile,
@@ -851,6 +881,7 @@ fn perform_install(
             &registry_config,
             registry_fixture,
             &project_dir,
+            &captures,
             |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         )?;
         let mut lifecycle_snapshots = Vec::new();
@@ -873,6 +904,7 @@ fn perform_install(
             .publish_for_lifecycle(&journal.coordinator_path())
             .map_err(OperationalError::from)?;
         crate::filesystem::activation::test_crash_at("store_published");
+        workspace_plan.include_copied_members(&project_dir, &lock, &input)?;
         let mut layout = online::PreparedLayout {
             input,
             trees,
@@ -918,6 +950,7 @@ fn perform_install(
             &registry_config,
             registry_fixture,
             &project_dir,
+            &captures,
         )?
     {
         session.mutated = true;
@@ -940,6 +973,7 @@ fn perform_install(
         |completed, total| report_replay_progress(Progress::Replay(completed, total)),
         publication.as_ref(),
     )?;
+    workspace_plan.include_copied_members(&project_dir, &lock, &input)?;
     super::dependency_scripts::apply(
         &project_dir,
         &lifecycle_policy,

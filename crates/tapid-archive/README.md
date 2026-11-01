@@ -35,3 +35,31 @@ declarations above 1 KiB, and local PAX declarations above 64 KiB before reading
 those bodies.
 The complete logical validation pass bounds all remaining parser metadata and
 honors PAX size overrides when checking entry and aggregate sizes.
+
+`capture_directory` is a directory snapshot capability on Unix and Windows. The
+CLI's incomplete root snapshot integration consumes it through ordinary archive
+verification. It accepts an explicit project root, a normalized
+relative source path, relative forbidden managed roots, and archive limits.
+Unix uses descriptor-relative no-follow opens. Windows opens no-follow native
+handles and retains the full ancestor chain without write or delete sharing,
+preventing replacement and in-place reparse retargeting during traversal. Active
+Windows writers cause capture to fail closed. Windows roots must be local drive
+paths with no reparse components. Managed roots, fixed exclusions, and reserved
+metadata use Windows ordinal case-insensitive comparisons on Windows. Source
+components using DOS short-name aliases are rejected.
+Both backends reject links and special or
+multiply linked files. It includes dotfiles and empty directories, excludes real
+`.git` and `node_modules` directories, and requires a regular root `package.json` of at most
+1 MiB. Entries are sorted by path bytes and emitted as GNU tar with zero ownership
+and timestamps, normalized executable modes, deterministic GNU long-name records,
+and two terminating zero blocks. Existing entry/path/payload limits and the final
+archive byte ceiling apply. Returned bytes still require normal archive/store
+verification; capture does not publish artifacts.
+
+Observable identity, size, mode, and timestamp changes abort capture. This is not
+an atomic filesystem snapshot: callers must stop writers for a coherent view,
+and same-length concurrent writes can evade metadata comparisons. Unsupported
+platforms return `Unsupported`. Native Windows execution and CLI-level
+declaration/overlap/replay policies remain required before directory dependencies
+can be advertised. The long-name wire-format golden fixture fixes complete archive
+bytes independently of the production tar builder.

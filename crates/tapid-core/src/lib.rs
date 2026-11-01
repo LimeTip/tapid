@@ -599,6 +599,63 @@ mod copied_source_tests {
     use super::*;
 
     #[test]
+    fn directory_sources_preserve_versioned_origin_and_artifact_pin() {
+        let pin = format!("sha256-{}", "a".repeat(64));
+        let identity = format!("directory-v1:vendor/pkg#{pin}");
+        let source: PackageSource = identity.parse().unwrap();
+        assert_eq!(source.as_str(), identity);
+        assert_eq!(source.artifact_digest(), Some(pin.as_str()));
+        assert!(source.registry().is_none());
+        assert!(source.file_parts().is_none());
+        assert!(source.git_parts().is_none());
+        assert_eq!(source.directory_parts(), Some(("vendor/pkg", pin.as_str())));
+        assert_eq!(
+            PackageSource::directory("vendor/pkg", pin.parse().unwrap()).unwrap(),
+            source
+        );
+        assert_ne!(
+            source,
+            format!("directory-v1:other/pkg#{pin}")
+                .parse::<PackageSource>()
+                .unwrap()
+        );
+        assert_ne!(
+            source,
+            format!("file:vendor/pkg#{pin}")
+                .parse::<PackageSource>()
+                .unwrap()
+        );
+        assert_ne!(
+            source,
+            "https://registry.npmjs.org"
+                .parse::<PackageSource>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn directory_sources_reject_noncanonical_paths_versions_and_pins() {
+        let pin = format!("sha256-{}", "a".repeat(64));
+        for path in [
+            "", ".", "..", "../pkg", "/pkg", "C:/pkg", "a\\b", "a//b", "a/./b", "a/../b", "a/",
+            "a|b", "a#b", "a\nb",
+        ] {
+            assert!(
+                PackageSource::directory(path, pin.parse().unwrap()).is_err(),
+                "{path:?}"
+            );
+        }
+        for identity in [
+            format!("directory-v2:vendor/pkg#{pin}"),
+            format!("directory-v1:vendor/pkg#{}", pin.to_uppercase()),
+            "directory-v1:vendor/pkg#sha256-abcd".into(),
+            "directory-v1:vendor/pkg".into(),
+        ] {
+            assert!(identity.parse::<PackageSource>().is_err(), "{identity}");
+        }
+    }
+
+    #[test]
     fn copied_sources_preserve_immutable_identity_and_reject_secret_urls() {
         let digest: ArtifactDigest = format!("sha256-{}", "a".repeat(64)).parse().unwrap();
         let file = PackageSource::file("vendor/pkg.tgz", digest.clone()).unwrap();

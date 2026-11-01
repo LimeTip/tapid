@@ -47,6 +47,9 @@ pub(crate) struct RemoveArgs {
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct UpdateArgs {
+    /// Resolve using locally recorded metadata and verified content without network access.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub(crate) offline: bool,
     /// Resolve and report dependency changes without project or cache writes. May fetch registry metadata.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -205,6 +208,7 @@ pub(crate) fn update(args: UpdateArgs, json: bool) -> ExitCode {
             None
         };
         let mode = crate::application::install::InstallMode::Update(UpdateRequest {
+            offline: args.offline,
             plan: &plan,
             target: &selection.manifest_path,
             named: !args.packages.is_empty(),
@@ -568,6 +572,7 @@ mod stale_update_tests {
                 }),
                 store_root: Some(&project.path().join("store")),
                 mode: InstallMode::Update(UpdateRequest {
+                    offline: false,
                     plan: &plan,
                     target: &path,
                     named: true,

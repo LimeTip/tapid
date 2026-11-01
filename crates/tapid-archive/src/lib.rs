@@ -4,6 +4,8 @@
 
 mod tree_validation;
 pub use tree_validation::validate_tree;
+mod capture;
+pub use capture::capture_directory;
 
 use sha2::{Digest, Sha256};
 use std::cell::Cell;

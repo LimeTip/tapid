@@ -1511,9 +1511,11 @@ version = "0.0.6"
 dependencies = [
  "flate2",
  "hex",
+ "rustix",
  "sha2",
  "tapid-test-support",
  "tar",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

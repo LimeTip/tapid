@@ -13,7 +13,7 @@ Deterministic lockfile models and canonical JSON serialization for Tapid.
 
 The current contract provides:
 
-- Schema version `7`, `9` when approved dependency hooks produce derived trees, or `10` when copied sources are present, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
+- Schema version `7`, `9` when approved dependency hooks produce derived trees, `10` when root file/Git copied sources are present, or `11` for directory snapshots or member copied bindings, root manifest digest, resolver/linker compatibility versions, and exact canonical direct-root package keys.
 - Exact package name and version keys, registry origin, canonical padded SHA-512 SRI, required schema 6 registry-integrity provenance, SHA-256 unpacked digest, and explicit `treeDigest` replay identity.
 - Deterministic package ordering through `BTreeMap` serialization.
 - HTTPS registry and artifact URL validation.
@@ -60,6 +60,14 @@ keeps them distinct from registry and workspace sources. The historical JSON
 `registryIntegrityDeclared`. Archive SHA-512 and tree digests remain mandatory.
 Older schemas reject copied entries. See [copied dependency behavior](../../docs/compatibility.md#copied-file-tarballs-and-pinned-git-dependencies).
 
+Schema 11 adds `directory-v1` snapshot identities and workspace-member copied
+bindings. Member bindings reuse each workspace package's named dependency edges,
+preserving separate root and member selections for the same local name. Both
+directory entries and member copied bindings require schema 11; inserting later
+file/Git records retains that schema. Root file/Git-only locks retain schema 10.
+The CLI resolves member declarations relative to their declaring manifests and
+retains these bindings during replay and scoped updates.
+
 ## Persisted graph observations
 
 `GraphSnapshot::from_bytes` validates an explicit native or imported snapshot using
@@ -71,7 +79,7 @@ platform selection. Other formats remain unsupported; raw npm locks are never
 implicitly imported.
 
 Instances retain the full source-qualified key, including peer/platform contexts,
-workspace identity and copied file/Git pins. Stable `instance-v1-` SHA-256
+workspace identity and copied file/Git/directory pins. Stable `instance-v1-` SHA-256
 references hash a domain-separated full identity; display strings never determine
 identity. Snapshot digests identify the original bytes, so whitespace can change a
 snapshot digest without changing its semantic comparison.

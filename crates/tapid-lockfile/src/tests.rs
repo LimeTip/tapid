@@ -2,6 +2,139 @@ use super::{LocalWorkspaceSource, LockedPackage, LockedWorkspacePackage, Lockfil
 use proptest::prelude::*;
 
 #[test]
+fn copied_member_bindings_require_schema_11_and_keep_declarations_distinct() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let fixture = package_fixture();
+    for git in [false, true] {
+        for batch in [false, true] {
+            let mut packages = Vec::new();
+            for path in ["root", "first", "second"] {
+                let source = if git {
+                    format!(
+                        "git+https://example.test/{path}.git#{}!{digest}",
+                        "b".repeat(40)
+                    )
+                } else {
+                    format!("file:vendor/{path}.tar#{digest}")
+                };
+                packages.push(
+                    LockedPackage::new_with_provenance(
+                        &source,
+                        "tool",
+                        "1.0.0",
+                        fixture.artifact_integrity(),
+                        &digest,
+                        super::RegistryIntegrityProvenance::LocallyComputed,
+                    )
+                    .unwrap(),
+                );
+            }
+            let keys: Vec<_> = packages.iter().map(LockedPackage::key).collect();
+            let mut members = Vec::new();
+            for (name, target) in [("first", &keys[1]), ("second", &keys[2])] {
+                let mut member = LockedWorkspacePackage::new(
+                    LocalWorkspaceSource::new(&format!("packages/{name}"), name, "1.0.0").unwrap(),
+                    &digest,
+                )
+                .unwrap();
+                member.add_dependency("tool", target).unwrap();
+                members.push(member);
+            }
+            let member_keys: Vec<_> = members.iter().map(LockedWorkspacePackage::key).collect();
+            let mut lock = Lockfile::new(&digest).unwrap();
+            if batch {
+                lock.insert_graph(packages, members).unwrap();
+            } else {
+                lock.insert_packages(packages).unwrap();
+                for member in members {
+                    lock.insert_workspace_package(member).unwrap();
+                }
+            }
+            lock.set_roots([
+                keys[0].clone(),
+                member_keys[0].clone(),
+                member_keys[1].clone(),
+            ])
+            .unwrap();
+            lock.set_root_bindings([("tool".into(), keys[0].clone())].into())
+                .unwrap();
+            let serialized = lock.to_json().unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(value["lockfileVersion"], 11);
+            let replay = Lockfile::from_json(&serialized).unwrap();
+            assert_eq!(replay.root_bindings()["tool"], keys[0]);
+            assert_eq!(
+                replay.workspace_packages()[&member_keys[0]].dependencies()["tool"],
+                keys[1]
+            );
+            assert_eq!(
+                replay.workspace_packages()[&member_keys[1]].dependencies()["tool"],
+                keys[2]
+            );
+            assert_eq!(replay.to_json().unwrap(), serialized);
+            for version in [7, 9, 10] {
+                value["lockfileVersion"] = version.into();
+                assert!(
+                    Lockfile::from_json(&value.to_string()).is_err(),
+                    "schema {version}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn directory_sources_require_schema_11_and_preserve_origin() {
+    let digest = format!("sha256-{}", "a".repeat(64));
+    let source = format!("directory-v1:vendor/tool#{digest}");
+    let original = package_fixture();
+    let package = LockedPackage::new_with_provenance(
+        &source,
+        "tool",
+        "1.0.0",
+        original.artifact_integrity(),
+        &digest,
+        super::RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    let key = package.key();
+    let parsed: super::LockfilePackageKey = key.parse().unwrap();
+    assert_eq!(parsed.to_string(), key);
+    let mut lock = Lockfile::new(&digest).unwrap();
+    lock.insert_package(package).unwrap();
+    lock.set_roots([key.clone()]).unwrap();
+    let serialized = lock.to_json().unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(value["lockfileVersion"], 11);
+    assert_eq!(
+        Lockfile::from_json(&serialized).unwrap().to_json().unwrap(),
+        serialized
+    );
+    for version in [4, 5, 6, 7, 9, 10] {
+        value["lockfileVersion"] = version.into();
+        assert!(
+            Lockfile::from_json(&value.to_string()).is_err(),
+            "schema {version}"
+        );
+    }
+    value["lockfileVersion"] = 11.into();
+    value["packages"][&key]["registryIntegrityDeclared"] = true.into();
+    assert!(Lockfile::from_json(&value.to_string()).is_err());
+    let file = LockedPackage::new_with_provenance(
+        &format!("file:vendor/tool.tar#{digest}"),
+        "tool",
+        "1.0.0",
+        original.artifact_integrity(),
+        &digest,
+        super::RegistryIntegrityProvenance::LocallyComputed,
+    )
+    .unwrap();
+    lock.insert_package(file).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&lock.to_json().unwrap()).unwrap();
+    assert_eq!(value["lockfileVersion"], 11);
+}
+
+#[test]
 fn copied_sources_require_schema_10_and_cannot_claim_registry_authentication() {
     let digest = format!("sha256-{}", "a".repeat(64));
     let source = format!("file:vendor/tool.tgz#{digest}");

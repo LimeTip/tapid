@@ -55,6 +55,7 @@ impl SavePolicy {
 
 #[derive(Clone, Copy)]
 pub(crate) struct UpdateRequest<'a> {
+    pub(crate) offline: bool,
     pub(crate) plan: &'a LifecyclePlan,
     pub(crate) target: &'a Path,
     pub(crate) named: bool,

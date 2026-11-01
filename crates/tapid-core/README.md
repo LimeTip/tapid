@@ -33,3 +33,8 @@ Git identities contain a credential-free canonical HTTPS repository, full commit
 and archive SHA-256. `PackageInstanceId::from_source` preserves these identities
 through resolution and layout; `new` retains its registry-origin interface.
 `GitRepository` validates repository URLs without admitting them as registry origins.
+
+The domain model also recognizes `directory-v1:<project-relative-path>#<sha256>`
+for accepted canonical directory snapshots. Directory origins remain distinct
+from file, registry, and other directory origins even when artifact bytes match.
+This identity support alone does not enable directory declarations in the CLI.
