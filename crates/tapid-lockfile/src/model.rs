@@ -1374,6 +1374,11 @@ impl LockedPackage {
         self.registry_integrity_declared
     }
 
+    /// Historical unpacked evidence, distinct from the explicit replay tree.
+    pub fn unpacked_digest(&self) -> &str {
+        &self.unpacked_digest
+    }
+
     pub fn tree_digest(&self) -> &str {
         &self.tree_digest
     }
