@@ -7,6 +7,9 @@ use tapid_linker::{ManagedRoot, PackageInstance};
 
 #[cfg(test)]
 thread_local! {
+    static PRE_COPY_DIGEST_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FINAL_DIGEST_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PLACEMENT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BYTE_COPY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CLONE_CALL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -89,6 +92,8 @@ pub(crate) fn materialize_stage_with_workspace_links(
             .is_none()
             && !sources_are_verified_snapshots
         {
+            #[cfg(test)]
+            PRE_COPY_DIGEST_COUNT.update(|count| count + 1);
             let actual = tapid_archive::canonical_tree_digest(tree).map_err(|e| e.to_string())?;
             if actual != expected {
                 return Err(format!(
@@ -111,11 +116,18 @@ pub(crate) fn materialize_stage_with_workspace_links(
         complete_materialization_step(
             index + 1,
             materialization_total,
-            || copy_tree(source, &target),
+            || {
+                copy_tree(source, &target)?;
+                #[cfg(test)]
+                PLACEMENT_COUNT.update(|count| count + 1);
+                Ok::<_, String>(())
+            },
             &mut progress,
         )?;
     }
     for (tree, expected) in verified_sources {
+        #[cfg(test)]
+        FINAL_DIGEST_COUNT.update(|count| count + 1);
         let after = tapid_archive::canonical_tree_digest(&tree).map_err(|e| e.to_string())?;
         if after != expected {
             return Err(format!(
@@ -1521,3 +1533,7 @@ mod copy_tests {
         let _ = fs::remove_dir_all(root);
     }
 }
+
+#[cfg(test)]
+#[path = "materialization_tests.rs"]
+mod materialization_tests;

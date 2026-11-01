@@ -2048,3 +2048,231 @@ tools = [{{name="sh", path={}, digest="sha256-{}"}}]
         );
     }
 }
+
+#[test]
+fn materialization_final_failure_preserves_committed_install() {
+    let (project, fixture) = project_with_fixture("final-verification-rollback", INTEGRITY);
+    project.write("package.json", br#"{"name":"app","version":"1.0.0","dependencies":{"plugin":"1.0.0","alias":"npm:plugin@1.0.0"}}"#).unwrap();
+    let home = tapid_test_support::TempHome::new("final-verification-rollback").unwrap();
+    let store = home.path().join("store");
+    let request = || InstallRequest {
+        project_dir: project.path(),
+        target_manifest_path: Path::new("package.json"),
+        mutation: ManifestMutation::None,
+        store_root: Some(&store),
+        mode: InstallMode::Frozen,
+        registry_fixture: Some(&fixture),
+        allow_unverified_registry_artifacts: false,
+    };
+    let mut initial = request();
+    initial.mode = InstallMode::Online;
+    run(initial, |_| {}).unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
+    let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let installed = fs::read(project.path().join("node_modules/plugin/package.json")).unwrap();
+    assert_eq!(
+        fs::read(project.path().join("node_modules/alias/package.json")).unwrap(),
+        installed
+    );
+    let mut snapshots = Vec::new();
+    let mut completed = false;
+    let failure = run(request(), |event| {
+        if let Progress::Materialization(done, total) = event {
+            completed |= done == total;
+            if done == 1 && done < total {
+                for entry in fs::read_dir(store.join(".staging")).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("replay-tree-")
+                    {
+                        let tree = entry.path().join("tree");
+                        assert!(tree.is_dir());
+                        let manifest = tree.join("package/package.json");
+                        let mut bytes = fs::read(&manifest).unwrap();
+                        bytes.push(b'\n');
+                        fs::write(manifest, bytes).unwrap();
+                        snapshots.push(tree);
+                    }
+                }
+                assert!(
+                    !snapshots.is_empty(),
+                    "must mutate real owned replay snapshots"
+                );
+            }
+        }
+    })
+    .unwrap_err();
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("tree changed while replaying"),
+        "{failure:?}"
+    );
+    assert!(!completed);
+    assert_eq!(failure.outcome.state, ChangeState::RolledBack);
+    assert!(snapshots.iter().all(|tree| !tree.exists()));
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    for name in ["plugin", "alias"] {
+        assert_eq!(
+            fs::read(
+                project
+                    .path()
+                    .join(format!("node_modules/{name}/package.json"))
+            )
+            .unwrap(),
+            installed
+        );
+    }
+    assert!(!fs::read_dir(project.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tapid-install-stage-")
+    }));
+    // A fresh replay must still succeed: private mutation cannot poison the store.
+    run(request(), |_| {}).unwrap();
+    for name in ["plugin", "alias"] {
+        assert_eq!(
+            fs::read(
+                project
+                    .path()
+                    .join(format!("node_modules/{name}/package.json"))
+            )
+            .unwrap(),
+            installed
+        );
+    }
+    assert!(!fs::read_dir(store.join(".staging")).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("replay-tree-")
+    }));
+}
+
+#[test]
+fn materialization_final_failure_cleans_accumulated_workspace_stages() {
+    use tapid_core::{PackageInstanceId, PeerContext, PlatformContext};
+    use tapid_linker::{InstanceKey, LayoutInput, PackageInstance, VerifiedTreeReference};
+    for snapshot in [false, true] {
+        let project = TempProject::new("final-verification-workspace").unwrap();
+        let home = tapid_test_support::TempHome::new("final-verification-workspace").unwrap();
+        let store = tapid_store::Store::new(home.path().join("store"));
+        let project_root = fs::canonicalize(project.path()).unwrap();
+        let source = project_root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("package.json"),
+            br#"{"name":"shared","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let digest = tapid_archive::canonical_tree_digest(&source).unwrap();
+        let owner = if snapshot {
+            let digest = digest.parse().unwrap();
+            store.activate_verified_tree(&digest, &source).unwrap();
+            Some(store.verified_tree_snapshot(&digest).unwrap())
+        } else {
+            None
+        };
+        let source = owner
+            .as_ref()
+            .map_or(source, |owner| owner.path().to_owned());
+        let instances = ["one", "two"]
+            .into_iter()
+            .map(|name| PackageInstance {
+                id: PackageInstanceId::new(
+                    "https://registry.example".parse().unwrap(),
+                    name.parse().unwrap(),
+                    "1.0.0".parse().unwrap(),
+                ),
+                peer_context: PeerContext::default(),
+                platform_context: PlatformContext::new(None, None, None).unwrap(),
+                tree: VerifiedTreeReference::new(&digest, &source).unwrap(),
+            })
+            .collect::<Vec<_>>();
+        let input: NamedLayoutInput = LayoutInput {
+            root_dependencies: instances.iter().map(InstanceKey::from).collect(),
+            instances,
+            dependency_edges: Vec::new(),
+        }
+        .into();
+        let member = project_root.as_path().join("packages/member");
+        for root in [project_root.as_path(), member.as_path()] {
+            fs::create_dir_all(root.join("node_modules")).unwrap();
+            fs::write(root.join("node_modules/previous"), b"committed").unwrap();
+            fs::write(root.join("package.json"), br#"{"name":"app"}"#).unwrap();
+            fs::write(root.join("tapid.lock"), b"previous lock").unwrap();
+            fs::write(root.join(".tapid-managed"), b"tapid-managed-v1\n").unwrap();
+        }
+        let workspace = online::WorkspaceInstallPlan {
+            links: Default::default(),
+            members: BTreeMap::from([(
+                member.clone(),
+                online::WorkspaceMemberInstall {
+                    input: input.clone(),
+                    links: Default::default(),
+                },
+            )]),
+        };
+        let activation = ActivationLock::acquire(project_root.as_path()).unwrap();
+        let mut member_completed = false;
+        let mut mutated = false;
+        let error = materialize_with_lock(
+            project_root.as_path(),
+            input,
+            BTreeMap::from([("shared".to_owned(), source.clone())]),
+            workspace,
+            snapshot,
+            &activation,
+            false,
+            |event| {
+                if let Progress::Materialization(done, total) = event {
+                    if done == total {
+                        member_completed = true;
+                    } else if member_completed {
+                        fs::write(source.join("mutation.txt"), b"changed").unwrap();
+                        mutated = true;
+                    }
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(member_completed && mutated, "{error}");
+        assert!(
+            error.to_string().contains("tree changed while replaying"),
+            "{error}"
+        );
+        for root in [project_root.as_path(), member.as_path()] {
+            assert_eq!(
+                fs::read(root.join("node_modules/previous")).unwrap(),
+                b"committed"
+            );
+            assert_eq!(fs::read(root.join("tapid.lock")).unwrap(), b"previous lock");
+            assert_eq!(
+                fs::read(root.join("package.json")).unwrap(),
+                br#"{"name":"app"}"#
+            );
+            assert!(!fs::read_dir(root).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tapid-install-stage-")
+            }));
+        }
+        if snapshot {
+            assert!(source.exists());
+            drop(owner);
+            assert!(!source.exists());
+        }
+    }
+}
