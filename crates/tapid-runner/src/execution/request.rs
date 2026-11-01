@@ -48,15 +48,35 @@ pub(super) fn windows_handle_identity(handle: isize) -> Result<(u32, u64), Execu
 }
 
 /// Canonical executable identity shared by declared tools and trusted Node bindings.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(super) struct TrustedNodeRuntime {
     pub(super) path: PathBuf,
     digest: [u8; 32],
     #[cfg(unix)]
     pub(super) identity: NativeIdentity,
+    #[cfg(unix)]
+    _file: std::sync::Arc<fs::File>,
     #[cfg(windows)]
     pin: std::sync::Arc<WindowsRuntimePin>,
 }
+
+impl PartialEq for TrustedNodeRuntime {
+    fn eq(&self, other: &Self) -> bool {
+        if self.path != other.path || self.digest != other.digest {
+            return false;
+        }
+        #[cfg(unix)]
+        if self.identity != other.identity {
+            return false;
+        }
+        #[cfg(windows)]
+        if self.pin != other.pin {
+            return false;
+        }
+        true
+    }
+}
+impl Eq for TrustedNodeRuntime {}
 
 impl TrustedNodeRuntime {
     pub(super) fn checked(path: &Path) -> Result<Self, ExecutionError> {
@@ -69,7 +89,7 @@ impl TrustedNodeRuntime {
         Self::checked_executable(path)
     }
 
-    fn checked_executable(path: &Path) -> Result<Self, ExecutionError> {
+    pub(super) fn checked_executable(path: &Path) -> Result<Self, ExecutionError> {
         let canonical = canonical_path(path, "trusted executable")?;
         if canonical != path {
             return Err(invalid_request("trusted executable path must be canonical"));
@@ -134,6 +154,7 @@ impl TrustedNodeRuntime {
             Ok(Self {
                 path: canonical,
                 digest,
+                _file: std::sync::Arc::new(file),
                 identity: NativeIdentity {
                     device: metadata.dev(),
                     inode: metadata.ino(),
@@ -184,7 +205,16 @@ impl TrustedNodeRuntime {
         self.validate_identity()
     }
 
-    fn validate_identity(&self) -> Result<(), ExecutionError> {
+    pub(super) fn digest_string(&self) -> String {
+        let hex: String = self
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("sha256-{hex}")
+    }
+
+    pub(super) fn validate_identity(&self) -> Result<(), ExecutionError> {
         let current = Self::checked_executable(&self.path).map_err(|_| {
             ExecutionError::new(
                 ExecutionErrorCategory::PolicyViolation,
@@ -225,6 +255,7 @@ fn is_node_executable_name(path: &Path) -> bool {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
+    dependency_authority: Option<PreparedDependencyAuthority>,
     #[cfg(windows)]
     pub(super) windows_compatibility:
         Option<std::sync::Arc<platform_backend::compatibility::Binding>>,
@@ -248,6 +279,7 @@ pub struct ExecutionRequest {
 impl ExecutionRequest {
     pub fn builder(program: impl Into<OsString>) -> ExecutionRequestBuilder {
         ExecutionRequestBuilder {
+            dependency_authority: None,
             program: program.into(),
             arguments: Vec::new(),
             executable_search_paths: Vec::new(),
@@ -286,6 +318,9 @@ impl ExecutionRequest {
             .as_path()
     }
     pub(super) fn validate_trusted_node_runtime(&self) -> Result<(), ExecutionError> {
+        if let Some(authority) = &self.dependency_authority {
+            authority.validate_executables(&self.verified_executables)?;
+        }
         // Check secondary tools even when macOS uses a reserved Node binding.
         for executable in &self.verified_executables {
             executable.validate_identity()?;
@@ -616,6 +651,7 @@ impl ExecutionRequest {
 /// Builder for an [`ExecutionRequest`].
 #[derive(Clone, Debug)]
 pub struct ExecutionRequestBuilder {
+    dependency_authority: Option<PreparedDependencyAuthority>,
     program: OsString,
     arguments: Vec<OsString>,
     executable_search_paths: Vec<PathBuf>,
@@ -631,6 +667,11 @@ pub struct ExecutionRequestBuilder {
 }
 
 impl ExecutionRequestBuilder {
+    /// Binds execution to the same prepared inputs used for the output recipe.
+    pub fn dependency_authority(mut self, authority: &PreparedDependencyAuthority) -> Self {
+        self.dependency_authority = Some(authority.clone());
+        self
+    }
     pub fn arg(mut self, argument: impl Into<OsString>) -> Self {
         self.arguments.push(argument.into());
         self
@@ -782,12 +823,7 @@ impl ExecutionRequestBuilder {
         let mut verified_executables = Vec::new();
         for (path, expected) in &self.verified_executables {
             let executable = TrustedNodeRuntime::checked_executable(path)?;
-            let actual = executable
-                .digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            if expected != &format!("sha256-{actual}") {
+            if expected != &executable.digest_string() {
                 return Err(ExecutionError::new(
                     ExecutionErrorCategory::PolicyViolation,
                     "declared executable bytes do not match the approved digest",
@@ -801,6 +837,7 @@ impl ExecutionRequestBuilder {
             .map(TrustedNodeRuntime::checked)
             .transpose()?;
         let request = ExecutionRequest {
+            dependency_authority: self.dependency_authority,
             #[cfg(windows)]
             windows_compatibility: None,
             #[cfg(target_os = "macos")]

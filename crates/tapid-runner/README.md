@@ -1,5 +1,21 @@
 # tapid-runner
 
+Authenticated dependency recipes use `PreparedDependencyAuthority`: the runner
+prepares declared tools before output lookup, and the CLI passes the same opaque
+value into `ExecutionRequestBuilder::dependency_authority`. Preparation uses the
+existing bounded executable verifier. Identity is versioned and preserves tool
+order; identity use and prelaunch validation reject changed source resolution or
+bytes, missing tools, and execution snapshots with different names or digests.
+Clones retain file handles, including Windows write/delete exclusion pins.
+Unix held handles do not prevent host writes or pathname races.
+
+The system identity retains the existing Linux contract and is reused within one
+installation. This interface does not establish a complete Windows runtime input
+set: Windows preparation rejects before tool inspection or derived-output lookup.
+Registry, ARAP, broker, profile and dynamic-loader authority remain unresolved;
+explicit unsafe overrides still produce no authenticated outputs. The new
+identity domain intentionally invalidates recipes made with the older CLI hash.
+
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/tapid-runner)](https://crates.io/crates/tapid-runner)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-runner)](https://crates.io/crates/tapid-runner)

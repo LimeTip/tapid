@@ -1,9 +1,11 @@
+mod dependency_authority;
 mod policy_ceiling;
 mod request;
 mod uncontained;
 #[cfg(any(windows, test))]
 #[path = "windows_evidence.rs"]
 mod windows_evidence;
+pub use dependency_authority::PreparedDependencyAuthority;
 #[cfg(target_os = "macos")]
 use request::TrustedNodeRuntime;
 #[cfg(any(windows, test))]

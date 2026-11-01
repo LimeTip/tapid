@@ -241,6 +241,25 @@ native Windows workspace test suite and requires its guard setup. Compilation
 or a zero-test macOS invocation is not an enforcement receipt. This checkpoint
 does not establish #157 project-script acceptance or #274 integrated adoption.
 
+Dependency recipe preparation now uses the runner-owned
+`PreparedDependencyAuthority` value. Its versioned identity includes ordered
+declared-tool names, source paths and verified digests plus the existing Linux
+system identity. The CLI prepares it before derived-output lookup and attaches
+the same value to the execution request; request validation checks every copied
+execution tool against it. Clones retain source handles and prelaunch validation
+rejects changed source resolution or bytes. Portable tests cover secondary-tool
+mutation, missing/replaced execution bindings, source-link retargeting, ordering,
+backend identity changes and tool-count bounds. Unix handles do not exclude host
+writes; this preserves the existing Linux trusted-host assumptions.
+
+This is declared-tool coupling, not qualification of the Windows inventory.
+Windows preparation still rejects before inspecting declared tools or looking up
+authenticated output. Ordered runtime locations, candidate absence states,
+loader configuration, registry/broker enforcement and a complete retained dynamic
+input set remain unimplemented. The existing native Windows lane must evaluate
+the authority fixtures before a supported configuration can be selected. No
+Windows authentication or separate project-script acceptance claim is added.
+
 The AAP/ARAP executable controls additionally resolve `CreateProcessW` through
 `GetProcAddress`, bypassing application import adaptation. The host must launch
 the undeclared fixture, and both contained root and descendant must launch their
