@@ -14,6 +14,36 @@ struct Measurements {
     previous_failure: Option<Vec<String>>,
 }
 
+/// Initialize, validate, then stop on the precise no-overwrite refusal.
+#[test]
+fn agent_initialization_stops_without_retrying_existing_manifest() {
+    let project = TempProject::new("agent-init").unwrap();
+    let home = TempHome::new("agent-init").unwrap();
+    let mut measurements = Measurements::default();
+    let created = measurements.call(&project, &home, &["--json", "init"]);
+    assert_eq!(created["operation"], "init");
+    assert_eq!(created["changes"]["state"], "committed");
+    let bytes = fs::read(project.path().join("package.json")).unwrap();
+    let manifest: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(manifest["private"], true);
+    let validated = measurements.call(&project, &home, &["--json", "manifest", "validate"]);
+    assert_eq!(
+        validated["data"],
+        serde_json::json!({"action":"validate","valid":true})
+    );
+    let refused = measurements.call(&project, &home, &["--json", "init"]);
+    assert_eq!(refused["errors"][0]["code"], "MANIFEST_ALREADY_EXISTS");
+    assert_eq!(refused["changes"]["state"], "unchanged");
+    assert_eq!(refused["changes"]["paths"], serde_json::json!([]));
+    assert_eq!(refused["retry"], "after_correction");
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        bytes
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+    measurements.finish(3);
+}
+
 impl Measurements {
     /// Run one isolated CLI call and record its protocol, byte, and retry measurements.
     fn call(&mut self, project: &TempProject, home: &TempHome, args: &[&str]) -> Value {

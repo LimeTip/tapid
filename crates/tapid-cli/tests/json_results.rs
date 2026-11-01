@@ -11,7 +11,11 @@ use tapid_test_support::{TempHome, TempProject};
 fn invoke(project: &TempProject, args: &[&str]) -> (std::process::Output, serde_json::Value) {
     let home = TempHome::new("json-result").unwrap();
     let output = command(project, &home, args).output().unwrap();
-    let value = serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one JSON result on stdout");
+    assert!(output.stdout.ends_with(b"\n"));
+    assert!(value.is_object());
+    assert_eq!(value["schema_version"], 1);
     assert!(output.stderr.is_empty(), "{output:?}");
     (output, value)
 }
@@ -631,6 +635,11 @@ fn json_init_preserves_custom_manifest() {
     assert_eq!(result["errors"].as_array().unwrap().len(), 1);
     assert_eq!(result["errors"][0]["code"], "MANIFEST_ALREADY_EXISTS");
     assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["retry"], "after_correction");
+    assert_eq!(
+        result["project"],
+        serde_json::json!(fs::canonicalize(project.path()).unwrap())
+    );
     assert_eq!(result["changes"]["files"], serde_json::json!([]));
     assert_eq!(result["changes"]["paths"], serde_json::json!([]));
     assert_eq!(
@@ -655,6 +664,15 @@ fn json_init_unavailable_targets_leave_files_unchanged() {
         assert_eq!(result["changes"]["state"], "unchanged");
         assert_eq!(result["changes"]["files"], serde_json::json!([]));
         assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+        assert_eq!(result["retry"], "after_correction");
+        if target == "missing" {
+            assert!(result["project"].is_null());
+        } else {
+            assert_eq!(
+                result["project"],
+                serde_json::json!(fs::canonicalize(project.path().join(target)).unwrap())
+            );
+        }
         assert!(!project.path().join("missing").exists());
         assert!(!project.path().join("package.json").exists());
         assert_eq!(
@@ -730,6 +748,144 @@ fn json_init_selects_explicit_existing_directory() {
         assert_eq!(manifest["version"], "0.1.0");
         assert_eq!(manifest["private"], true);
         assert!(!project.path().join("package.json").exists());
+    }
+}
+
+#[test]
+fn json_init_invalid_name_retains_selected_project_identity() {
+    let project = TempProject::new("json-init-invalid-name").unwrap();
+    let directory = project.path().join("invalid name");
+    fs::create_dir(&directory).unwrap();
+    let home = TempHome::new("json-init-invalid-name").unwrap();
+    let output = command(&project, &home, &["--json", "init"])
+        .arg(&directory)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    assert!(output.stdout.ends_with(b"\n"));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["operation"], "init");
+    assert_eq!(result["errors"][0]["code"], "MANIFEST_INVALID");
+    assert_eq!(
+        result["project_path"],
+        serde_json::json!({"encoding":"utf8", "value":fs::canonicalize(&directory).unwrap()})
+    );
+    assert_eq!(result["retry"], "after_correction");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 0);
+}
+
+#[test]
+fn json_validation_and_ci_reject_missing_and_nonregular_inputs_without_changes() {
+    for nonregular in [false, true] {
+        let project = TempProject::new("json-input-shape").unwrap();
+        if nonregular {
+            project.write("package.json/KEEP", b"preserved").unwrap();
+        }
+        let (output, result) = invoke(&project, &["--json", "manifest", "validate"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(result["operation"], "manifest");
+        assert_eq!(result["errors"][0]["code"], "MANIFEST_INVALID");
+        assert_eq!(result["changes"]["state"], "unchanged");
+        assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+        assert_eq!(result["retry"], "after_correction");
+        if nonregular {
+            assert_eq!(
+                fs::read(project.path().join("package.json/KEEP")).unwrap(),
+                b"preserved"
+            );
+            fs::remove_dir_all(project.path().join("package.json")).unwrap();
+        }
+        let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+        project.write("package.json", manifest).unwrap();
+        if nonregular {
+            project.write("tapid.lock/KEEP", b"preserved").unwrap();
+        }
+        for (args, operation) in [
+            (vec!["--json", "lock", "verify"], "lock"),
+            (
+                vec!["--json", "ci", "--offline", "--store-dir", "store"],
+                "ci",
+            ),
+        ] {
+            let (output, result) = invoke(&project, &args);
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(result["operation"], operation);
+            assert_eq!(
+                result["errors"][0]["code"],
+                if nonregular {
+                    if operation == "ci" {
+                        "TRANSACTION_FAILED"
+                    } else {
+                        "LOCKFILE_INVALID"
+                    }
+                } else {
+                    "LOCKFILE_MISSING"
+                }
+            );
+            assert_eq!(result["changes"]["state"], "unchanged");
+            assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+            assert_eq!(result["retry"], "after_correction");
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest
+            );
+            assert!(!project.path().join("node_modules").exists());
+            if nonregular {
+                assert_eq!(
+                    fs::read(project.path().join("tapid.lock/KEEP")).unwrap(),
+                    b"preserved"
+                );
+            } else {
+                assert!(!project.path().join("tapid.lock").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn json_ci_and_import_reject_invalid_locks_without_mutation() {
+    for input in [
+        b"secret malformed input".as_slice(),
+        br#"{"lockfileVersion":2,"packages":{}}"#.as_slice(),
+    ] {
+        let project = TempProject::new("json-invalid-lock-input").unwrap();
+        let manifest = br#"{"name":"app","version":"1.0.0"}"#;
+        project.write("package.json", manifest).unwrap();
+        project.write("tapid.lock", input).unwrap();
+        project.write("package-lock.json", input).unwrap();
+        for (args, operation) in [
+            (
+                vec!["--json", "ci", "--offline", "--store-dir", "store"],
+                "ci",
+            ),
+            (
+                vec!["--json", "import-package-lock", "package-lock.json"],
+                "import-package-lock",
+            ),
+        ] {
+            let (output, result) = invoke(&project, &args);
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(result["operation"], operation);
+            assert_eq!(result["errors"][0]["code"], "LOCKFILE_INVALID");
+            assert_eq!(result["changes"]["state"], "unchanged");
+            assert_eq!(result["changes"]["paths"], serde_json::json!([]));
+            assert_eq!(result["retry"], "after_correction");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
+            assert_eq!(
+                fs::read(project.path().join("package.json")).unwrap(),
+                manifest
+            );
+            assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), input);
+            assert_eq!(
+                fs::read(project.path().join("package-lock.json")).unwrap(),
+                input
+            );
+            assert!(!project.path().join("node_modules").exists());
+        }
     }
 }
 
@@ -975,6 +1131,16 @@ fn json_help_and_version_are_successful_without_project_access() {
         (vec!["i", "--json", "-h"], "--registry-fixture"),
         (vec!["--json", "help", "run"], "--node-runtime"),
         (vec!["manifest", "validate", "--json", "--help"], "Usage:"),
+        (vec!["init", "--json", "--help"], "package.json"),
+        (vec!["ci", "--json", "--help"], "--offline"),
+        (
+            vec!["lock", "verify", "--json", "--help"],
+            "internal consistency",
+        ),
+        (
+            vec!["import-package-lock", "--json", "--help"],
+            "lockfileVersion",
+        ),
     ] {
         let (output, result) = invoke(&project, &args);
         assert!(output.status.success(), "{result}");
@@ -1057,6 +1223,10 @@ fn json_automation_commands_validate_import_and_ci() {
     assert!(output.status.success(), "{result}");
     assert_eq!(result["operation"], "manifest");
     assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(
+        result["data"],
+        serde_json::json!({"action":"validate","valid":true})
+    );
     let (output, result) = invoke(
         &project,
         &["--json", "import-package-lock", "package-lock.json"],
@@ -1064,6 +1234,10 @@ fn json_automation_commands_validate_import_and_ci() {
     assert!(output.status.success(), "{result}");
     assert_eq!(result["changes"]["state"], "committed");
     assert_eq!(result["changes"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["data"],
+        serde_json::json!({"format":"npm_v3","verification":"pending"})
+    );
     let (output, result) = invoke(
         &project,
         &["--json", "ci", "--offline", "--store-dir", "store"],
@@ -1084,9 +1258,14 @@ fn json_automation_commands_validate_import_and_ci() {
     );
     assert!(output.status.success(), "{result}");
     let lock = fs::read(project.path().join("tapid.lock")).unwrap();
+    let manifest = fs::read(project.path().join("package.json")).unwrap();
     let (output, result) = invoke(&project, &["lock", "verify", "--json"]);
     assert!(output.status.success(), "{result}");
     assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(
+        result["data"],
+        serde_json::json!({"action":"verify","valid":true})
+    );
     for offline in [false, true] {
         let mut args = vec![
             "--json",
@@ -1104,7 +1283,37 @@ fn json_automation_commands_validate_import_and_ci() {
         assert_eq!(result["operation"], "ci");
         assert_eq!(result["data"]["package_count"], 5);
         assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
     }
+    project
+        .write("package.json", br#"{"name":"changed","version":"2.0.0"}"#)
+        .unwrap();
+    let changed = fs::read(project.path().join("package.json")).unwrap();
+    // Internal lock verification deliberately does not compare the manifest.
+    let (output, result) = invoke(&project, &["--json", "lock", "verify"]);
+    assert!(output.status.success(), "{result}");
+    let (output, result) = invoke(
+        &project,
+        &[
+            "--json",
+            "ci",
+            "--offline",
+            "--store-dir",
+            store.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["errors"][0]["code"], "LOCK_MANIFEST_MISMATCH");
+    assert_eq!(result["changes"]["state"], "unchanged");
+    assert_eq!(result["retry"], "after_correction");
+    assert_eq!(fs::read(project.path().join("tapid.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        changed
+    );
 }
 
 /// Keep untrusted diagnostics out of handled failures and preserve existing outputs.

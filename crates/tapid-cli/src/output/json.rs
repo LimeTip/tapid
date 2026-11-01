@@ -286,10 +286,33 @@ pub(crate) fn information(operation: &str, data: Value) -> ExitCode {
 /// Emit a schema-v1 operation failure envelope and return exit status 1.
 /// Callers must supply bounded, non-sensitive structured context rather than raw
 /// capability diagnostics.
-pub(crate) fn operation_error(operation: &str, code: &str, context: Option<Value>) -> ExitCode {
-    let mut result = envelope(operation, "failure", None);
+pub(crate) fn operation_error(
+    operation: &str,
+    code: &str,
+    context: Option<Value>,
+    outcome: Option<&OperationOutcome>,
+    retry: Option<RetryAdvice>,
+) -> ExitCode {
+    emit(
+        operation_error_result(operation, code, context, outcome, retry),
+        1,
+    )
+}
+
+/// Preserve command-specific codes and bounded context alongside typed change evidence.
+pub(crate) fn operation_error_result(
+    operation: &str,
+    code: &str,
+    context: Option<Value>,
+    outcome: Option<&OperationOutcome>,
+    retry: Option<RetryAdvice>,
+) -> Value {
+    let mut result = envelope(operation, "failure", outcome);
     result["errors"] = json!([{"code": code, "phase": "operation", "context": context}]);
-    emit(result, 1)
+    if let Some(retry) = retry {
+        result["retry"] = retry_value(retry);
+    }
+    result
 }
 
 pub(crate) fn protocol_error(operation: &str, code: &str, status: u8) -> ExitCode {
@@ -316,13 +339,17 @@ fn failure_result(failure: &OperationFailure, operation: &str) -> Value {
     if let Some(error) = &failure.recovery_error {
         diagnostic::record(&mut result, error, "recovery");
     }
-    result["retry"] = json!(match failure.retry {
+    result["retry"] = retry_value(failure.retry);
+    result
+}
+
+fn retry_value(retry: RetryAdvice) -> Value {
+    json!(match retry {
         RetryAdvice::AfterCorrection => "after_correction",
         RetryAdvice::AfterContention => "after_contention",
         RetryAdvice::DoNotRepeat => "do_not_repeat",
         RetryAdvice::RecoverFirst => "recover_first",
-    });
-    result
+    })
 }
 
 /// Emit a successful version 1 result with typed changes and command-specific data.

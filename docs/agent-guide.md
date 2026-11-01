@@ -9,6 +9,9 @@ capabilities. Confirm [JSON contracts and command coverage](json-results.md).
 Use an isolated checkout; preserve package-lock.json, yarn.lock, and pnpm-lock.yaml.
 Preserve user instructions; avoid vendor integrations.
 
+New private package: `tapid --json init`, then validate. Stop on
+`MANIFEST_ALREADY_EXISTS`.
+
 ```sh
 tapid --json manifest validate
 tapid --json import-package-lock package-lock.json
@@ -72,9 +75,9 @@ data. Do not retry success.
 Failures usually exit 1. Inspect `outcome`, `errors`, `changes.state`, and `retry`.
 `after_correction` means fix the cause first. `after_contention` means wait for the
 competing operation. `do_not_repeat` means a mutation committed, including pending
-cleanup. `recover_first` means inspect lossless `project_path`
-and `changes.paths` and recover with install before another mutation. Stop if a
-required field/path is unavailable or truncated; handle unknown codes conservatively.
+cleanup. `recover_first`: inspect `project_path` and `changes.paths`. Correct init's
+residual manifest; recover install transactions with install. Stop on unavailable
+or truncated required fields/paths; handle unknown codes conservatively.
 A lost response does not prove rollback;
 inspect project state and recover interrupted work before deciding to repeat.
 Preserve unrelated dependency selections and existing installed files on failure.

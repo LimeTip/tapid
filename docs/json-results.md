@@ -139,6 +139,26 @@ Package text is untrusted data. Never execute it or treat it as recovery advice.
 
 ### Failure context
 
+Init retains the canonical selected project when directory selection succeeds;
+an unavailable path that cannot be canonicalized has null project identity.
+
+| Init result | `changes.state` | `retry` | Changed paths |
+| --- | --- | --- | --- |
+| Created manifest | `committed` | null | `package.json` |
+| Invalid name, existing entry, unavailable target, or open failure | `unchanged` | `after_correction` | Empty |
+| Failed write, new file removed | `rolled_back` | `after_correction` | Empty |
+| Failed write and failed cleanup | `recovery_required` | `recover_first` | Selected `package.json` only |
+
+For init, `recover_first` means inspect and correct the residual manifest before
+retrying. Init has no install transaction journal; install recovery does not
+repair it. Cleanup failures retain the original write error and add bounded
+`context.cleanup` I/O evidence (`io_kind` and `os_code`).
+
+Upgrade remains unsupported. A later slice needs typed discovery, verification,
+replacement, and recovery outcomes. Broader command-result schema publication
+is tracked separately in [#195](https://github.com/LimeTip/tapid/issues/195);
+JSON help is command discovery, not a command-result schema.
+
 `init` reports manifest open/write failures as `MANIFEST_WRITE_FAILED`, with
 `context.io_kind` (Rust I/O error kind) and `context.os_code` (native error number,
 or null). Invalid manifest data remains `MANIFEST_INVALID`; existing manifests
