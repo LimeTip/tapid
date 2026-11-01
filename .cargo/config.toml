@@ -2,3 +2,6 @@
 # scripts/dev.ts additionally shares artifacts across Git worktrees.
 [build]
 target-dir = "target"
+# Keep the default validation lane within constrained worker memory. Callers
+# with more memory can override this with CARGO_BUILD_JOBS or Cargo's --jobs.
+jobs = 1

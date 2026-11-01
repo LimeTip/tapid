@@ -42,9 +42,12 @@ containment behavior.
 
 ## Development prerequisites and build reuse
 
-For memory-constrained isolated workers, set `CARGO_BUILD_JOBS=1` in the
-worker environment for the entire validation command. This limits concurrent
-compiler processes for both Clippy and tests without changing features, test
+The repository Cargo configuration defaults to one build job so the standard
+validation command limits compiler concurrency in memory-constrained isolated
+workers without an extra environment setting. Callers with sufficient memory can override it
+with `CARGO_BUILD_JOBS` or Cargo's `--jobs`. When diagnosing worker kills, keep
+`CARGO_BUILD_JOBS=1` in the environment for the entire validation command.
+This limits concurrent compiler processes for both Clippy and tests without changing features, test
 selection, or verification policy. A compiler terminated by SIGKILL without a
 Rust diagnostic is not a passing check; inspect worker memory/kill evidence and
 retry with this concurrency limit before diagnosing a source defect. If a single
