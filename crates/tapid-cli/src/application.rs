@@ -6,6 +6,7 @@ mod dependency_scripts;
 pub(crate) use dependency_scripts::ExecutionOverrides;
 pub(crate) mod explain;
 pub(crate) mod install;
+pub(crate) mod installed;
 pub(crate) mod installer;
 pub(crate) mod lifecycle;
 pub(crate) mod outcome;

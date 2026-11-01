@@ -587,6 +587,7 @@ pub enum PlanError {
     InvalidPackageMetadata(String),
     BinTargetMissing(PathBuf),
     BinTargetNotRegular(PathBuf),
+    UnsupportedBinExecutable(PathBuf),
     ShimCollision(PathBuf),
 }
 impl fmt::Display for PlanError {
@@ -616,6 +617,13 @@ impl fmt::Display for PlanError {
                 "package bin target is not a regular file: {}",
                 v.display()
             ),
+            Self::UnsupportedBinExecutable(v) => {
+                write!(
+                    f,
+                    "package bin target is not a supported Node entry: {}",
+                    v.display()
+                )
+            }
             Self::ShimCollision(v) => write!(f, "executable shim collision: {}", v.display()),
         }
     }

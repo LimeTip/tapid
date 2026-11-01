@@ -35,6 +35,7 @@ pub enum RunPreparationError {
     InvalidManagedBin,
     InvalidNodeRuntime,
     MissingNodeRuntime,
+    InvalidNodeEntry,
     #[cfg_attr(not(windows), allow(dead_code))]
     WindowsSystemDirectoryUnavailable,
     DuplicateEnvironmentName(String),
@@ -60,6 +61,9 @@ impl fmt::Display for RunPreparationError {
             }
             Self::MissingNodeRuntime => f.write_str(
                 "cannot discover an executable named node or node.exe on the invoking host PATH",
+            ),
+            Self::InvalidNodeEntry => f.write_str(
+                "Node entry must be a canonical regular file beneath the selected project root",
             ),
             Self::WindowsSystemDirectoryUnavailable => {
                 f.write_str("cannot resolve the trusted Windows system directory")
@@ -152,6 +156,57 @@ pub fn prepare_execution_request_with_policy(
     arguments: &[OsString],
     host: HostExecutionEnvironment<'_>,
 ) -> Result<PreparedExecution, RunPreparationError> {
+    prepare_request(
+        project_dir,
+        working_directory,
+        policy,
+        ceiling,
+        Invocation::Shell { script, arguments },
+        host,
+    )
+}
+
+/// Prepare direct argv execution after installed-command authentication.
+/// This does not establish package identity or authorize a dependency selection.
+/// Policy is explicit; no script-name profile lookup is performed.
+pub fn prepare_node_execution_request_with_policy(
+    project_dir: &Path,
+    working_directory: &Path,
+    policy: &tapid_runner::SandboxPolicy,
+    ceiling: Option<&tapid_runner::SandboxPolicy>,
+    entry: &Path,
+    arguments: &[OsString],
+    host: HostExecutionEnvironment<'_>,
+) -> Result<PreparedExecution, RunPreparationError> {
+    prepare_request(
+        project_dir,
+        working_directory,
+        policy,
+        ceiling,
+        Invocation::Node { entry, arguments },
+        host,
+    )
+}
+
+enum Invocation<'a> {
+    Shell {
+        script: &'a str,
+        arguments: &'a [OsString],
+    },
+    Node {
+        entry: &'a Path,
+        arguments: &'a [OsString],
+    },
+}
+
+fn prepare_request(
+    project_dir: &Path,
+    working_directory: &Path,
+    policy: &tapid_runner::SandboxPolicy,
+    ceiling: Option<&tapid_runner::SandboxPolicy>,
+    invocation: Invocation<'_>,
+    host: HostExecutionEnvironment<'_>,
+) -> Result<PreparedExecution, RunPreparationError> {
     let project_dir =
         fs::canonicalize(project_dir).map_err(|_| RunPreparationError::InvalidProjectDirectory)?;
     if !project_dir.is_dir() {
@@ -165,35 +220,40 @@ pub fn prepare_execution_request_with_policy(
         return Err(RunPreparationError::ReservedPath);
     }
 
-    // Validate the parent independently: an absent .bin below an unsafe parent
-    // must not make a symlink or special-file node_modules acceptable.
-    match fs::symlink_metadata(project_dir.join("node_modules")) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(RunPreparationError::InvalidManagedBin);
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(RunPreparationError::InvalidManagedBin),
-    }
-    let managed_bin_path = project_dir.join("node_modules/.bin");
-    let managed_bin = match fs::symlink_metadata(&managed_bin_path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    let shell = matches!(invocation, Invocation::Shell { .. });
+    let managed_bin = if shell {
+        // Validate the parent independently: an absent .bin below an unsafe parent
+        // must not make a symlink or special-file node_modules acceptable.
+        match fs::symlink_metadata(project_dir.join("node_modules")) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(RunPreparationError::InvalidManagedBin);
             }
-            let canonical = fs::canonicalize(&managed_bin_path)
-                .map_err(|_| RunPreparationError::InvalidManagedBin)?;
-            if canonical == project_dir
-                || !canonical.starts_with(&project_dir)
-                || !canonical.is_dir()
-            {
-                return Err(RunPreparationError::InvalidManagedBin);
-            }
-            Some(canonical)
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(RunPreparationError::InvalidManagedBin),
         }
-        // Do not add an absent directory to PATH or the runtime grants.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(RunPreparationError::InvalidManagedBin),
+        let managed_bin_path = project_dir.join("node_modules/.bin");
+        match fs::symlink_metadata(&managed_bin_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(RunPreparationError::InvalidManagedBin);
+                }
+                let canonical = fs::canonicalize(&managed_bin_path)
+                    .map_err(|_| RunPreparationError::InvalidManagedBin)?;
+                if canonical == project_dir
+                    || !canonical.starts_with(&project_dir)
+                    || !canonical.is_dir()
+                {
+                    return Err(RunPreparationError::InvalidManagedBin);
+                }
+                Some(canonical)
+            }
+            // Do not add an absent directory to PATH or the runtime grants.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(RunPreparationError::InvalidManagedBin),
+        }
+    } else {
+        None
     };
     let node_runtime = match host.node_runtime {
         Some(runtime) => canonical_node_executable(runtime)?,
@@ -233,10 +293,29 @@ pub fn prepare_execution_request_with_policy(
                 .map(|value| (name.clone(), value.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let (program, shell_arguments) = shell_invocation(script, arguments, &search_directories)?;
+    let (program, child_arguments) = match invocation {
+        Invocation::Shell { script, arguments } => {
+            shell_invocation(script, arguments, &search_directories)?
+        }
+        Invocation::Node { entry, arguments } => {
+            if !entry.is_absolute()
+                || !entry.starts_with(&project_dir)
+                || fs::canonicalize(entry).ok().as_deref() != Some(entry)
+                || !fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.file_type().is_file())
+            {
+                return Err(RunPreparationError::InvalidNodeEntry);
+            }
+            (
+                node_runtime.clone(),
+                std::iter::once(entry.as_os_str().to_owned())
+                    .chain(arguments.iter().cloned())
+                    .collect(),
+            )
+        }
+    };
     let mut request = ExecutionRequest::builder(program)
-        .args(shell_arguments)
-        .windows_verbatim_arguments(cfg!(windows))
+        .args(child_arguments)
+        .windows_verbatim_arguments(shell && cfg!(windows))
         .executable_search_paths(search_directories.iter().cloned())
         .trusted_node_runtime(&node_runtime)
         .allow_process_memory_stats(host.allow_process_memory_stats)

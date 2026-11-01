@@ -68,10 +68,43 @@ fn shim_interpreter(
     source: &std::path::Path,
     platform: Platform,
 ) -> Result<ShimInterpreter, PlanError> {
-    use std::io::Read;
     if platform != Platform::Windows {
         return Ok(ShimInterpreter::Direct);
     }
+    classify_interpreter(source)
+}
+
+/// Validate the Node-only entry forms supported by direct project execution.
+/// This classifies a regular target, not its package identity or authority;
+/// callers must first authenticate its placement and parent directories.
+pub fn validate_node_entry(source: &std::path::Path) -> Result<(), PlanError> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|_| PlanError::BinTargetMissing(source.to_owned()))?;
+    if !metadata.file_type().is_file() {
+        return Err(PlanError::BinTargetNotRegular(source.to_owned()));
+    }
+    let javascript = matches!(
+        source.extension().and_then(|value| value.to_str()),
+        Some("js" | "cjs" | "mjs")
+    );
+    if source.extension().is_some() && !javascript {
+        return Err(PlanError::UnsupportedBinExecutable(source.to_owned()));
+    }
+    let interpreter = classify_interpreter(source).map_err(|error| match error {
+        PlanError::InvalidPackageMetadata(_) => {
+            PlanError::UnsupportedBinExecutable(source.to_owned())
+        }
+        other => other,
+    })?;
+    match interpreter {
+        ShimInterpreter::Node => Ok(()),
+        ShimInterpreter::Direct if javascript => Ok(()),
+        _ => Err(PlanError::UnsupportedBinExecutable(source.to_owned())),
+    }
+}
+
+fn classify_interpreter(source: &std::path::Path) -> Result<ShimInterpreter, PlanError> {
+    use std::io::Read;
     let mut prefix = Vec::new();
     std::fs::File::open(source)
         .and_then(|file| file.take(512).read_to_end(&mut prefix))
@@ -81,7 +114,7 @@ fn shim_interpreter(
     }
     if prefix.len() == 512 && !prefix.contains(&b'\n') {
         return Err(PlanError::InvalidPackageMetadata(format!(
-            "Windows bin shebang exceeds the inspection limit: {}",
+            "bin shebang exceeds the inspection limit: {}",
             source.display()
         )));
     }
@@ -97,7 +130,7 @@ fn shim_interpreter(
         ["node" | "node.exe" | "/usr/bin/node" | "/usr/bin/node.exe"]
         | ["/usr/bin/env", "node" | "node.exe"] => Ok(ShimInterpreter::Node),
         _ => Err(PlanError::InvalidPackageMetadata(format!(
-            "unsupported Windows bin interpreter: {}",
+            "unsupported bin interpreter: {}",
             source.display()
         ))),
     }
@@ -371,6 +404,60 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn node_entry_classification_is_host_independent_and_rejects_interpreter_arguments() {
+        let project = tapid_test_support::TempProject::new("node-entry").unwrap();
+        for (name, bytes, accepted) in [
+            ("cli.js", b"console.log('ok')".as_slice(), true),
+            ("cli.cjs", b"".as_slice(), true),
+            ("cli.mjs", b"#!/usr/bin/env node\n".as_slice(), true),
+            ("cli", b"#!/usr/bin/node\r\n".as_slice(), true),
+            ("cli", b"console.log('ok')".as_slice(), false),
+            ("cli.js", b"#!/bin/sh\n".as_slice(), false),
+            (
+                "cli.js",
+                b"#!/usr/bin/env node --inspect\n".as_slice(),
+                false,
+            ),
+            ("cli.cmd", b"#!/usr/bin/env node\n".as_slice(), false),
+        ] {
+            project.write(name, bytes).unwrap();
+            assert_eq!(
+                validate_node_entry(&project.path().join(name)).is_ok(),
+                accepted,
+                "{name}: {bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_entries_reject_redirected_and_overlong_targets() {
+        let project = tapid_test_support::TempProject::new("unsafe-node-entry").unwrap();
+        project
+            .write(
+                "cli.js",
+                &[b"#!".as_slice(), &[b' '; 512], b"node\n"].concat(),
+            )
+            .unwrap();
+        assert!(validate_node_entry(&project.path().join("cli.js")).is_err());
+        assert!(matches!(
+            validate_node_entry(&project.path().join("missing.js")),
+            Err(PlanError::BinTargetMissing(_))
+        ));
+        assert!(matches!(
+            validate_node_entry(project.path()),
+            Err(PlanError::BinTargetNotRegular(_))
+        ));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("cli.js", project.path().join("link.js")).unwrap();
+            assert!(matches!(
+                validate_node_entry(&project.path().join("link.js")),
+                Err(PlanError::BinTargetNotRegular(_))
+            ));
+        }
+    }
 
     static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 

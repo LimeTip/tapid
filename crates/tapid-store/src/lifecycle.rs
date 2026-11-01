@@ -31,16 +31,39 @@ impl Store {
         output: &ArtifactDigest,
         attestation: &str,
     ) -> Result<VerifiedTreeSnapshot, IngestError> {
-        let key = lifecycle_key(&self.root, false)?;
-        let tag = attestation
-            .strip_prefix("hmac-sha256-")
-            .and_then(|s| hex::decode(s).ok())
-            .ok_or_else(|| invalid("invalid lifecycle output attestation"))?;
-        output_mac(&key, recipe, output)
-            .verify_slice(&tag)
-            .map_err(|_| invalid("lifecycle output attestation does not match recipe/tree"))?;
+        verify_attestation(&self.root, recipe, output, attestation)?;
         self.verified_tree_snapshot(output)
     }
+}
+
+impl StoreReadGuard {
+    /// Authenticate an existing lifecycle output without key creation, snapshot
+    /// reservation, or recovery. Keep this guard alive while using the path.
+    pub fn verified_lifecycle_tree_path(
+        &self,
+        recipe: &ArtifactDigest,
+        output: &ArtifactDigest,
+        attestation: &str,
+    ) -> Result<PathBuf, IngestError> {
+        verify_attestation(&self.store.root, recipe, output, attestation)?;
+        self.verified_tree_path(output)
+    }
+}
+
+fn verify_attestation(
+    root: &Path,
+    recipe: &ArtifactDigest,
+    output: &ArtifactDigest,
+    attestation: &str,
+) -> Result<(), IngestError> {
+    let key = lifecycle_key(root, false)?;
+    let tag = attestation
+        .strip_prefix("hmac-sha256-")
+        .and_then(|s| hex::decode(s).ok())
+        .ok_or_else(|| invalid("invalid lifecycle output attestation"))?;
+    output_mac(&key, recipe, output)
+        .verify_slice(&tag)
+        .map_err(|_| invalid("lifecycle output attestation does not match recipe/tree"))
 }
 fn invalid(message: &str) -> IngestError {
     io::Error::new(io::ErrorKind::InvalidData, message).into()
@@ -116,6 +139,73 @@ fn lifecycle_key(_root: &Path, _create: bool) -> Result<[u8; 32], IngestError> {
 mod tests {
     use super::*;
     use tapid_test_support::{TempHome, TempProject};
+    #[test]
+    fn guarded_lifecycle_verification_does_not_create_state() {
+        let home = TempHome::new("guarded-lifecycle").unwrap();
+        let source = TempProject::new("guarded-lifecycle-tree").unwrap();
+        source.write("output", b"generated").unwrap();
+        let store = Store::new(home.path().join("store"));
+        let tree: ArtifactDigest = tapid_archive::canonical_tree_digest(source.path())
+            .unwrap()
+            .parse()
+            .unwrap();
+        let recipe: ArtifactDigest = format!("sha256-{}", "a".repeat(64)).parse().unwrap();
+        let mut transaction = store.transaction();
+        transaction
+            .stage_verified_tree(&tree, source.path())
+            .unwrap();
+        transaction.publish().unwrap().commit().unwrap();
+        let entries = || {
+            let mut names = Vec::new();
+            let mut pending = vec![store.root().to_path_buf()];
+            while let Some(directory) = pending.pop() {
+                for entry in fs::read_dir(directory).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    names.push(path.strip_prefix(store.root()).unwrap().to_path_buf());
+                    if entry.file_type().unwrap().is_dir() {
+                        pending.push(path);
+                    }
+                }
+            }
+            names.sort();
+            names
+        };
+        let before = entries();
+        {
+            let guard = store.existing_read_guard().unwrap();
+            assert!(
+                guard
+                    .verified_lifecycle_tree_path(
+                        &recipe,
+                        &tree,
+                        &format!("hmac-sha256-{}", "0".repeat(64))
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(entries(), before);
+        assert!(!store.root().join(".tapid-lifecycle-key").exists());
+        let tag = store.attest_lifecycle_output(&recipe, &tree).unwrap();
+        let before = entries();
+        let guard = store.existing_read_guard().unwrap();
+        let path = guard
+            .verified_lifecycle_tree_path(&recipe, &tree, &tag)
+            .unwrap();
+        assert_eq!(fs::read(path.join("output")).unwrap(), b"generated");
+        assert!(
+            guard
+                .verified_lifecycle_tree_path(&tree, &tree, &tag)
+                .is_err()
+        );
+        fs::write(path.join("output"), b"tampered").unwrap();
+        assert!(
+            guard
+                .verified_lifecycle_tree_path(&recipe, &tree, &tag)
+                .is_err()
+        );
+        assert_eq!(entries(), before);
+    }
     #[test]
     fn lifecycle_authentication_rejects_forged_recipe_tree_and_missing_key() {
         let home = TempHome::new("lifecycle-auth").unwrap();

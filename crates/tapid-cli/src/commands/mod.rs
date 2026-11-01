@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 mod cache;
 mod ci;
+mod exec;
 mod explain;
 pub(crate) mod init;
 pub(crate) mod install;
@@ -114,6 +115,12 @@ pub(crate) enum Command {
     )]
     Run(run::Args),
 
+    /// Run an installed direct dependency's Node binary with scoped containment.
+    #[command(
+        long_about = "Run a Node binary exported by a direct dependency of the selected project or exact workspace member. Uses only the existing managed installation and verified store; never installs or recovers. Ambiguous commands require --package with the local install name. Native executables and non-Node interpreters are unsupported. Pass the command and its arguments after --. Containment fails closed on unsupported hosts."
+    )]
+    Exec(exec::Args),
+
     /// Install dependencies, optionally adding one package first.
     #[command(
         visible_alias = "i",
@@ -209,6 +216,7 @@ impl Command {
             Self::Manifest(_) => "manifest",
             Self::Lock(_) => "lock",
             Self::Run(_) => "run",
+            Self::Exec(_) => "exec",
             Self::Install(_) => "install",
             Self::Ci(_) => "ci",
             Self::Add(_) => "add",
@@ -275,6 +283,7 @@ pub(crate) fn dispatch(command: Option<Command>, json: bool) -> ExitCode {
         Some(Command::Manifest(args)) => manifest::run(args, json),
         Some(Command::Lock(args)) => lock::run(args, json),
         Some(Command::Run(args)) => run::run(args),
+        Some(Command::Exec(args)) => exec::run(args),
 
         Some(Command::Install(args)) => install::run(args, json),
         Some(Command::Ci(args)) => ci::run(args, json),

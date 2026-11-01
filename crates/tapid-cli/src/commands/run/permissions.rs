@@ -24,14 +24,17 @@ pub(crate) struct InvocationPermissions {
     pub allow_network: bool,
 }
 
-pub(super) struct PolicySelection {
+pub(in crate::commands) struct PolicySelection {
     pub policy: SandboxPolicy,
     pub ceiling: Option<SandboxPolicy>,
     pub source: &'static str,
 }
 
 impl PolicySelection {
-    pub(super) fn provenance(&self, invocation: &InvocationPermissions) -> serde_json::Value {
+    pub(in crate::commands) fn provenance(
+        &self,
+        invocation: &InvocationPermissions,
+    ) -> serde_json::Value {
         let policy = |policy: &SandboxPolicy| {
             serde_json::json!({
                 "assurance": format!("{:?}", policy.assurance()),
@@ -53,7 +56,7 @@ impl PolicySelection {
 }
 
 impl InvocationPermissions {
-    pub(super) fn enabled(&self) -> bool {
+    pub(in crate::commands) fn enabled(&self) -> bool {
         !self.allow_read.is_empty()
             || !self.allow_write.is_empty()
             || !self.allow_env.is_empty()
@@ -61,7 +64,7 @@ impl InvocationPermissions {
             || self.allow_network
     }
 
-    pub(super) fn select(
+    pub(in crate::commands) fn select(
         &self,
         config: &RunConfig,
         script: &str,

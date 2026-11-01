@@ -17,6 +17,8 @@ mod ci_tests;
 mod command_fixture_tests;
 #[path = "cli_cases/command_support.rs"]
 mod command_support;
+#[path = "cli_cases/exec.rs"]
+mod exec_tests;
 #[path = "cli_cases/explain.rs"]
 mod explain_tests;
 #[path = "cli_cases/lifecycle_reporting.rs"]

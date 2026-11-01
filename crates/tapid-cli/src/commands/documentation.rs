@@ -1,5 +1,28 @@
 use clap::{Command, CommandFactory};
 
+#[test]
+fn project_exec_preserves_command_and_opaque_arguments_after_separator() {
+    use clap::Parser;
+    let cli = super::Cli::try_parse_from([
+        "tapid",
+        "exec",
+        "--package",
+        "typescript",
+        "--",
+        "tsc",
+        "",
+        "a b",
+        "$(touch marker)",
+        "--noEmit",
+    ])
+    .unwrap();
+    let Some(super::Command::Exec(args)) = cli.command else {
+        panic!("expected exec")
+    };
+    assert_eq!(args.command.as_deref(), Some("tsc"));
+    assert_eq!(args.arguments, ["", "a b", "$(touch marker)", "--noEmit"]);
+}
+
 fn undocumented_commands(command: &Command, path: &str, missing: &mut Vec<String>) {
     if command.is_hide_set() {
         return;

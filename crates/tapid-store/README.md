@@ -27,6 +27,21 @@ Lifecycle outputs carry store-local HMAC-SHA256 attestations over their recipe a
 
 Cache maintenance pins the store root and cache namespaces before traversal. Unix traversal and recursive removal use descriptor-relative no-follow operations. Windows holds directory and ancestor handles without delete sharing, rejects reparse points during traversal, and deletes entries through their own handles. Candidate identities are checked before deletion, so a swapped parent cannot redirect cleanup outside the inspected directories.
 
+`Store::existing_read_guard` acquires a shared lock only when the store root and
+regular lock file already exist. It reuses cache maintenance's pinned no-follow
+access, rejects busy writers and pending transaction journals, and never creates
+or recovers store state. It does not itself authenticate package contents.
+The returned guard's `verified_tree_path` authenticates the canonical digest
+under that held lock, without nested acquisition or recovery. Keep the guard
+alive while consuming the path; it coordinates cooperating store operations,
+not arbitrary concurrent host writes.
+
+`StoreReadGuard::verified_lifecycle_tree_path` authenticates the recipe/output
+attestation with the existing owner-only key, then verifies the output tree
+under the same retained lock. Unlike replay snapshot creation, it creates no
+key, reservation, lease, or copy. Missing authentication material or evicted
+output trees fail explicitly; verification never regenerates lifecycle output.
+
 Normal store-lock acquisition has one five-second monotonic budget per acquisition
 call, including shared reads, exclusive publication, recovery escalation, and
 reacquisition retries. Nonblocking attempts poll at intervals of at most 25 ms,

@@ -25,6 +25,35 @@ pub struct CacheSummary {
 }
 
 impl Store {
+    /// Hold existing published state without initializing or recovering the store.
+    /// Missing coordination state and pending transactions fail closed.
+    pub fn existing_read_guard(&self) -> Result<StoreReadGuard, IngestError> {
+        if self.root.as_os_str().is_empty() {
+            return Err(IngestError::InvalidRoot);
+        }
+        let root = CacheDirectory::open_root(&self.root)?;
+        let file = root.open_file(std::ffi::OsStr::new(".store.lock"))?;
+        FileExt::try_lock_shared(&file).map_err(|error| match error {
+            TryLockError::WouldBlock => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "store is in use; retry after the active Tapid operation finishes",
+            ),
+            TryLockError::Error(error) => error,
+        })?;
+        match root.metadata(std::ffi::OsStr::new(STORE_JOURNAL)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(invalid_cache("store has a pending transaction")),
+        }
+        // A tree's final directory can be regular even when its namespace
+        // redirects outside the store. Reuse maintenance's no-follow opening.
+        optional_directory(&root, "trees")?;
+        Ok(StoreReadGuard {
+            _file: file,
+            store: self.clone(),
+        })
+    }
+
     /// Inspect published cache data without creating files or recovering state.
     pub fn cache_info(&self) -> Result<CacheSummary, IngestError> {
         self.maintain_cache(false)
