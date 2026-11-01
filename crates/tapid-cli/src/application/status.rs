@@ -334,6 +334,7 @@ fn empty_report(project: &Path, selector: Option<&str>) -> StatusReport {
             "package_manager": "local_preflight_only", "runner": "not_assessed",
             "workspace_selection": "exact_member_name", "workspace_linking": "supported_not_verified",
             "registry_routing": "experimental",
+            "lock_graph": {"contract_version":1,"inspect":true,"compare":"same_format","explicit_snapshots":true,"json_required":true},
             "configuration_layers": ["builtin", "user", "project", "explicit"],
             "standalone_configuration": true
         }),

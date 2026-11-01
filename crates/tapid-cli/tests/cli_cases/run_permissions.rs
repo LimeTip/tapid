@@ -765,3 +765,6 @@ fn run_excludes_selected_and_shadowed_layer_credentials_before_spawn() {
         assert!(output.stdout.is_empty());
     }
 }
+#[cfg(any(windows, target_os = "linux"))]
+#[path = "run_result_interruptions.rs"]
+mod result_interruptions;
