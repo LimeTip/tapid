@@ -186,7 +186,10 @@ const assertInstallerCache = (ci: string) => {
     assert(install.includes(compilerEnv), `${name} requires checkout-local compiler env`);
     assert.equal((install.match(/\n        env:/g) || []).length, 1);
   }
-  assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 4, 'compiler target is confined to two installer and two guard steps');
+  const workers = job(ci, 'workers-consumer');
+  assert.match(workers, /    env:\n      CARGO_TARGET_DIR: target\n/);
+  assert.equal((workers.match(/CARGO_TARGET_DIR/g) || []).length, 1);
+  assert.equal((ci.match(/CARGO_TARGET_DIR/g) || []).length, 5, 'compiler target is confined to the isolated Workers job, two installer and two guard steps');
   // Strip the separately validated guard steps, then normalize the approved Test bootstrap,
   // pin migration and two installer compiler env blocks.
   // All actual install commands, source-ref, fresh destination, help, uninstall,

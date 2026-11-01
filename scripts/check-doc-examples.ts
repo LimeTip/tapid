@@ -133,12 +133,20 @@ export function boundedProcess(
         if (process.platform === "win32") child.kill("SIGKILL");
         else process.kill(-child.pid, "SIGKILL");
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          // Signal failures occur in data/timer/close callbacks. Reject the
+          // operation explicitly; throwing here escapes the caller's promise.
+          clearTimeout(timer);
+          child.unref();
+          reject(error);
+        }
+      } finally {
+        // A detached descendant can keep inherited writers open after the root
+        // is killed. Stop reading even when the OS denies termination; the
+        // rejected operation must not imply that cleanup succeeded.
+        child.stdout.destroy();
+        child.stderr.destroy();
       }
-      // A detached descendant can keep inherited writers open after the root
-      // is killed. Stop reading once termination is requested.
-      child.stdout.destroy();
-      child.stderr.destroy();
     };
     const timer = setTimeout(() => {
       failure ??= "timeout";

@@ -188,12 +188,15 @@ test("strict comparator rejects caniuse publication drift", async () =>
         },
       });
       writeJson(join(project, "tapid.lock"), {
+        lockfileVersion: 7,
+        roots: ["next"],
         packages: {
           next: {
             name: "next",
             version: "15.5.27",
             registry: "https://registry.npmjs.org",
             artifactIntegrity: "sha512-test",
+            artifactUrl: "https://registry.npmjs.org/next/-/next-15.5.27.tgz",
           },
         },
       });
@@ -251,7 +254,7 @@ async function matchingGraphs(check: (npm: string, tapid: string) => void) {
           peerDependenciesMeta: { absentPeer: { optional: true } },
         },
         peer: { name: "peer", version: "2.0.0" },
-        platform: { name: "platform", version: "1.0.0" },
+        platform: { name: "platform", version: "1.0.0", os: ["darwin"] },
         child: { name: "child", version: "1.0.0" },
         "app/node_modules/child": { name: "child", version: "2.0.0" },
         unused: { name: "unused", version: "9.0.0" },
@@ -264,6 +267,7 @@ async function matchingGraphs(check: (npm: string, tapid: string) => void) {
           metadata,
         );
         records["node_modules/" + location] = {
+          ...metadata,
           version: metadata.version,
           resolved: `https://registry.npmjs.org/${metadata.name}/file.tgz`,
           integrity: "sha512-fixture",
@@ -275,6 +279,11 @@ async function matchingGraphs(check: (npm: string, tapid: string) => void) {
           ...metadata,
           registry: "https://registry.npmjs.org",
           artifactIntegrity: "sha512-fixture",
+          artifactUrl: `https://registry.npmjs.org/${metadata.name}/file.tgz`,
+          dependencies:
+            metadata.name === "app"
+              ? { child: "app/node_modules/child", peer: "peer" }
+              : {},
           ...(metadata.name === "platform"
             ? { platformContext: "os=darwin;cpu=;libc=" }
             : {}),
@@ -284,7 +293,11 @@ async function matchingGraphs(check: (npm: string, tapid: string) => void) {
         lockfileVersion: 3,
         packages: records,
       });
-      writeJson(join(project, "tapid.lock"), { packages });
+      writeJson(join(project, "tapid.lock"), {
+        lockfileVersion: 7,
+        roots: ["app", "peer", "platform"],
+        packages,
+      });
     }
     check(roots[0], roots[1]);
   });

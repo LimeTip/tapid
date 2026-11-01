@@ -268,3 +268,16 @@ durable completion records are therefore deferred pending evidence of a required
 workflow needing that attribution, rather than adding cross-agent coordination
 for isolated worktrees. Native locking behavior remains subject to the existing
 Linux, macOS, and Windows CI matrix.
+
+## Workers consumer
+
+The `workers-consumer` Ubuntu 24.04 lane pins Node 22.23.3 and npm 11.12.1 and runs
+`tests/workers*_test.ts` plus the shared graph tests. Set
+`TAPID_WORKERS_FIXTURE_BINARY` to a source-built CLI for the native pin probe;
+CI requires it. The full `scripts/check-workers-consumer.ts` harness requires
+`--binary`, `--npm-cli` and `--artifacts`; see the
+[fixture instructions](../examples/workers-consumer/README.md). It tests cold
+native installation, npm v3 migration, reconstructed frozen/offline replay,
+empty-store failure, strict npm comparison, type-check, dry-run bundle and
+loopback workerd response. The lane always retains evidence. No deployment or
+Cloudflare credentials are used.

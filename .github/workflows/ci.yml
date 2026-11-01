@@ -17,6 +17,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workers-consumer:
+    name: Workers consumer (Ubuntu 24.04 x86_64)
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_DIR: target
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.3
+      - name: Install pinned npm baseline tooling
+        run: npm install --prefix "$RUNNER_TEMP/workers-npm" --ignore-scripts --no-fund npm@11.12.1
+      - name: Build source-matched Tapid and discover binary through metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/dev.ts build --locked --bin tapid
+          node --experimental-strip-types scripts/dev.ts metadata --no-deps --format-version 1 --locked > "$RUNNER_TEMP/workers-metadata.json"
+          node -e 'const fs=require("node:fs"),p=require("node:path"),m=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/workers-metadata.json"));fs.appendFileSync(process.env.GITHUB_ENV,"TAPID_WORKERS_FIXTURE_BINARY="+p.join(m.target_directory,"debug","tapid")+"\n")'
+      - name: Check consumer helpers and native pin probe
+        run: node --experimental-strip-types --test tests/workers_fixture_test.ts tests/workers_native_fixture_test.ts tests/workers_consumer_test.ts tests/consumer_package_graphs_test.ts tests/news_site_fixture_test.ts
+        env:
+          TAPID_NEWS_FIXTURE_BINARY: ${{ env.TAPID_WORKERS_FIXTURE_BINARY }}
+      - name: Install, compare, reconstruct and execute both Workers paths
+        run: |
+          node --experimental-strip-types scripts/check-workers-consumer.ts \
+            --binary "$TAPID_WORKERS_FIXTURE_BINARY" \
+            --npm-cli "$RUNNER_TEMP/workers-npm/node_modules/npm/bin/npm-cli.js" \
+            --artifacts "$RUNNER_TEMP/workers-evidence"
+      - name: Retain Workers evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: workers-consumer-evidence
+          path: ${{ runner.temp }}/workers-evidence
+          retention-days: 30
+          if-no-files-found: warn
+
   news-site-consumer:
     name: News-site Tapid scripts (Ubuntu 24.04)
     runs-on: ubuntu-24.04

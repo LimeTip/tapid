@@ -252,3 +252,15 @@ Copied declarations in workspace members or published package dependency maps,
 live directory dependencies, Git preparation hooks, and approved copied-package
 lifecycle execution are outside this contract. Copied sources do not fall back
 to registry resolution. See [ADR 0009](adr/0009-immutable-copied-dependency-sources.md).
+
+## Workers consumer scope
+
+The [synthetic Workers fixture](../examples/workers-consumer/README.md) checks
+Tapid installation and npm v3 migration independently, followed by reconstructed
+frozen/offline replay and project-local TypeScript/Wrangler/workerd execution.
+Its dedicated CI reference is Ubuntu 24.04 x86_64/glibc with exact toolchain pins.
+Only successful source-matched evidence establishes that combination; this is
+not general Workers/npm compatibility or deployment validation. Tapid remains
+the package manager, workerd the Worker runtime and Wrangler the development and
+deployment tool. See the fixture for migration, rollback, optional binaries,
+default-denied hooks and evidence limits.

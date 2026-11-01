@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tapid-workers-consumer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-23",
+  "send_metrics": false
+}
