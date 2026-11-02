@@ -276,6 +276,13 @@ fn dependency_dry_run_workspace_edits_resolve_the_member_graph_in_memory() {
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let packages = value["data"]["packages"].as_array().unwrap();
+    let receipt = &value["data"]["starting_state"];
+    assert_eq!(
+        receipt["selected_manifest"]["path"],
+        "packages/member/package.json"
+    );
+    assert_eq!(receipt["selected_manifest"], receipt["workspace"][0]);
+    assert_ne!(receipt["selected_manifest"], receipt["root_manifest"]);
     let member_node = packages.iter().find(|p| p["name"] == "member").unwrap();
     let target: tapid_lockfile::LockfilePackageKey = member_node["dependencies"]["parent"]
         .as_str()
@@ -702,6 +709,281 @@ fn dependency_dry_run_named_update_preserves_alias_pin_and_reports_save_policy()
         );
         for path in ["node_modules", ".tapid-activation.lock", ".tapid"] {
             assert!(!scenario.project.path().join(path).exists(), "{path}");
+        }
+    }
+}
+
+#[test]
+fn dependency_dry_run_reports_starting_state() {
+    let scenario = CliFixture::new("preview-starting-state");
+    scenario
+        .project
+        .write("package.json", br#"{"name":"app","version":"1.0.0"}"#)
+        .unwrap();
+    let inspect = || {
+        let output = scenario
+            .command(&["--json", "install", "--dry-run"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["data"]["starting_state"].clone()
+    };
+    let first = inspect();
+    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["root_manifest"]["path"], "package.json");
+    assert_eq!(first["root_manifest"], first["selected_manifest"]);
+    assert_eq!(
+        first["root_manifest"]["digest"],
+        "sha256-fee412776ee7d466e425de58510ba8d794ec7091437d22a4f1955bdfd40a9291"
+    );
+    assert_eq!(first["lock"]["state"], "absent");
+    assert_eq!(first, inspect());
+    let human = scenario
+        .command(&["install", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("rechecked, non-atomic observation"));
+    assert!(human.contains(first["root_manifest"]["digest"].as_str().unwrap()));
+    assert!(human.contains("Artifacts are not prepared"));
+
+    scenario
+        .project
+        .write(
+            "package.json",
+            b"{\"name\":\"app\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+    assert_ne!(
+        first["root_manifest"]["digest"],
+        inspect()["root_manifest"]["digest"]
+    );
+}
+
+#[test]
+fn dependency_dry_run_receipt_covers_workspace_routing_policy_and_lock() {
+    let scenario = CliFixture::new("preview-receipt-coverage");
+    let root = br#"{"name":"app","version":"1.0.0","workspaces":["packages/*"]}"#;
+    scenario.project.write("package.json", root).unwrap();
+    scenario
+        .project
+        .write("registry.json", serde_json::json!({"packages":[{"registry":"https://registry.npmjs.org","name":"unused","version":"1.0.0","integrity":format!("sha512-{}==", "A".repeat(86)),"artifact":"never-download"}]}).to_string().as_bytes())
+        .unwrap();
+    for name in ["a", "b"] {
+        scenario
+            .project
+            .write(
+                format!("packages/{name}/package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"}}"#).as_bytes(),
+            )
+            .unwrap();
+    }
+    scenario.project.write("tapid.toml", b"[registries.default]\nurl='https://registry.npmjs.org'\ntoken-env='TAPID_PREVIEW_RECEIPT_SECRET'\n").unwrap();
+    let inspect = |secret: &str| {
+        let output = scenario
+            .command(&[
+                "--json",
+                "install",
+                "--dry-run",
+                "--registry-fixture",
+                "registry.json",
+            ])
+            .env("TAPID_PREVIEW_RECEIPT_SECRET", secret)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["data"]["starting_state"].clone()
+    };
+    let first = inspect("first-secret-value");
+    assert_eq!(first, inspect("second-secret-value"));
+    assert_eq!(first["workspace"][0]["path"], "packages/a/package.json");
+    assert_eq!(first["workspace"][1]["path"], "packages/b/package.json");
+    assert_eq!(first["lifecycle_policy"]["state"], "absent_default_deny");
+    scenario
+        .project
+        .write(
+            "packages/b/package.json",
+            br#"{"name":"b","version":"2.0.0"}"#,
+        )
+        .unwrap();
+    let member_changed = inspect("third-secret-value");
+    assert_eq!(first["root_manifest"], member_changed["root_manifest"]);
+    assert_ne!(
+        first["workspace"][1]["digest"],
+        member_changed["workspace"][1]["digest"]
+    );
+    scenario
+        .project
+        .write(
+            "packages/c/package.json",
+            br#"{"name":"c","version":"1.0.0"}"#,
+        )
+        .unwrap();
+    assert_eq!(
+        inspect("fourth-secret-value")["workspace"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    scenario
+        .project
+        .write("tapid.lifecycle.toml", b"schema=1\n")
+        .unwrap();
+    let policy = inspect("fifth-secret-value");
+    assert_eq!(policy["lifecycle_policy"]["state"], "present");
+    scenario
+        .project
+        .write("tapid.lifecycle.toml", b"schema=1\n# comment\n")
+        .unwrap();
+    assert_ne!(
+        policy["lifecycle_policy"]["digest"],
+        inspect("sixth-secret-value")["lifecycle_policy"]["digest"]
+    );
+    scenario.project.write("tapid.toml", b"[registries.default]\nurl='https://mirror.example'\ntoken-env='TAPID_PREVIEW_RECEIPT_SECRET'\n").unwrap();
+    assert_ne!(
+        first["registry"],
+        inspect("seventh-secret-value")["registry"]
+    );
+
+    let locked = preview_project("preview-receipt-lock");
+    let read = |flag: &str| {
+        let output = locked
+            .command(&["--json", "install", "--dry-run", flag])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["data"]["starting_state"].clone()
+    };
+    let offline = read("--offline");
+    assert_eq!(offline["lock"]["state"], "present");
+    assert_eq!(offline["operation"]["mode"], "offline");
+    let frozen = read("--frozen");
+    assert_eq!(offline["lock"], frozen["lock"]);
+    assert_eq!(frozen["operation"]["mode"], "frozen");
+    let path = locked.project.path().join("tapid.lock");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.push(b'\n');
+    fs::write(path, bytes).unwrap();
+    assert_ne!(
+        offline["lock"]["digest"],
+        read("--offline")["lock"]["digest"]
+    );
+}
+
+#[test]
+fn dependency_dry_run_matches_real_operations_on_equivalent_projects() {
+    for operation in ["install", "add", "remove", "update"] {
+        let preview = CliFixture::new("preview-parity-observation");
+        let actual = CliFixture::new("preview-parity-operation");
+        for scenario in [&preview, &actual] {
+            let manifest = if operation == "add" {
+                br#"{"name":"app","version":"1.0.0"}"#.as_slice()
+            } else {
+                br#"{"name":"app","version":"1.0.0","dependencies":{"h3":"^1.0.0","unrelated":"npm:h3@1.0.0"}}"#.as_slice()
+            };
+            scenario.project.write("package.json", manifest).unwrap();
+            scenario
+                .project
+                .write(
+                    "registry.json",
+                    include_bytes!("../fixtures/npm-aliases.json"),
+                )
+                .unwrap();
+            if matches!(operation, "remove" | "update") {
+                let output = scenario
+                    .command(&["install", "--registry-fixture", "registry.json"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+        }
+        let mut args = match operation {
+            "install" => vec!["install"],
+            "add" => vec!["add", "h3@^1.0.0"],
+            "remove" => vec!["remove", "h3"],
+            "update" => vec!["update", "h3", "--latest", "--save-exact"],
+            _ => unreachable!(),
+        };
+        args.extend(["--registry-fixture", "registry.json", "--json"]);
+        let manifest_before = fs::read(preview.project.path().join("package.json")).unwrap();
+        let lock_before = fs::read(preview.project.path().join("tapid.lock")).ok();
+        let mut preview_args = args.clone();
+        preview_args.push("--dry-run");
+        let output = preview.command(&preview_args).output().unwrap();
+        assert!(output.status.success(), "{operation}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            fs::read(preview.project.path().join("package.json")).unwrap(),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(preview.project.path().join("tapid.lock")).ok(),
+            lock_before
+        );
+        let output = actual.command(&args).output().unwrap();
+        assert!(output.status.success(), "{operation}: {output:?}");
+        let lock = tapid_lockfile::Lockfile::from_json(
+            &fs::read_to_string(actual.project.path().join("tapid.lock")).unwrap(),
+        )
+        .unwrap();
+        let predicted = report["data"]["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| !p["after"].is_null())
+            .map(|p| p["key"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            predicted,
+            lock.packages().keys().cloned().collect(),
+            "{operation}"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(actual.project.path().join("package.json")).unwrap())
+                .unwrap();
+        for edit in report["data"]["declarations"].as_array().unwrap() {
+            assert_eq!(
+                manifest[edit["section"].as_str().unwrap()][edit["name"].as_str().unwrap()],
+                edit["after"],
+                "{operation}"
+            );
+        }
+        for package in report["data"]["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| !p["after"].is_null())
+        {
+            assert_eq!(
+                serde_json::to_value(
+                    lock.packages()[package["key"].as_str().unwrap()].dependencies()
+                )
+                .unwrap(),
+                package["after"]["dependencies"],
+                "{operation}"
+            );
+        }
+        if operation == "update" {
+            assert!(lock.root_bindings()["unrelated"].contains("1.0.0"));
+            assert_eq!(
+                report["data"]["starting_state"]["operation"]["update"]["save_policy"],
+                "exact"
+            );
         }
     }
 }

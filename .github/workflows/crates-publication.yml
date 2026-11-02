@@ -271,6 +271,16 @@ jobs:
             echo "clean Cargo install returned unexpected version: $ACTUAL" >&2
             exit 1
           }
+          "$INSTALL_ROOT/bin/tapid" --help > "$RUNNER_TEMP/tapid-clean-help.txt"
+          jq -n --arg version "$ACTUAL" '{version: $version, help: true}' > "$RUNNER_TEMP/clean-install.json"
+      - name: Retain clean installation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-install-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clean-install.json
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Record final release read-back
         env:
@@ -284,10 +294,42 @@ jobs:
           node --experimental-strip-types tools/release/publish.ts --workspace "$RUNNER_TEMP/tapid-release-source" --json > "$RUNNER_TEMP/final-plan.json"
           test "$(jq '.packages | length' "$RUNNER_TEMP/final-plan.json")" = 0
           test "$(jq '.blockers | length' "$RUNNER_TEMP/final-plan.json")" = 0
-          # shellcheck disable=SC2016
-          # shellcheck disable=SC2016
-          printf '### Release complete\n\n[GitHub release](https://github.com/%s/releases/tag/%s)\n\nSource: `%s`\n\nRelease ID: `%s`\n\nCandidate: `%s`\n\nNative verification and public smoke passed in this run. All approved crate versions are public; a clean Cargo install returned the expected version.\n' "$GITHUB_REPOSITORY" "$TAG" "$SOURCE_SHA" "$RELEASE_ID" "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
-          {
-            printf '\n[Verification run and retained evidence](https://github.com/%s/actions/runs/%s)\n\nConfirmed versions:\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            jq -r '.packages[] | "- " + .name + " " + .version' candidate/intent.json
-          } >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    if: ${{ always() }}
+    needs: [preflight, select, candidate, verify, promote, smoke, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Collect available same-attempt evidence
+        id: evidence-download
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: '*release-*-${{ github.run_attempt }}'
+          path: release-artifacts
+          digest-mismatch: error
+      - name: Write completion ledger and failure summary
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+          EVIDENCE_DOWNLOAD_OUTCOME: ${{ steps.evidence-download.outcome }}
+        run: node --experimental-strip-types tools/release/evidence.ts report release-artifacts release-evidence
+      - name: Retain completion ledger
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-evidence-${{ github.run_attempt }}
+          path: release-evidence
+          if-no-files-found: error
+          retention-days: 30

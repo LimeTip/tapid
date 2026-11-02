@@ -675,6 +675,78 @@ for (const copyStatus of [0, 1]) {
   });
 }
 
+test("Unix unattended selected-version install repeats with closed stdin and a spaced destination", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const destination = join(f.directory, "managed installation");
+  try {
+    const invoke = () => run("/bin/sh", ["-c", 'exec /bin/sh "$1" --version 1.2.3 --install-dir "$2" </dev/null', "fixture", f.installer, destination], { env: f.env });
+    await invoke();
+    const binary = await readFile(join(destination, "tapid"));
+    const marker = await readFile(join(destination, ".tapid-managed"));
+    await invoke();
+    equal((await readFile(join(destination, "tapid"))).equals(binary), true);
+    equal((await readFile(join(destination, ".tapid-managed"))).equals(marker), true);
+    equal((await run(join(destination, "tapid"), ["--version"])).stdout, "tapid 1.2.3\n");
+    equal(await readFile(join(f.directory, "fixture-home", ".profile")).catch(() => null), null);
+  } finally { await f.cleanup(); }
+});
+
+test("Unix preactivation failures preserve destination, marker, durable state and profile", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const paths = [join(f.install, "tapid"), join(f.install, ".tapid-managed"), join(f.install, ".tapid-release-state.json"), join(f.directory, "fixture-home", ".profile")];
+  try {
+    await f.installShell();
+    // The native verifier is a stub in this harness; durable state is a sentinel.
+    await writeFile(paths[2], "durable state sentinel\n");
+    await writeFile(paths[3], "# preserve profile\n");
+    const before = await Promise.all(paths.map(path => readFile(path)));
+    const assertPreserved = async () => {
+      for (let i = 0; i < paths.length; i++) equal((await readFile(paths[i])).equals(before[i]), true, paths[i]);
+    };
+    await rejects(() => f.installShell([], { FIXTURE_SIGNATURE_STATUS: "1" }));
+    await assertPreserved();
+    await writeFile(join(f.directory, "record.tsv"), f.record().replace(f.hash, "0".repeat(64)));
+    await rejects(() => f.installShell());
+    await assertPreserved();
+    await writeFile(join(f.directory, "record.tsv"), f.record());
+    await rm(paths[1]);
+    // Ownership is enforced by the native policy, stubbed in this harness.
+    await rejects(() => f.installShell([], { FIXTURE_INSTALL_POLICY_STATUS: "1" }));
+    equal((await readFile(paths[0])).equals(before[0]), true);
+    equal(await readFile(paths[1]).catch(() => null), null);
+    equal((await readFile(paths[2])).equals(before[2]), true);
+    equal((await readFile(paths[3])).equals(before[3]), true);
+    const blocked = join(f.directory, "not a directory");
+    await writeFile(blocked, "preserve destination parent");
+    await rejects(() => run("/bin/sh", [f.installer, "--install-dir", join(blocked, "bin")], { env: f.env }));
+    equal(await readFile(blocked, "utf8"), "preserve destination parent");
+  } finally { await f.cleanup(); }
+});
+
+test("Unix uninstall preserves installation on profile cleanup failure and supports retry", { skip: platform === "win32" }, async () => {
+  const f = await fixture();
+  const home = join(f.directory, "fixture-home");
+  const destination = join(home, ".local", "bin");
+  try {
+    await f.defaultInstallShell(home, { SHELL: "/bin/sh" });
+    const profile = join(home, ".profile");
+    const installedProfile = await readFile(profile);
+    const installedBinary = await readFile(join(destination, "tapid"));
+    equal(await readFile(join(destination, ".tapid-path-v1", "state"), "utf8"), "completed\n");
+    await rm(profile);
+    await mkdir(profile); // deterministic failure even under privileged runners
+    const invoke = () => run("/bin/sh", [join(root, "scripts/uninstall.sh"), "--install-dir", destination], { env: f.env });
+    await rejects(invoke);
+    equal((await readFile(join(destination, "tapid"))).equals(installedBinary), true);
+    equal(await readFile(join(destination, ".tapid-managed"), "utf8"), "tapid-managed-v1\n");
+    await rm(profile, { recursive: true });
+    await writeFile(profile, installedProfile);
+    await invoke();
+    equal(await readFile(join(destination, ".tapid-managed")).catch(() => null), null);
+    await rejects(invoke);
+  } finally { await f.cleanup(); }
+});
+
 test("Unix receipt cleanup survives a changed SHELL and missing binary", shellOptions, async () => {
   const f = await fixture();
   const home = join(f.directory, "receipt-home");

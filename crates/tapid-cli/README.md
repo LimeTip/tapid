@@ -23,7 +23,7 @@ curl -fsSL https://tapid.dev/install.sh | bash
 iwr -useb https://tapid.dev/install.ps1 | iex
 ```
 
-The next-release installers, expected for 0.0.11, select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The new public routes and installer copies require the coordinated release cutover; this source README does not establish their deployed state. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
+The generated release installers select archives through `https://tapid.dev/releases/v1/latest.tsv`, check their recorded size and SHA-256, and install Tapid without administrator privileges. GitHub remains the initial archive host. Explicit versions through 0.0.10 use their historical GitHub archives and `SHA256SUMS` unless `TAPID_RELEASE_RECORD_URL` is supplied. The 0.0.11 rollout introduced these routes; this source README does not establish their current deployed state. See the [administrator lifecycle contract](../../docs/release-distribution.md#administrator-lifecycle-contract) for explicit-path detection and unattended limitations. See the repository [installation details](https://github.com/LimeTip/tapid#installation-details) for version selection, contributor source builds, and uninstall instructions.
 
 Automation clients can use the compact [agent guide v1](../../docs/agent-guide.md) for command selection, JSON results, and recovery decisions.
 
@@ -36,6 +36,8 @@ tapid status [--project-dir <PATH>] [--workspace <NAME>] [--json]
 tapid explain <PACKAGE>@<VERSION> [--artifact-file <PATH>] [--json]
 tapid manifest validate [PATH]
 tapid lock verify
+tapid --json lock inspect <SNAPSHOT> [--package <NAME> | --instance <REF>] [--limit <N>] [--cursor <TOKEN>]
+tapid --json lock compare <BEFORE> <AFTER> [--package <NAME> | --instance <REF>] [--limit <N>] [--cursor <TOKEN>]
 tapid import-package-lock <PATH>
 tapid install [OPTIONS]
 tapid ci [OPTIONS]
@@ -57,6 +59,19 @@ tapid run <SCRIPT> [PERMISSION FLAGS] [--node-runtime <PATH>] [--receipt-json | 
 ```
 
 `tapid init` creates a private `package.json` without overwriting an existing file. Manifest and lock commands validate the selected files. Paths default to the current directory and `package.json` where applicable.
+
+`lock inspect` and `lock compare` require explicit snapshot files and JSON mode.
+They observe persisted graphs without loading manifests, registry configuration,
+stores, recovery state or scripts. Same-format comparisons separate exact instance
+and selection-site changes from declaration, artifact, verification-receipt and
+derived-output evidence. Cross-format graph equivalence is unsupported. A comparison
+is an observation of saved results, whereas a preview predicts a future operation.
+Inputs are bounded to 32 MiB each; pages default to 100 records, accept at most
+1,000, and the entire response is bounded to 1 MiB. Complete analysis precedes
+paging. Filters select names or opaque references without expanding dependencies;
+filtered results say nothing about excluded instances. See the
+[JSON contract](../../docs/json-results.md#persisted-lock-graph-observations)
+for ordering, availability, cursors, limits and exit codes.
 
 `tapid manifest validate` rejects symlinks and other non-regular files before
 parsing. Root scripts perform the same check before loading run policy or
@@ -194,7 +209,7 @@ Starting with 0.0.10, `tapid upgrade` discovers and installs the latest stable r
 
 When the installed executable matches the verified release bytes, the command reports that Tapid is already up to date and leaves the executable unchanged. It still downloads and verifies the release before comparing. If network discovery fails and the command uses its recovery cache, it reports that the latest release could not be checked. Cached recovery is reported as a restore or an unchanged executable.
 
-The next-release command, expected for 0.0.11, reads the same `tapid.dev` release record as the installers and verifies its `.sig` TrustEnvelope sidecar against the embedded production keyring before selecting an artifact. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. An explicit injected keyring is reserved for controlled test seams; explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`.
+The upgrade command reads the same `tapid.dev` release record as the installers and verifies its `.sig` TrustEnvelope sidecar against the embedded production keyring before selecting an artifact. Use `--release-url` or `TAPID_RELEASE_RECORD_URL` to select another record address. It validates metadata, archive size, checksum, and archive contents before staging executable replacement. Invalid received metadata or mismatched downloads fail. Default discovery does not fall back to the GitHub API. An explicit injected keyring is reserved for controlled test seams; explicit `--endpoint` retains the historical signed-discovery protocol and is separate from `--release-url`.
 
 ## Install packages
 
@@ -232,6 +247,29 @@ Lockfile impact describes selecting the shown direct version. An unchanged direc
 A dry run never writes project files, creates an activation lock, recovers transactions, reads or writes the package store, downloads package artifacts, or runs lifecycle scripts. Pending recovery stops the preview. Live resolution may request registry metadata; `--registry-fixture` resolves entirely from local fixture metadata. `install --dry-run --offline` and `--frozen` inspect a matching validated lock without checking whether its artifacts are cached. Output states the network permission, package metadata lookup count, and cache/artifact effects explicitly. A resolved graph does not attest artifact availability, archive validity, generated lifecycle outputs, or the success of a later install. Copied file/Git sources and imported npm locks currently require an ordinary install rather than a resolved preview.
 
 `tapid --json add PACKAGE --dry-run` uses the version 1 command envelope with unchanged project state. `data.preview_kind` is `resolved_graph`; `data.declarations` lists section/name/before/after edits, `data.packages` lists package changes and reasons, `data.root_changes` lists root binding changes, and `data.effects` describes this preview's effects. This is an inspection result, not a saved executable plan. A later command reads current inputs and may resolve different metadata.
+
+Each preview includes `data.starting_state` (receipt `schema_version: 1`), also
+shown in human output. `root_manifest` and `selected_manifest` retain both roles
+and report project-relative paths with SHA-256 identities of the original source
+bytes, including whitespace. `workspace` lists sorted discovered member paths
+and source identities, including unselected members. `lock` explicitly reports
+absence or the exact-byte identity of the native lock parsed for inspection.
+`registry` describes effective routing as semantic configuration, including
+credential environment names but excluding their values. Online metadata access
+may read those credentials. `operation` records mode, update selection/save policy
+and integrity compatibility; `target` records OS, architecture and libc.
+`lifecycle_policy` distinguishes absent/default-deny from a present policy's
+exact-source identity; approvals, environment values and raw policy are not emitted.
+
+Covered inputs and workspace membership are rechecked before success; observable
+changes fail with `PROJECT_CHANGED`. This is a non-atomic observation without an
+activation lock: rechecks cannot detect every edit-and-revert race. Credential
+values, mutable registry contents, artifact availability/bytes, installed/store
+state, hook outputs and runtime assurance are excluded. Fixture results describe
+fixture evidence, not live registry evidence. Network permission is separate from
+observed metadata lookup counts. Equal identities or an unchanged graph establish
+neither verification nor approval, and later resolution may differ. Saved/applyable
+plans remain deferred until a concrete review workflow demonstrates their value.
 
 Lifecycle edits validate the manifest they were planned against after acquiring the project lock. An intervening semantic manifest edit fails with `PROJECT_CHANGED` before writing the override. This protects the planning-to-lock interval for cooperating commands; it does not protect against an uncooperative writer changing files during the transaction.
 
@@ -387,7 +425,7 @@ The CLI uses `tapid-runner::ExecutionRequest` and checked execution exclusively 
 
 On successful contained execution, stderr receives a receipt after streamed child output. Human output starts with `sandbox receipt:` and pretty-printed JSON. `--receipt-json` emits the same data as one compact JSON line, preceded by a newline even when child stderr did not end with one. Child stdout and stderr are streamed once and are not embedded or replayed in the receipt. Child output can forge receipt text, so stderr receipts are unsuitable for trusted machine results.
 
-Use `--result-file PATH` for a separate schema-version-1 run result on both prelaunch failure and child completion. It suppresses the stderr receipt, conflicts with `--receipt-json`, and preserves child streams and exit codes. The destination must be a new file in an existing caller-controlled directory outside the canonical project root. Tapid rejects existing files and symlinks without overwriting them. Wait for Tapid to exit and require one complete newline-terminated JSON object; missing or partial results are transport failures. The result contains policy inputs when available and the existing checked receipt on completion. It adds no containment or cleanup guarantees. See the [result protocol](../../docs/json-results.md#run-child-output-and-receipts) for destination trust, failure codes, and interrupted-write handling.
+Use `--result-file PATH` for a separate schema-version-1 run result on both prelaunch failure and child completion. It suppresses the stderr receipt, conflicts with `--receipt-json`, and preserves child streams and exit codes. The destination must be a new file in an existing caller-controlled directory outside the canonical project root. Tapid rejects existing files and symlinks without overwriting them. Wait for Tapid to exit and require one complete newline-terminated JSON object; missing or partial results are transport failures. The result contains policy inputs when available and the existing checked receipt on completion. Supported graceful console cancellation on the experimental Windows backend can publish `Cancelled` after checked cleanup (exit 130); checked timeouts publish `TimedOut` (exit 1). Forced termination, supervisor death, unsupported signal handling such as Unix SIGINT, and interrupted publication may leave no complete result. It adds no containment or cleanup guarantees. See the [result protocol](../../docs/json-results.md#run-child-output-and-receipts) for destination trust, failure codes, and interrupted-write handling.
 
 Receipt schema version 1 contains `assurance`, `backend` with name/version/deprecation, `requested`, `declared`, `observed`, and `enforced` boolean dimension maps; `declared_evidence`, `observed_evidence`, and `established_evidence` arrays with dimension/scope/mechanism/limitations; `effective_filesystem`; `configured_limits`; `termination`; and `completion` with confirmed dimensions, evidence, and cleanup confidence. Each filesystem entry contains display `path`, lossless `native_path` with `encoding` and integer `units`, `access`, `kind`, `source`, and `binding`. Unix encoding is `unix-bytes`; Windows uses `windows-utf16`. Enum values use their Rust names. Project and runtime entries remain separate via `ProjectPolicy` and `BackendRuntime`. Limits use their configuration names and `null` for unconfigured values. No macOS configured limit is silently accepted. See [runner semantics](../tapid-runner/README.md) for exact directory data, global metadata, explicit devices, sampled probes, and cleanup limitations.
 
@@ -470,3 +508,20 @@ unknown. Check `changes.state` for committed files and detail completeness befor
 using the observations; installation success does not establish application
 readiness. See [lifecycle result fields](../../docs/json-results.md#dependency-lifecycle-observations)
 and [cold-CI prerequisites](../../docs/dependency-lifecycle.md#reading-installation-results).
+
+Project-lock contention fails immediately as `PROJECT_BUSY`. Normal shared-store
+lock acquisition has a five-second budget per acquisition call, shared across
+recovery escalation and retries; expiry reports `STORE_BUSY`. Cache maintenance
+continues to refuse immediately as `CACHE_BUSY`. Separate acquisitions have
+separate budgets. This is not a command deadline: recovery already started,
+filesystem latency, network work, lifecycle execution, and lock ownership are not
+bounded. No attempt starts after expiry, but scheduling or an in-flight attempt can
+delay return. Long legitimate holders can cause failure; polling has no fairness
+guarantee. See [store locking](../tapid-store/README.md) for the acquisition policy.
+
+If a mutation response is lost, inspect expected state with `status` and follow
+pending-recovery guidance before another mutation. Current status and an
+`unchanged` result cannot prove whether a particular historical invocation
+committed, especially after cleanup or a later mutation. Operation IDs and durable
+completion records remain deferred. See [JSON results](../../docs/json-results.md#contention-and-lost-responses)
+and the [workflow evaluation](../../docs/testing.md#bounded-wait-and-lost-response-evaluation).

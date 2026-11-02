@@ -28,6 +28,7 @@ fn run_executable_with_retry(command: &mut Command) -> std::process::Output {
 
 struct Fixture {
     root: PathBuf,
+    home: tapid_test_support::TempHome,
 }
 
 impl Fixture {
@@ -121,11 +122,19 @@ esac
         )
         .unwrap();
         fs::set_permissions(root.join("bin/curl"), fs::Permissions::from_mode(0o755)).unwrap();
-        Self { root }
+        Self {
+            root,
+            home: tapid_test_support::TempHome::new("upgrade-cli").unwrap(),
+        }
     }
 
     fn upgrade(&self, extra: &[&str]) -> std::process::Output {
+        self.upgrade_from(extra, &self.root)
+    }
+
+    fn upgrade_from(&self, extra: &[&str], project: &std::path::Path) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .current_dir(project)
             .args(["upgrade", "--destination"])
             .arg(self.root.join("tapid"))
             .args(extra)
@@ -134,6 +143,7 @@ esac
             .env_remove("TAPID_RELEASE_RECORD_URL")
             .env("PATH", self.root.join("bin"))
             .env("FIXTURE", &self.root)
+            .env("HOME", self.home.path())
             .env("TAPID_RELEASE_KEYRING", self.root.join("keyring.json"))
             .output()
             .unwrap()
@@ -506,4 +516,71 @@ fn signed_same_version_archive_replay_preserves_executable_and_state() {
             state
         );
     }
+}
+
+#[test]
+fn lifecycle_operations_preserve_project_state() {
+    let fixture = Fixture::new();
+    let project = tapid_test_support::TempProject::new("upgrade-project-preservation").unwrap();
+    for (path, bytes) in [
+        (
+            "package.json",
+            b"{\"dependencies\":{\"fixture\":\"1.0.0\"}}\n".as_slice(),
+        ),
+        ("tapid.lock", b"lockfile sentinel\n"),
+        ("node_modules/fixture/index.js", b"export default 42;\n"),
+        (".tapid-store/fixture/data", b"verified graph sentinel\n"),
+    ] {
+        project.write(path, bytes).unwrap();
+    }
+    fn snapshot(root: &std::path::Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        fn visit(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            entries: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+        ) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                let directory = path.is_dir();
+                entries.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    if directory {
+                        None
+                    } else {
+                        Some(fs::read(&path).unwrap())
+                    },
+                ));
+                if directory {
+                    visit(root, &path, entries);
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        visit(root, root, &mut entries);
+        entries.sort();
+        entries
+    }
+    let before = snapshot(project.path());
+    for arguments in [&["--dry-run"][..], &[][..], &[][..]] {
+        let output = fixture.upgrade_from(arguments, project.path());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(snapshot(project.path()), before);
+    }
+    fs::write(fixture.root.join("release.tsv"), b"invalid metadata\n").unwrap();
+    assert!(!fixture.upgrade_from(&[], project.path()).status.success());
+    assert_eq!(snapshot(project.path()), before);
+    fs::remove_file(fixture.root.join("release.tsv")).unwrap();
+    fs::write(fixture.root.join("tapid"), b"damaged executable").unwrap();
+    let recovery = fixture.upgrade_from(&[], project.path());
+    assert!(
+        recovery.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovery.stderr)
+    );
+    assert!(String::from_utf8_lossy(&recovery.stdout).contains("Restored Tapid"));
+    assert_eq!(snapshot(project.path()), before);
 }
