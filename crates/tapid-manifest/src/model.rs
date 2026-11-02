@@ -3,6 +3,14 @@ use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf};
 use tapid_core::{PackageName, PackageVersion};
 
+/// Preserved override declarations; only the project root activates override policy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum OverrideDeclaration {
+    Replacement(String),
+    Nested(BTreeMap<String, OverrideDeclaration>),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DependencyKind {
     Dependencies,
@@ -33,7 +41,7 @@ pub struct PackageManifest {
     pub(crate) dev_dependencies: BTreeMap<String, String>,
     pub(crate) optional_dependencies: BTreeMap<String, String>,
     pub(crate) peer_dependencies: BTreeMap<String, String>,
-    pub(crate) overrides: BTreeMap<String, String>,
+    pub(crate) overrides: BTreeMap<String, OverrideDeclaration>,
     pub(crate) scripts: BTreeMap<String, String>,
     pub(crate) bin: Option<PackageBin>,
     pub(crate) extra: BTreeMap<String, serde_json::Value>,
@@ -225,7 +233,7 @@ impl PackageManifest {
     pub fn peer_dependencies(&self) -> &BTreeMap<String, String> {
         &self.peer_dependencies
     }
-    pub fn overrides(&self) -> &BTreeMap<String, String> {
+    pub fn overrides(&self) -> &BTreeMap<String, OverrideDeclaration> {
         &self.overrides
     }
     pub fn scripts(&self) -> &BTreeMap<String, String> {
@@ -291,7 +299,7 @@ struct ManifestDocument<'a> {
     #[serde(rename = "peerDependencies", skip_serializing_if = "Option::is_none")]
     peer_dependencies: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    overrides: Option<&'a BTreeMap<String, String>>,
+    overrides: Option<&'a BTreeMap<String, OverrideDeclaration>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scripts: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

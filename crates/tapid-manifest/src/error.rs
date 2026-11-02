@@ -60,6 +60,7 @@ pub enum ManifestError {
     ExpectedBoolean(&'static str),
     ExpectedMap(&'static str),
     ExpectedMapValueString { field: &'static str, key: String },
+    ExpectedOverrideValue { path: Vec<String> },
     InvalidPackageName(tapid_core::DomainError),
     InvalidPackageVersion(tapid_core::DomainError),
     InvalidDependencyName(tapid_core::DomainError),
@@ -81,6 +82,9 @@ impl ManifestError {
             ExpectedBoolean(field) => (Some(*field), None, "boolean"),
             ExpectedMap(field) => (Some(*field), None, "object"),
             ExpectedMapValueString { field, key } => (Some(*field), Some(key.clone()), "string"),
+            ExpectedOverrideValue { path } => {
+                (Some("overrides"), path.last().cloned(), "string_or_object")
+            }
             InvalidPackageName(_) => (Some("name"), None, "package_name"),
             InvalidPackageVersion(_) => (Some("version"), None, "semver_version"),
             InvalidDependencyName(tapid_core::DomainError::InvalidPackageName(name)) => {
@@ -132,9 +136,14 @@ impl ManifestError {
                 Some(field) => value.as_ref().and_then(|value| value.get(field)),
                 None => value.as_ref(),
             };
-            let observed = match &key {
-                Some(key) => observed.and_then(|value| value.get(key)),
-                None => observed,
+            let observed = match self {
+                ExpectedOverrideValue { path } => path.iter().fold(value.as_ref(), |value, key| {
+                    value.and_then(|value| value.get(key))
+                }),
+                _ => match &key {
+                    Some(key) => observed.and_then(|value| value.get(key)),
+                    None => observed,
+                },
             };
             match observed {
                 None => "missing",
@@ -168,6 +177,11 @@ impl fmt::Display for ManifestError {
             Self::ExpectedMapValueString { field, key } => write!(
                 f,
                 "package.json field '{field}' entry '{key}' must be a string"
+            ),
+            Self::ExpectedOverrideValue { path } => write!(
+                f,
+                "package.json entry '{}' must be a string or object",
+                path.join("/")
             ),
             Self::DependencyNotDeclared { field, name } => write!(
                 f,

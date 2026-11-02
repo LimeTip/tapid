@@ -2,6 +2,110 @@ use std::{fs, process::Command};
 use tapid_test_support::{TempHome, TempProject};
 
 #[test]
+fn targeted_override_import_replays_recorded_edges_then_update_applies_policy() {
+    let project = reference_project("targeted-import-conversion");
+    let home = TempHome::new("targeted-import-conversion").unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("package.json")).unwrap()).unwrap();
+    manifest["overrides"] = serde_json::json!({"parent@1":{"shared":"1.0.0"}});
+    let original = serde_json::to_vec(&manifest).unwrap();
+    project.write("package.json", &original).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tapid"))
+            .args(args)
+            .current_dir(project.path())
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            .env("LOCALAPPDATA", home.path())
+            .env_remove("TAPID_NPM_TOKEN")
+            .output()
+            .unwrap()
+    };
+    let imported = run(&["import-package-lock", "package-lock.json"]);
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let store_path = project.path().join("store");
+    let store = store_path.to_str().unwrap();
+    let install = [
+        "install",
+        "--frozen",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store,
+    ];
+    let replay = run(&install);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let imported_bytes = fs::read(project.path().join("tapid.lock")).unwrap();
+    let lock = tapid_lockfile::ImportedNpmLockfile::from_json(
+        std::str::from_utf8(&imported_bytes).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        lock.graph().unwrap().packages["node_modules/parent/node_modules/shared"]
+            .version
+            .to_string(),
+        "2.0.0"
+    );
+    project
+        .write("node_modules/KEEP", b"recorded layout")
+        .unwrap();
+    manifest["overrides"]["parent@1"]["shared"] = serde_json::json!("^1");
+    project
+        .write("package.json", &serde_json::to_vec(&manifest).unwrap())
+        .unwrap();
+    assert!(!run(&install).status.success());
+    assert_eq!(
+        fs::read(project.path().join("tapid.lock")).unwrap(),
+        imported_bytes
+    );
+    assert_eq!(
+        fs::read(project.path().join("node_modules/KEEP")).unwrap(),
+        b"recorded layout"
+    );
+    project.write("package.json", &original).unwrap();
+    let update = run(&[
+        "update",
+        "--registry-fixture",
+        "registry.json",
+        "--store-dir",
+        store,
+    ]);
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let lock = tapid_lockfile::Lockfile::from_json(
+        &fs::read_to_string(project.path().join("tapid.lock")).unwrap(),
+    )
+    .unwrap();
+    let parent = lock
+        .packages()
+        .values()
+        .find(|package| package.name() == "parent")
+        .unwrap();
+    assert!(parent.dependencies()["shared"].contains("shared@1.0.0"));
+    assert_eq!(
+        fs::read(project.path().join("package.json")).unwrap(),
+        original
+    );
+    let replay = run(&["install", "--offline", "--frozen", "--store-dir", store]);
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+}
+
+#[test]
 fn npm_import_update_converts_to_a_native_lock() {
     let project = TempProject::new("npm-import-update-empty").unwrap();
     let home = TempHome::new("npm-import-update-empty").unwrap();

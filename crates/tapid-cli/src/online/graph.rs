@@ -32,7 +32,7 @@ pub(super) fn resolve_package_graph(
         direct_root_identities: mut root_registry_identities,
         workspace_root_keys,
         registry_dependencies: workspace_registry_dependencies,
-        overrides,
+        override_requirements,
     } = workspace_root_resolution(manifest, &workspace, registry_config)?;
     let direct_local_names = manifest
         .dependencies()
@@ -308,10 +308,16 @@ pub(super) fn resolve_package_graph(
         }
     }
     resolving.set(true);
-    let (resolution, records, candidate_exclusions) = resolution::resolve_with_preferences(
+    let policy = tapid_resolver::OverridePolicy::new_for_registry(
+        resolution::compile_override_rules(manifest)?,
+        NPM.parse()
+            .map_err(|error: tapid_core::DomainError| error.to_string())?,
+    )
+    .map_err(OperationalError::from)?;
+    let (resolution, records, candidate_exclusions) = resolution::resolve_with_policy(
         &roots,
         |parent, dependency| registry_config.registry_for_dependency(parent, dependency),
-        &overrides,
+        &policy,
         &mut fetch_records,
         &preferred,
         seed,
@@ -322,10 +328,8 @@ pub(super) fn resolve_package_graph(
             context.locate_requirements(&declarations);
             resolution::locate_override_requirements(
                 context,
-                &declarations,
-                manifest,
                 &project.join("package.json"),
-                &overrides,
+                &override_requirements,
             );
         }
         error

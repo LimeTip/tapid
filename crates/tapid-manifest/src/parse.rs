@@ -30,7 +30,10 @@ impl PackageManifest {
             manifest.peer_dependencies = parse_string_map(value, "peerDependencies", true)?;
         }
         if let Some(value) = object.get("overrides") {
-            manifest.overrides = parse_string_map(value, "overrides", false)?;
+            manifest.overrides = parse_overrides(value, &mut vec!["overrides".into()])?;
+            // Value maps have already discarded duplicate keys. Check the original
+            // declaration text before exposing a potentially ambiguous policy.
+            crate::overrides::validate_unique_keys(input).map_err(ManifestError::InvalidJson)?;
         }
         if let Some(value) = object.get("scripts") {
             manifest.scripts = parse_string_map(value, "scripts", false)?;
@@ -59,6 +62,30 @@ impl PackageManifest {
             .collect();
         Ok(manifest)
     }
+}
+
+fn parse_overrides(
+    value: &Value,
+    path: &mut Vec<String>,
+) -> Result<BTreeMap<String, crate::OverrideDeclaration>, ManifestError> {
+    let object = value
+        .as_object()
+        .ok_or(ManifestError::ExpectedMap("overrides"))?;
+    object
+        .iter()
+        .map(|(key, value)| {
+            path.push(key.clone());
+            let declaration = match value {
+                Value::String(range) => crate::OverrideDeclaration::Replacement(range.clone()),
+                Value::Object(_) => {
+                    crate::OverrideDeclaration::Nested(parse_overrides(value, path)?)
+                }
+                _ => return Err(ManifestError::ExpectedOverrideValue { path: path.clone() }),
+            };
+            path.pop();
+            Ok((key.clone(), declaration))
+        })
+        .collect()
 }
 
 fn parse_bin(

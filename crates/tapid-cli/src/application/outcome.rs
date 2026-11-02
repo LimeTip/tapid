@@ -202,6 +202,8 @@ impl OperationalError {
         diagnostic.requirements.push(RequirementDiagnostic {
             local_name: Some(name.to_owned()),
             requirement: requirement.to_owned(),
+            original_requirement: None,
+            override_rules: Vec::new(),
             package: None,
             declaration: Some(declaration),
         });

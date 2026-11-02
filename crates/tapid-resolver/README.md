@@ -1,5 +1,10 @@
 # tapid-resolver
 
+`OverridePolicy::inspect_edges` evaluates a bounded batch through the same policy
+matcher as resolution and returns current matches. It does not establish how a
+persisted graph was selected; callers must distinguish current policy from
+historical provenance and must not invent missing original requirements.
+
 [![CI](https://github.com/LimeTip/tapid/actions/workflows/ci.yml/badge.svg)](https://github.com/LimeTip/tapid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/tapid-resolver)](https://crates.io/crates/tapid-resolver)
 [![Crates.io downloads](https://img.shields.io/crates/d/tapid-resolver)](https://crates.io/crates/tapid-resolver)
@@ -35,3 +40,39 @@ version, instead of flattening those identities to strings.
 Npm alias requirements retain the actual target name alongside the parsed version range. Resolution selects the actual registry identity while retaining local root bindings and parent edge names. Routing callbacks receive the actual target name. Peer providers are selected by local root name and validated against the actual target registry; explicit alias peers must also match the target name. Distinct local aliases can select different versions of one actual package.
 
 `resolve_graph_with_preferences` accepts exact locked version preferences. Compatible preferences precede the highest-version rule while retaining registry identity and range checks. The CLI supplies locked graph metadata and requests fresh metadata only when the prior candidates cannot satisfy changed inputs. `refresh_roots` selects the highest compatible versions for named local root bindings while retaining locked preferences for transitive edges and other aliases of the same actual package. Frozen installs replay the exact graph outside fresh resolution.
+
+`resolve_graph_with_policy` additionally accepts a compiled `OverridePolicy`.
+Rules replace immediate registry dependency ranges by local child name, optionally
+restricted to an incoming local parent binding and selected parent version range.
+Version-qualified parent rules precede parent-only rules, which precede flat
+rules. Different parsed replacements at the winning precedence fail with
+`OverrideConflict`; diagnostic spelling is excluded from range comparison.
+Aliases retain their actual targets and routing uses the original target.
+Copied parents and copied child sources are excluded. Peer requirements remain
+unchanged. Existing resolution entry points use an empty policy.
+
+`OverridePolicy::new_for_registry` restricts matches to parents from one exact
+registry origin. The CLI uses this boundary while migrating its existing flat
+npm overrides to edge selection. Raw metadata retains original requirements;
+optional admission uses effective ranges inside the existing traversal.
+
+`resolve_graph_with_optional_policy` additionally accepts normalized optional
+requirements keyed by exact parent identity. Optional names supersede regular
+declarations of the same name. After routing the original actual target and
+applying policy for the incoming binding, the resolver admits an optional edge
+only when supplied eligible metadata contains a matching candidate. Callers own
+platform filtering and incremental metadata fetching; absence is not a mandatory
+edge failure. Optional declarations share the retained-input budget.
+
+The existing traversal registers every reachable exact-package/local-binding
+context, including bindings discovered after expansion. Equivalent outgoing maps
+share the package; differing effective maps fail with `OverrideTopology`, even
+when candidates would select the same child version. Contexts are deduplicated
+for cycles. Context visits and edge/rule work are bounded at 1,000,000; retained
+policy text and context evidence share the 64 MiB input budget. Successful
+results retain matched rule identifiers and original/effective requirements.
+Candidate-selection failures retain the same edge evidence in
+`RequirementOrigin::override_match`; consumers need not infer matches from
+effective range text.
+The CLI compiles active root declarations into this same policy for native
+installation, previews and dependency edits.
