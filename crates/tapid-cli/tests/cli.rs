@@ -35,11 +35,11 @@ mod workspace_acceptance;
 #[test]
 fn relative_coverage_profile_is_anchored_to_the_parent_directory() {
     let parent = std::env::current_dir().unwrap();
+    let project = tapid_test_support::TempProject::new("coverage-profile").unwrap();
     let relative = OsStr::new("coverage-%p.profraw");
-    assert_eq!(
-        command_support::coverage_profile_path(relative, &parent),
-        parent.join(relative)
-    );
+    let resolved = command_support::coverage_profile_path(relative, &parent);
+    assert_eq!(resolved, parent.join(relative));
+    assert_ne!(resolved, project.path().join(relative));
 }
 
 #[test]
@@ -145,7 +145,13 @@ fn license_prints_complete_apache_text_without_accessing_a_project() {
         .env_clear();
     // Keep coverage instrumentation from writing a profile into the project.
     if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
-        command.env("LLVM_PROFILE_FILE", profile_file);
+        command.env(
+            "LLVM_PROFILE_FILE",
+            command_support::coverage_profile_path(
+                &profile_file,
+                &std::env::current_dir().unwrap(),
+            ),
+        );
     }
     let output = command.output().unwrap();
     assert!(output.status.success(), "{output:?}");
