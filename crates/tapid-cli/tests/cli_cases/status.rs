@@ -353,6 +353,9 @@ fn status_reports_pending_recovery_and_unmanaged_installation_without_recovering
     let (output, value) = status(project.path(), &[]);
     assert!(!output.status.success());
     assert_eq!(value["data"]["recovery"], "pending");
+    let guidance = value["data"]["recovery_guidance"].as_str().unwrap();
+    assert!(guidance.contains("tapid install"));
+    assert!(guidance.contains("Preserve recovery files"));
     assert_eq!(value["data"]["manifest_lock_agreement"], "match");
     assert_eq!(
         value["data"]["installation"][0]["state"],
@@ -394,6 +397,20 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
     project.write("tapid.toml", b"[registries.default]\nurl = \"https://registry.example\"\ntoken-env = \"TAPID_STATUS_TEST_SECRET\"\n").unwrap();
     let (_, value) = status(project.path(), &["--workspace", "b"]);
     assert_eq!(value["data"]["workspace"]["selected"], "b");
+    assert_eq!(
+        value["project"],
+        project.path().canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(
+        value["data"]["workspace"]["manifest"],
+        project
+            .path()
+            .join("packages/b/package.json")
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string()
+    );
     assert_eq!(value["data"]["workspace"]["linking"], "not_verified");
     let expected_location = format!(
         "{}#/dependencies/bad",
@@ -418,6 +435,19 @@ fn status_checks_all_workspace_manifests_and_never_reads_credentials() {
         "TAPID_STATUS_TEST_SECRET"
     );
     assert_eq!(value["data"]["snapshot"]["consistency"], "not_atomic");
+
+    let (output, unknown) = status(project.path(), &["--workspace", "missing"]);
+    assert!(!output.status.success());
+    assert_eq!(unknown["data"]["workspace"]["selected"], "missing");
+    assert!(unknown["data"]["workspace"]["manifest"].is_null());
+    assert!(
+        unknown["data"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| { b["code"] == "WORKSPACE_SELECTION_INVALID" })
+    );
+    assert_eq!(unknown["changes"]["state"], "unchanged");
 }
 
 #[test]
@@ -438,6 +468,22 @@ fn status_reports_local_readiness_without_claiming_tree_or_runner_verification()
     let (output, value) = status(project.path(), &[]);
     assert!(output.status.success());
     assert_eq!(value["data"]["assessment"], "no_local_blockers");
+    assert_eq!(
+        value["data"]["verification_depth"],
+        "local_metadata_and_ownership_only"
+    );
+    for check in [
+        "atomic_snapshot_or_concurrent_writer_exclusion",
+        "installed_tree_integrity_and_lock_correspondence",
+    ] {
+        assert!(
+            value["data"]["checks_not_performed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == check)
+        );
+    }
     assert_eq!(value["data"]["manifest_lock_agreement"], "match");
     assert_eq!(value["data"]["installation"][0]["state"], "managed");
     assert_eq!(value["data"]["capabilities"]["runner"], "not_assessed");
