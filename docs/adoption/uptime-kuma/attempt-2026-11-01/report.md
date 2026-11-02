@@ -77,23 +77,54 @@ specification, comparator and both test files matched the checkout's SHA-256 has
 These helper tests verify capture/replay-fixture behavior, not the external application.
 No repository tests were executed directly on the host.
 
+The subsequent offline Rust reductions use the existing importer interface and
+registry transport fake, with metadata held by `tapid-test-support::FakeRegistry`.
+They need no filesystem projects or network. In the pinned Linux arm64 image,
+the affected-crate lane passed 174 tests, including both named reductions, plus
+Clippy and workspace formatting:
+
+```text
+node --experimental-strip-types scripts/dev.ts test -p tapid-lockfile -p tapid-registry-client --all-features --locked
+node --experimental-strip-types scripts/dev.ts clippy -p tapid-lockfile -p tapid-registry-client --all-targets --all-features --locked -- -D warnings
+node --experimental-strip-types scripts/dev.ts fmt --all --check
+```
+
+Validation used one Cargo job, `CARGO_INCREMENTAL=0`, and
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` after default-debug
+compilation received SIGKILL. All 572 tracked source files matched SHA-256
+checksums in the validation copy before the final test run. A redundant test
+link overlapping a networked pilot retry also received SIGKILL; the final
+sequential test run above passed. This is local container evidence, not an
+engine validation receipt or native macOS/Windows validation.
+
 ## Follow-up order and evidence limits
 
-1. Obtain a disposable resource envelope that completes the npm baseline. Retain
-   before/after resource counters and npm logs; do not skip hooks to manufacture a
-   successful baseline. This affected baseline and recovery, so it currently prevents
-   meaningful application comparisons.
-2. Reduce import rejection to a local Rust fixture and assess published dependency
-   workspace metadata under [#230](https://github.com/LimeTip/tapid/issues/230).
+1. Complete the npm build/start baseline in a larger disposable memory envelope.
+   The [subsequent resource retries](../resource-retries-2026-11-02/report.md)
+   completed npm installation and the limited backend suite, but builds still
+   exhausted V8 or VM memory. Preserve resource counters and lifecycle scripts.
+2. Assess published dependency workspace metadata under
+   [#230](https://github.com/LimeTip/tapid/issues/230). The offline Rust reduction
+   `adoption_published_redis_workspace_metadata_is_not_silently_discarded` in
+   [lockfile tests](../../../../crates/tapid-lockfile/src/npm_import/tests.rs)
+   reproduces the exact pointer, package and unsupported-field diagnostic, with
+   a control that removes the workspace declaration from the reduced input.
    It appeared in three import attempts, all in this single project; these are not
    three independent projects. Do not silently discard workspace semantics.
-3. Reduce the registry metadata rejection to a local Rust fixture and determine
-   whether unrelated historical versions poison resolution. Native install and add
-   hit it twice. Fail-closed package-name validation must remain intact. Owning defect
-   classification is pending reduction; [#307](https://github.com/LimeTip/tapid/issues/307)
+3. Assess whole-packument rejection of malformed historical versions. The offline
+   Rust reduction `adoption_historical_express_dependency_name_fails_closed` in
+   [registry tests](../../../../crates/tapid-registry-client/src/npm.rs) places
+   `../serve-static` in a synthetic historical record beside a valid candidate:
+   the complete fetch rejects the invalid name. Correcting that name allows both
+   records to parse. Synthetic versions and artifact data are parser controls,
+   not a preserved registry snapshot or a successful application evaluation.
+   Native install and add hit this diagnostic twice. Fail-closed package-name
+   validation remains intact. Owning defect
+   classification remains open; [#307](https://github.com/LimeTip/tapid/issues/307)
    retains this unresolved finding rather than claiming a resolver fix.
-4. Recover the interrupted update through Tapid's existing transaction recovery
-   path before attempting restoration. Preserve the journal until recovery succeeds.
+4. Complete npm rollback installation and application checks after the
+   [subsequently verified transaction recovery and input restoration](../resource-retries-2026-11-02/report.md).
+   Recovery after a failed mutation does not establish rollback after a successful update.
 5. Qualify lifecycle execution under [#155](https://github.com/LimeTip/tapid/issues/155),
    then repeat application and maintenance checks. Peers, selected versions/origins,
    platform choices and semantic graph parity remain unmeasured, not successful.

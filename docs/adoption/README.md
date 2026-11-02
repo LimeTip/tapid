@@ -59,6 +59,10 @@ Receipts go to the sibling `<root>-evidence` directory. Review them before publi
 The [first attempt](uptime-kuma/attempt-2026-11-01/report.md) reached the end of this
 specification, including explicit unsupported and prerequisite-blocked phases.
 Reaching the end of capture does **not** establish a successful external journey.
+The [resource retries](uptime-kuma/resource-retries-2026-11-02/report.md) subsequently
+completed npm installation and the limited backend suite, and recovered/restored
+the interrupted update inputs. Build/start and a successful Tapid journey remain
+unestablished.
 
 Startup uses a fresh per-check data directory, binds `127.0.0.1:3001`, requires the
 application's listening message plus HTTP 200 containing its HTML title, and terminates

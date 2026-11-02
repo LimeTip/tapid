@@ -728,6 +728,49 @@ mod tests {
     }
 
     #[test]
+    fn adoption_historical_express_dependency_name_fails_closed() {
+        // Reduced from the pilot's ../serve-static failure. A valid candidate
+        // alongside a malformed historical record must not hide invalid input.
+        let record = |version: &str, dependency: &str| {
+            serde_json::json!({"name":"@types/express","version":version,
+                "dependencies":{dependency:"*"},
+                "dist":{"tarball":"https://registry.npmjs.org/@types/express/-/express.tgz",
+                    "integrity":format!("sha512-{}==", "A".repeat(86))}})
+        };
+        let mut body = serde_json::json!({"name":"@types/express","versions":{
+            "0.0.1":record("0.0.1", "../serve-static"),
+            "4.17.21":record("4.17.21", "@types/serve-static")
+        }});
+        let fetch = |body: &serde_json::Value| {
+            let mut fixture = tapid_test_support::FakeRegistry::new("https://registry.npmjs.org");
+            fixture.insert(
+                "@types/express",
+                "0.0.1",
+                &serde_json::to_vec(body).unwrap(),
+                &[],
+            );
+            NpmRegistry::new(
+                fake(
+                    &fixture.metadata("@types/express", "0.0.1").unwrap(),
+                    "https://registry.npmjs.org/@types%2Fexpress",
+                ),
+                fixture.origin().parse().unwrap(),
+            )
+            .fetch("@types/express")
+        };
+        assert!(matches!(fetch(&body), Err(RegistryClientError::Metadata(
+            MetadataError::InvalidDependency(name))) if name == "../serve-static"));
+        body["versions"]["0.0.1"] = record("0.0.1", "@types/serve-static");
+        let artifacts = fetch(&body).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().all(|artifact| {
+            artifact
+                .dependencies
+                .contains_key(&"@types/serve-static".parse().unwrap())
+        }));
+    }
+
+    #[test]
     fn npm_maps_platform_compatible_optional_dependency_metadata() {
         let body = br#"{"name":"parent","versions":{"1.0.0":{"name":"parent","version":"1.0.0","dependencies":{"native":"2.0.0","required":"3.0.0"},"optionalDependencies":{"native":"1.0.0"},"os":["darwin"],"cpu":["arm64"],"libc":["glibc"],"dist":{"tarball":"https://cdn.example/parent.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}"#;
         let origin: RegistryOrigin = "https://registry.npmjs.org".parse().unwrap();

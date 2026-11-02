@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "id": "uptime-kuma-5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7-e445eb2a3f9031745b0e34ad91a40973c5b430e6-1024m-build-retry",
+  "project": "https://github.com/louislam/uptime-kuma",
+  "counting": "Runner launches including failed launches; internal subprocesses excluded",
+  "cleanup": "Process group; detached descendants are outside this guarantee",
+  "launches": 1,
+  "phases": [
+    {
+      "id": "npm-build",
+      "outcome": "failed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-02T00:01:53.841Z",
+      "elapsedMs": 55448,
+      "exit": 137,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "\n> uptime-kuma@1.23.16 build\n> vite build --config ./config/vite.config.js\n\n\\u001b[33mThe CJS build of Vite's Node API is deprecated. See https://vitejs.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.\\u001b[39m\n\\u001b[36mvite v5.2.14 \\u001b[32mbuilding for production...\\u001b[36m\\u001b[39m\ntransforming...\n\\u001b[32m✓\\u001b[39m 945 modules transformed.\nBrowserslist: browsers data (caniuse-lite) is 23 months old. Please run:\n  npx update-browserslist-db@latest\n  Why you should do it regularly: https://github.com/browserslist/update-db#readme\nrendering chunks...\nKilled\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/npm/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/npm/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/npm/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/npm/"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-02T00:02:49.291Z",
+      "elapsedMs": 1,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    }
+  ]
+}
