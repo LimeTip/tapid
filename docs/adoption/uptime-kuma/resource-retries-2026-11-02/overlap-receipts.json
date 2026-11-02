@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "id": "uptime-kuma-5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7-e445eb2a3f9031745b0e34ad91a40973c5b430e6-disk-baseline-retry",
+  "project": "https://github.com/louislam/uptime-kuma",
+  "counting": "Runner launches including failed launches; internal subprocesses excluded",
+  "cleanup": "Process group; detached descendants are outside this guarantee",
+  "launches": 5,
+  "phases": [
+    {
+      "id": "prepare",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n    const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');\n    const source=\"[REDACTED]\",root=\"[REDACTED]\";\n    const names=[\"package.json\",\"package-lock.json\",\"LICENSE\"],expected=[\"adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31\",\"957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18\",\"a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883\"];\n    for(let i=0;i<names.length;i++) {\n      if(crypto.createHash('sha256').update(fs.readFileSync(path.join(source,names[i]))).digest('hex')!==expected[i])\n        throw Error('Pinned input mismatch: '+names[i]);\n    }\n    if(fs.existsSync(root)) throw Error('Run root must not exist; never overwrite an earlier attempt');\n    fs.mkdirSync(root,{recursive:true});\n    for(const name of [\"npm\",\"import\",\"native\",\"add\",\"update\"]) {\n      fs.cpSync(source,path.join(root,name),{recursive:true,filter:p=>!['node_modules','.git'].includes(path.basename(p))});\n      fs.mkdirSync(path.join(root,name,'.home'),{recursive:true});\n    }\n    fs.mkdirSync(path.join(root,'control','.home'),{recursive:true});\n    console.log('Pinned original inputs retained; independent checkpoints created');\n  "
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T23:55:39.960Z",
+      "elapsedMs": 573,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "Pinned original inputs retained; independent checkpoints created\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "host-identity",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "console.log(JSON.stringify({node:process.version,platform:process.platform,arch:process.arch,tapidRevision:\"e445eb2a3f9031745b0e34ad91a40973c5b430e6\"}))"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T23:55:40.534Z",
+      "elapsedMs": 55,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "{\"node\":\"v22.23.3\",\"platform\":\"linux\",\"arch\":\"arm64\",\"tapidRevision\":\"e445eb2a3f9031745b0e34ad91a40973c5b430e6\"}\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "binary-identity",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "--version"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T23:55:40.590Z",
+      "elapsedMs": 86,
+      "exit": -13,
+      "signal": null,
+      "reason": "launch: spawn /work/tapid EACCES",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "/work/tapid": "58e02c16d0eb7ca52226a28d13b120d9155956e1183f2b559aa1757ed810a2b4",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-version",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "--version"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T23:55:40.676Z",
+      "elapsedMs": 177,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "10.9.9\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-install",
+      "outcome": "failed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "ci",
+        "--no-fund"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T23:55:40.853Z",
+      "elapsedMs": 98111,
+      "exit": null,
+      "signal": "SIGKILL",
+      "reason": "nonzero-exit",
+      "output": "npm warn EBADENGINE Unsupported engine {\nnpm warn EBADENGINE   package: '@azure/msal-node@1.18.4',\nnpm warn EBADENGINE   required: { node: '10 || 12 || 14 || 16 || 18' },\nnpm warn EBADENGINE   current: { node: 'v22.23.3', npm: '10.9.9' }\nnpm warn EBADENGINE }\nnpm warn deprecated topo@3.0.3: This module has moved and is now available at @hapi/topo. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported\nnpm warn deprecated npmlog@5.0.1: This package is no longer supported.\nnpm warn deprecated joi@14.3.1: This module has moved and is now available at @hapi/joi. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.\nnpm warn deprecated hoek@6.1.3: This module has moved and is now available at @hapi/hoek. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\nnpm warn deprecated gauge@3.0.2: This package is no longer supported.\nnpm warn deprecated event-to-promise@0.7.0: Use promise-toolbox/fromEvent instead\nnpm warn deprecated eslint@8.14.0: This version is no longer supported. Please see https://eslint.org/version-support for other options.\nnpm warn deprecated are-we-there-yet@2.0.0: This package is no longer supported.\nnpm warn deprecated @npmcli/move-file@1.1.2: This functionality has been moved to @npmcli/fs\nnpm warn deprecated @humanwhocodes/config-array@0.9.5: Use @eslint/config-array instead\nnpm warn deprecated @humanwhocodes/object-schema@1.2.1: Use @eslint/object-schema instead\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/npm/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/npm/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/npm/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T23:57:18.971Z",
+      "elapsedMs": 3,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T23:57:18.975Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/npm/"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T23:57:18.983Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    }
+  ]
+}

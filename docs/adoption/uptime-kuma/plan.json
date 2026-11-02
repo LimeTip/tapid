@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "status": "statically-qualified-execution-pending",
+  "repository": "https://github.com/louislam/uptime-kuma",
+  "tag": "1.23.16",
+  "revision": "5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7",
+  "sourceArchiveSha256": "ebeb190bdd2d8585e57726866c57ab6dce7027e486ae7fef52cd570d00cad141",
+  "manifestSha256": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+  "lockSha256": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+  "lockfileVersion": 3,
+  "license": "MIT",
+  "licenseSha256": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883",
+  "hook": {
+    "package": "@louislam/sqlite3",
+    "version": "15.1.6",
+    "archive": "https://registry.npmjs.org/@louislam/sqlite3/-/sqlite3-15.1.6.tgz",
+    "verifiedIntegrity": "sha512-cVf7hcMrfywYnycatLvorngTFpL3BSWvEy7/NrEfcTyQX8xxj9fdeD553oCTv5fIAk85fluo6mzPq89V3YzrVA==",
+    "install": "node-pre-gyp install --fallback-to-build",
+    "executionAuthorized": false
+  },
+  "baselineCandidates": [
+    "npm ci",
+    "npm run build",
+    "npm run jest-backend"
+  ],
+  "pending": [
+    "disposable environment",
+    "native prerequisites",
+    "test services",
+    "bounded loopback readiness",
+    "Tapid binary identity",
+    "full journey"
+  ],
+  "maintenance": {
+    "checkpoint": "Independent disposable copies of retained original inputs; no operations executed",
+    "add": {
+      "name": "is-odd",
+      "version": "3.0.1",
+      "rationale": "Absent from the pinned lock; controlled addition exercises new direct and transitive edges without altering application source. Application rechecks remain required.",
+      "metadataUrl": "https://registry.npmjs.org/is-odd/3.0.1",
+      "metadataSha256": "d4e86aa269dd442c8d15adf4790a8b667dc2bef08c85679fa1e4529bfdafaef0",
+      "archive": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz",
+      "integrity": "sha512-CQpnWPrDwmP1+SMHXZhtLtJv90yiyVfluGsX5iNCVkrhQtU3TQHsUWPG9wkdk9Lgd5yNpAg9jQEo90CBaXgWMA==",
+      "command": [
+        "tapid",
+        "add",
+        "is-odd@3.0.1"
+      ]
+    },
+    "update": {
+      "name": "dayjs",
+      "from": "1.11.13",
+      "version": "1.11.14",
+      "rationale": "Existing direct runtime dependency, one exact patch step within the declared ~1.11.5 range. Named update must not become a whole-graph update. The CLI selects package names, not name@version; the deliberate exact declaration constrains this experiment. This is not unchanged-manifest update evidence.",
+      "metadataUrl": "https://registry.npmjs.org/dayjs/1.11.14",
+      "metadataSha256": "17a7188b6cbd9b04096ef26aa65f8147d0a70126ae8cf0a50bdff981268b4e3c",
+      "archive": "https://registry.npmjs.org/dayjs/-/dayjs-1.11.14.tgz",
+      "integrity": "sha512-E8fIdSxUlyqSA8XYGnNa3IkIzxtEmFjI+JU/6ic0P1zmSqyL6HyG5jHnpPjRguDNiaHLpfvHKWFiohNsJLqcJQ==",
+      "preparation": "In the independent update checkpoint only, deliberately change dependencies.dayjs from ~1.11.5 to exact 1.11.14; retain before/after manifest digests and review that sole declaration change.",
+      "command": [
+        "tapid",
+        "update",
+        "dayjs",
+        "--save-exact"
+      ]
+    }
+  }
+}

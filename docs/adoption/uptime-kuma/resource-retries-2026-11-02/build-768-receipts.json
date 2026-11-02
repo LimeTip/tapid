@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "id": "uptime-kuma-5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7-e445eb2a3f9031745b0e34ad91a40973c5b430e6-768m-build-retry",
+  "project": "https://github.com/louislam/uptime-kuma",
+  "counting": "Runner launches including failed launches; internal subprocesses excluded",
+  "cleanup": "Process group; detached descendants are outside this guarantee",
+  "launches": 1,
+  "phases": [
+    {
+      "id": "npm-build",
+      "outcome": "failed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-02T00:03:30.854Z",
+      "elapsedMs": 45766,
+      "exit": 134,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "\n> uptime-kuma@1.23.16 build\n> vite build --config ./config/vite.config.js\n\n\\u001b[33mThe CJS build of Vite's Node API is deprecated. See https://vitejs.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.\\u001b[39m\n\\u001b[36mvite v5.2.14 \\u001b[32mbuilding for production...\\u001b[36m\\u001b[39m\ntransforming...\n\\u001b[32m✓\\u001b[39m 945 modules transformed.\nBrowserslist: browsers data (caniuse-lite) is 23 months old. Please run:\n  npx update-browserslist-db@latest\n  Why you should do it regularly: https://github.com/browserslist/update-db#readme\nrendering chunks...\n\n<--- Last few GCs --->\n\n[1072:0xe938e0430000]    44481 ms: Mark-Compact 763.2 (783.7) -> 761.2 (789.2) MB, pooled: 0 MB, 643.64 / 0.00 ms  (average mu = 0.273, current mu = 0.028) allocation failure; scavenge might not succeed\n[1072:0xe938e0430000]    45440 ms: Mark-Compact (reduce) 765.5 (789.4) -> 765.0 (784.6) MB, pooled: 0 MB, 333.83 / 0.00 ms  (+ 463.8 ms in 0 steps since start of marking, biggest step 0.0 ms, walltime since start of marking 844 ms) (average mu = 0.219, cu\n\n<--- JS stacktrace --->\n\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n----- Native stack trace -----\n\n 1: 0xe1a178 node::OOMErrorHandler(char const*, v8::OOMDetails const&) [node]\n 2: 0x11cd5ec v8::Utils::ReportOOMFailure(v8::internal::Isolate*, char const*, v8::OOMDetails const&) [node]\n 3: 0x11cd79c v8::internal::V8::FatalProcessOutOfMemory(v8::internal::Isolate*, char const*, v8::OOMDetails const&) [node]\n 4: 0x13f322c  [node]\n 5: 0x140b170 v8::internal::Heap::CollectGarbage(v8::internal::AllocationSpace, v8::internal::GarbageCollectionReason, v8::GCCallbackFlags) [node]\n 6: 0x13e1b68 v8::internal::HeapAllocator::AllocateRawWithLightRetrySlowPath(int, v8::internal::AllocationType, v8::internal::AllocationOrigin, v8::internal::AllocationAlignment) [node]\n 7: 0x13e29a0 v8::internal::HeapAllocator::AllocateRawWithRetryOrFailSlowPath(int, v8::internal::AllocationType, v8::internal::AllocationOrigin, v8::internal::AllocationAlignment) [node]\n 8: 0x13bd8d0 v8::internal::Factory::NewFillerObject(int, v8::internal::AllocationAlignment, v8::internal::AllocationType, v8::internal::AllocationOrigin) [node]\n 9: 0x17d913c v8::internal::Runtime_AllocateInYoungGeneration(int, unsigned long*, v8::internal::Isolate*) [node]\n10: 0x1ceacd4  [node]\nAborted\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/npm/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/npm/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/npm/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/npm/"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-02T00:04:16.621Z",
+      "elapsedMs": 2,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1101 @@
+{
+  "version": 1,
+  "id": "uptime-kuma-5bb329fa0e8af9395911f33d5a6d6bb9b128c0f7-e445eb2a3f9031745b0e34ad91a40973c5b430e6",
+  "project": "https://github.com/louislam/uptime-kuma",
+  "counting": "Runner launches including failed launches; internal subprocesses excluded",
+  "cleanup": "Process group; detached descendants are outside this guarantee",
+  "launches": 17,
+  "phases": [
+    {
+      "id": "prepare",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n    const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');\n    const source=\"[REDACTED]\",root=\"[REDACTED]\";\n    const names=[\"package.json\",\"package-lock.json\",\"LICENSE\"],expected=[\"adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31\",\"957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18\",\"a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883\"];\n    for(let i=0;i<names.length;i++) {\n      if(crypto.createHash('sha256').update(fs.readFileSync(path.join(source,names[i]))).digest('hex')!==expected[i])\n        throw Error('Pinned input mismatch: '+names[i]);\n    }\n    if(fs.existsSync(root)) throw Error('Run root must not exist; never overwrite an earlier attempt');\n    fs.mkdirSync(root,{recursive:true});\n    for(const name of [\"npm\",\"import\",\"native\",\"add\",\"update\"]) {\n      fs.cpSync(source,path.join(root,name),{recursive:true,filter:p=>!['node_modules','.git'].includes(path.basename(p))});\n      fs.mkdirSync(path.join(root,name,'.home'),{recursive:true});\n    }\n    fs.mkdirSync(path.join(root,'control','.home'),{recursive:true});\n    console.log('Pinned original inputs retained; independent checkpoints created');\n  "
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:50:49.956Z",
+      "elapsedMs": 262,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "Pinned original inputs retained; independent checkpoints created\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "host-identity",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "console.log(JSON.stringify({node:process.version,platform:process.platform,arch:process.arch,tapidRevision:\"e445eb2a3f9031745b0e34ad91a40973c5b430e6\"}))"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:50:50.219Z",
+      "elapsedMs": 24,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "{\"node\":\"v22.23.3\",\"platform\":\"linux\",\"arch\":\"arm64\",\"tapidRevision\":\"e445eb2a3f9031745b0e34ad91a40973c5b430e6\"}\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "binary-identity",
+      "outcome": "passed",
+      "command": [
+        "/work/tapid",
+        "--version"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:50:50.244Z",
+      "elapsedMs": 50,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "tapid 0.0.13\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "/work/tapid": "58e02c16d0eb7ca52226a28d13b120d9155956e1183f2b559aa1757ed810a2b4",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-version",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "--version"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:50:50.294Z",
+      "elapsedMs": 129,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "10.9.9\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-install",
+      "outcome": "failed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "ci",
+        "--no-fund"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T22:50:50.423Z",
+      "elapsedMs": 41536,
+      "exit": null,
+      "signal": "SIGKILL",
+      "reason": "nonzero-exit",
+      "output": "npm warn EBADENGINE Unsupported engine {\nnpm warn EBADENGINE   package: '@azure/msal-node@1.18.4',\nnpm warn EBADENGINE   required: { node: '10 || 12 || 14 || 16 || 18' },\nnpm warn EBADENGINE   current: { node: 'v22.23.3', npm: '10.9.9' }\nnpm warn EBADENGINE }\nnpm warn deprecated topo@3.0.3: This module has moved and is now available at @hapi/topo. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported\nnpm warn deprecated npmlog@5.0.1: This package is no longer supported.\nnpm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.\nnpm warn deprecated hoek@6.1.3: This module has moved and is now available at @hapi/hoek. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\nnpm warn deprecated event-to-promise@0.7.0: Use promise-toolbox/fromEvent instead\nnpm warn deprecated gauge@3.0.2: This package is no longer supported.\nnpm warn deprecated are-we-there-yet@2.0.0: This package is no longer supported.\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/npm/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/npm/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/npm/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T22:51:31.965Z",
+      "elapsedMs": 4,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T22:51:31.969Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "npm-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/npm/"
+      ],
+      "cwd": "[REDACTED]/npm",
+      "started": "2026-11-01T22:51:31.970Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "status",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "status"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:31.981Z",
+      "elapsedMs": 72,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "Project: [REDACTED]/import\nLocal assessment: blocked\nWorkspace selection: root\nWorkspace manifest: [REDACTED]/import/package.json\nWorkspace linking: not verified\nManifest/lock agreement: unknown\nInstallation [REDACTED]/import/node_modules: absent\nProject recovery: none_detected\nRegistry configuration: {\"credential_environment_names\":[],\"credentials\":\"not_read\",\"default_origin\":\"https://registry.npmjs.org\",\"jsr_origin\":\"https://jsr.io\",\"origins\":[],\"routes\":[]}\nBlocker LOCKFILE_MISSING: [REDACTED]/import/tapid.lock\nVerification depth: local_metadata_and_ownership_only\nSnapshot: not atomic; concurrent writes can escape detection\n  [REDACTED]/import/.tapid-lifecycle-journal.json: missing\n  [REDACTED]/import/.tapid-lifecycle-journal.lifecycle.bak: missing\n  [REDACTED]/import/.tapid-managed: missing\n  [REDACTED]/import/node_modules: missing\n  [REDACTED]/import/package.json: sha256-adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31\n  [REDACTED]/import/tapid.lock: missing\n  [REDACTED]/import/tapid.toml: missing\nExperimental capabilities: {\"experimental\":true,\"lock_graph\":{\"compare\":\"same_format\",\"contract_version\":1,\"explicit_snapshots\":true,\"inspect\":true,\"json_required\":true},\"lock_schemas\":[4,5,6,7,8,9,10],\"package_manager\":\"local_preflight_only\",\"registry_routing\":\"experimental\",\"runner\":\"not_assessed\",\"spec_forms\":[\"semver\",\"npm_dist_tag\",\"npm_alias\",\"jsr_semver\",\"workspace:*\",\"workspace:^\",\"workspace:~\",\"file_tarball\",\"git+https\"],\"workspace_linking\":\"supported_not_verified\",\"workspace_selection\":\"exact_member_name\"}\nChecks not performed:\n  atomic_snapshot_or_concurrent_writer_exclusion\n  installed_tree_integrity_and_lock_correspondence\n  workspace_links\n  shared_store_contents_and_recovery\n  registry_access_and_credentials\n  dependency_resolution_and_transitive_compatibility\n  artifact_bytes_and_copied_sources\n  lifecycle_approvals_and_derived_outputs\n  runner_runtime_policy_and_platform_assurance\n  package_engine_and_target_platform_requirements\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/import/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/import/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/import/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "explain-sqlite",
+      "outcome": "passed",
+      "command": [
+        "/work/tapid",
+        "explain",
+        "@louislam/sqlite3@15.1.6"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.053Z",
+      "elapsedMs": 534,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "@louislam/sqlite3@15.1.6\nRegistry: https://registry.npmjs.org\nEvidence source: https://registry.npmjs.org/@louislam%2Fsqlite3\nMetadata fetched at: 2026-11-01T22:51:32.580287036Z\nRegistry-reported metadata modification time: 2023-03-27T10:59:28.116Z, unverified\nRegistry-reported publication time: 2023-03-27T10:59:27.983Z, unverified\nEvidence freshness: unknown; observation times do not establish source freshness\nRegistry-reported artifact: https://registry.npmjs.org/@louislam/sqlite3/-/sqlite3-15.1.6.tgz\nRegistry-reported integrity: sha512-cVf7hcMrfywYnycatLvorngTFpL3BSWvEy7/NrEfcTyQX8xxj9fdeD553oCTv5fIAk85fluo6mzPq89V3YzrVA==\nByte integrity: not checked; use --artifact-file to check local bytes\nRegistry signatures: 1 reported, unverified\nProvenance: missing attestation reference; not verified\nPublisher identity: not verified\nVulnerabilities: unavailable; no vulnerability provider queried, status unknown\nMalware analysis: not performed\nHuman review: unavailable\nA digest match does not establish package safety, publisher identity, or intended content.\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/import/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/import/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/import/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "import-lock",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "import-package-lock",
+        "./package-lock.json"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.591Z",
+      "elapsedMs": 95,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "error: /packages/node_modules~1redis/workspaces: package redis@4.5.1: workspaces: unsupported npm lock field\ndiagnostic: LOCKFILE_INVALID\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/import/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/import/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/import/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "frozen",
+      "outcome": "not-reached",
+      "command": [
+        "/work/tapid",
+        "install",
+        "--frozen",
+        "--store-dir",
+        "[REDACTED]/import/.store"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.694Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: import-lock",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "offline",
+      "outcome": "not-reached",
+      "command": [
+        "/work/tapid",
+        "install",
+        "--offline",
+        "--frozen",
+        "--store-dir",
+        "[REDACTED]/import/.store"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.695Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: frozen",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "import-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.698Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: frozen",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "import-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.701Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: frozen",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "import-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/import/"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.706Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: import-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "graph-comparison",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "--experimental-strip-types",
+        "/work/repo/scripts/compare-news-site-package-graphs.ts",
+        "--npm-root",
+        "[REDACTED]/npm",
+        "--tapid-root",
+        "[REDACTED]/import",
+        "--json",
+        "[REDACTED]/graph.json",
+        "--text",
+        "[REDACTED]/graph.md"
+      ],
+      "cwd": "[REDACTED]/import",
+      "started": "2026-11-01T22:51:32.711Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: npm-install, frozen",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "native-install",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "install",
+        "--store-dir",
+        "[REDACTED]/native/.store"
+      ],
+      "cwd": "[REDACTED]/native",
+      "started": "2026-11-01T22:51:32.712Z",
+      "elapsedMs": 60388,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "Install failed during registry access.\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: not_performed (0 package(s) inspected). Application readiness is not established.\nerror: cannot fetch metadata for https://[redacted]@types/express: Metadata(InvalidDependency(\"../serve-static\"))\ndiagnostic: REGISTRY_METADATA_INVALID\nProject files unchanged.\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/native/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/native/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/native/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "native-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/native",
+      "started": "2026-11-01T22:52:33.106Z",
+      "elapsedMs": 1,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: native-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "native-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/native",
+      "started": "2026-11-01T22:52:33.109Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: native-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "native-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/native/"
+      ],
+      "cwd": "[REDACTED]/native",
+      "started": "2026-11-01T22:52:33.111Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: native-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "add-import",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "import-package-lock",
+        "./package-lock.json"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:52:33.111Z",
+      "elapsedMs": 125,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "error: /packages/node_modules~1redis/workspaces: package redis@4.5.1: workspaces: unsupported npm lock field\ndiagnostic: LOCKFILE_INVALID\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/add/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/add/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/add/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-replay",
+      "outcome": "not-reached",
+      "command": [
+        "/work/tapid",
+        "install",
+        "--frozen",
+        "--store-dir",
+        "[REDACTED]/add/.store"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:52:33.241Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-import",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-mutation",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "add",
+        "is-odd@3.0.1",
+        "--store-dir",
+        "[REDACTED]/add/.store"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:52:33.242Z",
+      "elapsedMs": 47518,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "Registry metadata progress: 1 package(s) fetched\nRegistry metadata progress: 50 package(s) fetched\nRegistry metadata progress: 100 package(s) fetched\nRegistry metadata progress: 150 package(s) fetched\nRegistry metadata progress: 200 package(s) fetched\nerror: cannot fetch metadata for https://[redacted]@types/express: Metadata(InvalidDependency(\"../serve-static\"))\ndiagnostic: REGISTRY_METADATA_INVALID\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/add/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/add/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/add/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {
+        "[REDACTED]/add/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/add/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18"
+      },
+      "manualSteps": []
+    },
+    {
+      "id": "add-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:53:20.764Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-mutation",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:53:20.767Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-mutation",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/add/"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:53:20.767Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "add-restore",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n      const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');\n      const dir=\"[REDACTED]/add\",source=\"[REDACTED]\";\n      if(fs.readdirSync(dir).some(n=>n.startsWith('.tapid-') && n.includes('journal')))\n        throw Error('Pending transaction: recover through Tapid before rollback');\n      const names=[\"package.json\",\"package-lock.json\",\"LICENSE\"],expected=[\"adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31\",\"957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18\",\"a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883\"];\n      const retained=names.map(name=>fs.readFileSync(path.join(source,name)));\n      for(let i=0;i<names.length;i++) {\n        if(crypto.createHash('sha256').update(retained[i]).digest('hex')!==expected[i])\n          throw Error('Rollback input mismatch');\n      }\n      for(const name of ['node_modules','tapid.lock']) fs.rmSync(path.join(dir,name),{recursive:true,force:true});\n      for(let i=0;i<names.length;i++) fs.writeFileSync(path.join(dir,names[i]),retained[i]);\n      console.log('Original npm input hashes restored');\n    "
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:53:20.768Z",
+      "elapsedMs": 155,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "Original npm input hashes restored\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {
+        "[REDACTED]/add/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/add/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/add/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "manualSteps": []
+    },
+    {
+      "id": "add-rollback-install",
+      "outcome": "failed",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "ci",
+        "--no-fund"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:53:20.928Z",
+      "elapsedMs": 143631,
+      "exit": null,
+      "signal": "SIGKILL",
+      "reason": "nonzero-exit",
+      "output": "npm warn EBADENGINE Unsupported engine {\nnpm warn EBADENGINE   package: '@azure/msal-node@1.18.4',\nnpm warn EBADENGINE   required: { node: '10 || 12 || 14 || 16 || 18' },\nnpm warn EBADENGINE   current: { node: 'v22.23.3', npm: '10.9.9' }\nnpm warn EBADENGINE }\nnpm warn deprecated topo@3.0.3: This module has moved and is now available at @hapi/topo. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported\nnpm warn deprecated npmlog@5.0.1: This package is no longer supported.\nnpm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.\nnpm warn deprecated hoek@6.1.3: This module has moved and is now available at @hapi/hoek. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\nnpm warn deprecated event-to-promise@0.7.0: Use promise-toolbox/fromEvent instead\nnpm warn deprecated gauge@3.0.2: This package is no longer supported.\nnpm warn deprecated are-we-there-yet@2.0.0: This package is no longer supported.\nnpm warn deprecated @npmcli/move-file@1.1.2: This functionality has been moved to @npmcli/fs\nnpm warn deprecated joi@14.3.1: This module has moved and is now available at @hapi/joi. Please update your dependencies as this version is no longer maintained an may contain bugs and security issues.\nnpm warn deprecated @humanwhocodes/config-array@0.9.5: Use @eslint/config-array instead\nnpm warn deprecated @humanwhocodes/object-schema@1.2.1: Use @eslint/object-schema instead\nnpm warn deprecated npmlog@6.0.2: This package is no longer supported.\nnpm warn deprecated are-we-there-yet@3.0.1: This package is no longer supported.\nnpm warn deprecated gauge@4.0.4: This package is no longer supported.\nnpm warn deprecated @azure/msal-node@1.18.4: A newer major version of this library is available. Please upgrade to the latest available version.\nnpm warn deprecated eslint@8.14.0: This version is no longer supported. Please see https://eslint.org/version-support for other options.\nnpm warn deprecated core-js@2.6.12: core-js@<3.23.3 is no longer maintained and not recommended for usage due to the number of issues. Because of the V8 engine whims, feature detection in old core-js versions could cause a slowdown up to 100x even if nothing is polyfilled. Some versions have web compatibility issues. Please, upgrade your dependencies to the actual version of core-js.\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/add/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/add/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/add/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-rollback-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:55:44.573Z",
+      "elapsedMs": 1,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-rollback-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-rollback-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:55:44.575Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-rollback-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "add-rollback-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/add-rollback/"
+      ],
+      "cwd": "[REDACTED]/add",
+      "started": "2026-11-01T22:55:44.577Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: add-rollback-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "update-import",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "import-package-lock",
+        "./package-lock.json"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:44.579Z",
+      "elapsedMs": 104,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "error: /packages/node_modules~1redis/workspaces: package redis@4.5.1: workspaces: unsupported npm lock field\ndiagnostic: LOCKFILE_INVALID\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/update/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/update/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/update/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-replay",
+      "outcome": "not-reached",
+      "command": [
+        "/work/tapid",
+        "install",
+        "--frozen",
+        "--store-dir",
+        "[REDACTED]/update/.store"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:44.685Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-import",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-declaration",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n      const fs=require('node:fs'),file=\"[REDACTED]/update/package.json\";\n      const value=JSON.parse(fs.readFileSync(file,'utf8'));\n      if(value.dependencies.dayjs!=='~1.11.5') throw Error('Unexpected Day.js declaration');\n      value.dependencies.dayjs='1.11.14';fs.writeFileSync(file,JSON.stringify(value,null,4)+'\\n');\n    "
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:55:44.687Z",
+      "elapsedMs": 112,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {
+        "[REDACTED]/update/package.json": "084016c5884b9316ce79b8f1255ade59308567026d825a77d0a4eca581118d31"
+      },
+      "manualSteps": []
+    },
+    {
+      "id": "update-mutation",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "update",
+        "dayjs",
+        "--save-exact",
+        "--store-dir",
+        "[REDACTED]/update/.store"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:44.802Z",
+      "elapsedMs": 9724,
+      "exit": null,
+      "signal": "SIGKILL",
+      "reason": "nonzero-exit",
+      "output": "Registry metadata progress: 1 package(s) fetched\nRegistry metadata progress: 50 package(s) fetched\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {
+        "[REDACTED]/update/package.json": "084016c5884b9316ce79b8f1255ade59308567026d825a77d0a4eca581118d31",
+        "[REDACTED]/update/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/update/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "outputs": {
+        "[REDACTED]/update/package.json": "2acf95a731908c13383420d194602bc81ea1c1615bb1a6244b0b9087f3c7429c",
+        "[REDACTED]/update/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18"
+      },
+      "manualSteps": [
+        "Deliberately constrain dependencies.dayjs to 1.11.14 before named update; not unchanged-manifest update evidence"
+      ]
+    },
+    {
+      "id": "update-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.534Z",
+      "elapsedMs": 1,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-mutation",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.537Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-mutation",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/update/"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.540Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "update-restore",
+      "outcome": "failed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n      const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');\n      const dir=\"[REDACTED]/update\",source=\"[REDACTED]\";\n      if(fs.readdirSync(dir).some(n=>n.startsWith('.tapid-') && n.includes('journal')))\n        throw Error('Pending transaction: recover through Tapid before rollback');\n      const names=[\"package.json\",\"package-lock.json\",\"LICENSE\"],expected=[\"adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31\",\"957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18\",\"a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883\"];\n      const retained=names.map(name=>fs.readFileSync(path.join(source,name)));\n      for(let i=0;i<names.length;i++) {\n        if(crypto.createHash('sha256').update(retained[i]).digest('hex')!==expected[i])\n          throw Error('Rollback input mismatch');\n      }\n      for(const name of ['node_modules','tapid.lock']) fs.rmSync(path.join(dir,name),{recursive:true,force:true});\n      for(let i=0;i<names.length;i++) fs.writeFileSync(path.join(dir,names[i]),retained[i]);\n      console.log('Original npm input hashes restored');\n    "
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:55:54.542Z",
+      "elapsedMs": 197,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "[eval]:5\n        throw Error('Pending transaction: recover through Tapid before rollback');\n        ^\n\nError: Pending transaction: recover through Tapid before rollback\n    at [eval]:5:15\n    at [eval]:15:8\n    at runScriptInThisContext (node:internal/vm:209:10)\n    at node:internal/process/execution:446:12\n    at [eval]-wrapper:6:24\n    at runScriptInContext (node:internal/process/execution:444:60)\n    at evalFunction (node:internal/process/execution:279:30)\n    at evalTypeScript (node:internal/process/execution:291:3)\n    at node:internal/main/eval_string:74:3\n\nNode.js v22.23.3\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {
+        "[REDACTED]/update/package.json": "2acf95a731908c13383420d194602bc81ea1c1615bb1a6244b0b9087f3c7429c",
+        "[REDACTED]/update/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/update/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "manualSteps": []
+    },
+    {
+      "id": "update-rollback-install",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "ci",
+        "--no-fund"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.744Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-restore",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-rollback-build",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.745Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-rollback-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-rollback-test",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+        "run",
+        "jest-backend"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.747Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-rollback-install",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-rollback-start",
+      "outcome": "not-reached",
+      "command": [
+        "/usr/local/bin/node",
+        "server/server.js",
+        "--host=127.0.0.1",
+        "--port=3001",
+        "--data-dir=./data/update-rollback/"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-01T22:55:54.749Z",
+      "elapsedMs": 0,
+      "exit": null,
+      "signal": null,
+      "reason": "Prerequisites: update-rollback-build",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": [],
+      "readiness": {
+        "url": "http://127.0.0.1:3001/",
+        "status": 200,
+        "bodyIncludes": "<title>Uptime Kuma</title>"
+      }
+    },
+    {
+      "id": "approved-lifecycle",
+      "outcome": "unsupported",
+      "command": [
+        "/work/tapid"
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-01T22:55:54.750Z",
+      "elapsedMs": 1,
+      "exit": null,
+      "signal": null,
+      "reason": "No qualified Linux ManagedTree host or exact authority policy supplied; no hook grant is inferred",
+      "output": "",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    }
+  ]
+}

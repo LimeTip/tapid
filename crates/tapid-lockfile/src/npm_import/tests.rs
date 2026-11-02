@@ -4,6 +4,36 @@ const MANIFEST: &str = include_str!("../../tests/fixtures/npm-import-package.jso
 const DIGEST: &str = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
+fn adoption_published_redis_workspace_metadata_is_not_silently_discarded() {
+    // Reduced from the pinned Uptime Kuma lock: published redis carries its
+    // upstream workspace declaration even though this is a registry placement.
+    let manifest = r#"{"dependencies":{"redis":"4.5.1"}}"#;
+    let mut input = serde_json::json!({"lockfileVersion":3,"packages":{
+        "":{"dependencies":{"redis":"4.5.1"}},
+        "node_modules/redis":{
+            "version":"4.5.1",
+            "resolved":"https://registry.npmjs.org/redis/-/redis-4.5.1.tgz",
+            "integrity":"sha512-oxXSoIqMJCQVBTfxP6BNTCtDMyh9G6Vi5wjdPdV/sRKkufyZslDqCScSGcOr6XGR/reAWZefz7E4leM31RgdBA==",
+            "workspaces":["./packages/*"]
+        }
+    }});
+    let error = ImportedNpmLockfile::import(&input.to_string(), manifest, DIGEST).unwrap_err();
+    assert_eq!(error.pointer, "/packages/node_modules~1redis/workspaces");
+    assert_eq!(error.package, "redis@4.5.1");
+    assert_eq!(error.field, "workspaces");
+    assert_eq!(error.reason, "unsupported npm lock field");
+
+    // Control: registry placement itself is supported. This is a parser
+    // reduction, not an assertion that redis has no transitive dependencies.
+    input["packages"]["node_modules/redis"]
+        .as_object_mut()
+        .unwrap()
+        .remove("workspaces");
+    let lock = ImportedNpmLockfile::import(&input.to_string(), manifest, DIGEST).unwrap();
+    assert_eq!(lock.graph().unwrap().packages.len(), 1);
+}
+
+#[test]
 fn npm_import_workspace_normalizes_bin_forms_and_retains_metadata() {
     for name in ["member", "@scope/member"] {
         let root = serde_json::json!({"name":"root","version":"1.0.0","workspaces":["packages/*"]});

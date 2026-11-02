@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "id": "uptime-kuma-interrupted-update-recovery-e445eb2",
+  "project": "https://github.com/louislam/uptime-kuma",
+  "counting": "Runner launches including failed launches; internal subprocesses excluded",
+  "cleanup": "Process group; detached descendants are outside this guarantee",
+  "launches": 4,
+  "phases": [
+    {
+      "id": "retain-journal",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n  const fs=require('fs'),crypto=require('crypto');\n  const data=fs.readFileSync('.tapid-lifecycle-journal.json');\n  fs.writeFileSync('/work/recovery-journal-backup.json',data,{flag:'wx'});\n  console.log(crypto.createHash('sha256').update(data).digest('hex'));\n"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-02T00:03:32.016Z",
+      "elapsedMs": 44,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "32aecfea77eb6fa36974277c91fc032fbfbe74a5e8ddd1b80fafd2bb6b1fb691\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "offline-install-recovery",
+      "outcome": "failed",
+      "command": [
+        "/work/tapid",
+        "install",
+        "--offline",
+        "--store-dir",
+        "[REDACTED]/update/.store"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-02T00:03:32.060Z",
+      "elapsedMs": 37,
+      "exit": 1,
+      "signal": null,
+      "reason": "nonzero-exit",
+      "output": "Install failed during lockfile validation.\nDependency lifecycle: 0 hook(s) executed, 0 authenticated output(s) reused, 0 hook(s) skipped.\nHook discovery: not_performed (0 package(s) inspected). Application readiness is not established.\nwarning: recovered an interrupted project transaction before this operation\nerror: offline install requires tapid.lock: [REDACTED]/update/tapid.lock\ndiagnostic: LOCKFILE_MISSING\nProject files unchanged.\nRun 'tapid install' online to create tapid.lock.\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "recovery-confirm",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n  const fs=require('fs');\n  if(fs.readdirSync('.').some(n=>n.startsWith('.tapid-')&&n.includes('journal')))\n    throw Error('Journal remains; do not restore');\n  const prior=JSON.parse(fs.readFileSync('/work/recovery-journal-backup.json'));\n  if(prior.state!=='Prepared') throw Error('Unexpected transaction state');\n  if(!fs.readFileSync('package.json').equals(Buffer.from(prior.manifest,'base64')))\n    throw Error('Recovered manifest differs from journal snapshot');\n  console.log('Tapid settled pending journal; recovered manifest matches its snapshot');\n"
+      ],
+      "cwd": "[REDACTED]/update",
+      "started": "2026-11-02T00:03:32.097Z",
+      "elapsedMs": 41,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "Tapid settled pending journal; recovered manifest matches its snapshot\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {},
+      "manualSteps": []
+    },
+    {
+      "id": "update-restore",
+      "outcome": "passed",
+      "command": [
+        "/usr/local/bin/node",
+        "-e",
+        "\n      const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');\n      const dir=\"[REDACTED]/update\",source=\"[REDACTED]\";\n      if(fs.readdirSync(dir).some(n=>n.startsWith('.tapid-') && n.includes('journal')))\n        throw Error('Pending transaction: recover through Tapid before rollback');\n      const names=[\"package.json\",\"package-lock.json\",\"LICENSE\"],expected=[\"adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31\",\"957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18\",\"a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883\"];\n      const retained=names.map(name=>fs.readFileSync(path.join(source,name)));\n      for(let i=0;i<names.length;i++) {\n        if(crypto.createHash('sha256').update(retained[i]).digest('hex')!==expected[i])\n          throw Error('Rollback input mismatch');\n      }\n      for(const name of ['node_modules','tapid.lock']) fs.rmSync(path.join(dir,name),{recursive:true,force:true});\n      for(let i=0;i<names.length;i++) fs.writeFileSync(path.join(dir,names[i]),retained[i]);\n      console.log('Original npm input hashes restored');\n    "
+      ],
+      "cwd": "[REDACTED]",
+      "started": "2026-11-02T00:03:32.139Z",
+      "elapsedMs": 66,
+      "exit": 0,
+      "signal": null,
+      "reason": null,
+      "output": "Original npm input hashes restored\n",
+      "truncated": false,
+      "assertions": [],
+      "inputs": {},
+      "outputs": {
+        "[REDACTED]/update/package.json": "adf800638bfc59fb2a85d47032b53d45a2e8d5504116a774517f3aac9ee21e31",
+        "[REDACTED]/update/package-lock.json": "957ca1ff4b00f4356989546d4f6c63317f193ad8d1331e33b0037b49146dfe18",
+        "[REDACTED]/update/LICENSE": "a0e4fe6bed45a817794411c8ddf2deffbe010ac3a2b2f47e5b8d2fe2f9486883"
+      },
+      "manualSteps": []
+    }
+  ]
+}

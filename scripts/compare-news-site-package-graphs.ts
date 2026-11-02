@@ -293,14 +293,34 @@ export function compare(npmRoot: string, tapidRoot: string) {
     tapidNodes = installedNodes(tapidRoot),
     npmGraph = reachableGraph(npmRoot),
     tapidGraph = reachableGraph(tapidRoot);
+  const npmRecords = lockRecords(npmRoot, npmNodes, true),
+    tapidRecords = lockRecords(tapidRoot, tapidNodes, false);
+  const qualificationReasons: string[] = [];
+  const npmLock = readJson(join(npmRoot, "package-lock.json")),
+    tapidLock = readJson(join(tapidRoot, "tapid.lock"));
+  if (Object.values(npmLock.packages ?? {}).some((record: any) => record?.link === true) ||
+      [npmRoot, tapidRoot].some(root => readJson(join(root, "package.json")).workspaces != null))
+    qualificationReasons.push("workspace ownership and links are not qualified by this comparator");
+  if (tapidLock.lockfileVersion === 8)
+    qualificationReasons.push("imported schema 8 placement correspondence is not qualified by this comparator");
+  for (const [label, nodes, records] of [
+    ["npm", npmNodes, npmRecords],
+    ["Tapid", tapidNodes, tapidRecords],
+  ] as const)
+    for (const id of new Set([...nodes.keys(), ...records.keys()])) {
+      if ((nodes.get(id)?.length ?? 0) > 1 || (records.get(id)?.length ?? 0) > 1) {
+        const [name, version] = JSON.parse(id);
+        qualificationReasons.push(`${label}: ${name}@${version} has multiple instances; name/version aggregation cannot establish origin or peer-context correspondence`);
+      }
+    }
   const npmMeta = packageMetadata(
       npmNodes,
-      lockRecords(npmRoot, npmNodes, true),
+      npmRecords,
       true,
     ),
     tapidMeta = packageMetadata(
       tapidNodes,
-      lockRecords(tapidRoot, tapidNodes, false),
+      tapidRecords,
       false,
     );
   const npmPairs = new Set(npmNodes.keys()),
@@ -358,6 +378,10 @@ export function compare(npmRoot: string, tapidRoot: string) {
   });
   const report = {
     schemaVersion: 1,
+    qualification: {
+      status: qualificationReasons.length ? "inconclusive" : "unambiguous-name-version",
+      reasons: qualificationReasons,
+    },
     baseline: "npm",
     evaluated: "Tapid",
     environment: {
@@ -452,6 +476,8 @@ export function compare(npmRoot: string, tapidRoot: string) {
   const text = [
     "# News-site dependency graph comparison",
     "Baseline: npm; evaluated package manager: Tapid.",
+    `Comparison qualification: ${report.qualification.status}.`,
+    ...qualificationReasons,
     `Reachable package identities: npm ${npmReachable.size}, Tapid ${tapidReachable.size}.`,
     `Physical installed identities: npm ${npmPairs.size}, Tapid ${tapidPairs.size}.`,
     `Reachable package differences: npm-only ${report.reachablePackageDifferences.npmOnly.length}, Tapid-only ${report.reachablePackageDifferences.tapidOnly.length}.`,
@@ -467,7 +493,7 @@ export function compare(npmRoot: string, tapidRoot: string) {
     "Tapid-only: " + names(difference(tapidPairs, npmPairs)),
     "",
   ].join("\n");
-  return { report, text, code: mismatch ? 1 : 0 };
+  return { report, text, code: qualificationReasons.length ? 2 : mismatch ? 1 : 0 };
 }
 function main(): number {
   const { values } = parseArgs({
