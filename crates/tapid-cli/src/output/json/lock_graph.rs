@@ -14,6 +14,7 @@ pub(crate) fn lock_graph(
     cursor: Option<&str>,
     limit: usize,
     supported: bool,
+    summary_only: bool,
 ) -> ExitCode {
     let digest = format!(
         "{:x}",
@@ -37,17 +38,24 @@ pub(crate) fn lock_graph(
     };
     let end = offset.saturating_add(limit).min(records.len());
     let mut page = Vec::new();
-    for record in &records[offset..end] {
-        match serde_json::to_value(record) {
-            Ok(record) => page.push(record),
-            Err(_) => return super::operation_error("lock", "LOCK_GRAPH_OUTPUT_LIMIT", None),
+    if !summary_only {
+        for record in &records[offset..end] {
+            match serde_json::to_value(record) {
+                Ok(record) => page.push(record),
+                Err(_) => return super::operation_error("lock", "LOCK_GRAPH_OUTPUT_LIMIT", None),
+            }
         }
     }
     loop {
         let next = offset + page.len();
+        data["detail_mode"] = json!(if summary_only { "summary" } else { "paged" });
         data["records"] = json!(page);
-        data["detail_coverage"] = json!({"offset":offset,"returned":page.len(),"total":records.len(),"omitted":records.len()-page.len(),"remaining":records.len()-next,"complete":offset==0 && next==records.len()});
-        data["continuation"] = if next < records.len() {
+        data["detail_coverage"] = if summary_only {
+            json!({"offset":0,"returned":0,"total":records.len(),"omitted":records.len(),"remaining":0,"complete":records.is_empty()})
+        } else {
+            json!({"offset":offset,"returned":page.len(),"total":records.len(),"omitted":records.len()-page.len(),"remaining":records.len()-next,"complete":offset==0 && next==records.len()})
+        };
+        data["continuation"] = if !summary_only && next < records.len() {
             json!(format!("v1.{next}.{digest}"))
         } else {
             Value::Null

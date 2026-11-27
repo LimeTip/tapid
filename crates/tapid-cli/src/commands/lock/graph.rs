@@ -32,6 +32,9 @@ struct Options {
     /// Maximum detail records in this page. Complete analysis still precedes pagination.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
     limit: u16,
+    /// Return aggregate metadata without detail records; rerun without this flag for details.
+    #[arg(long, conflicts_with = "cursor")]
+    summary_only: bool,
     /// Continue the same snapshots and scope using the prior result's opaque token.
     #[arg(long)]
     cursor: Option<String>,
@@ -124,6 +127,7 @@ pub(super) fn inspect(args: InspectArgs, json_output: bool) -> ExitCode {
         args.page.cursor.as_deref(),
         args.page.limit.into(),
         true,
+        args.page.summary_only,
     )
 }
 
@@ -182,5 +186,6 @@ pub(super) fn compare(args: CompareArgs, json_output: bool) -> ExitCode {
         args.page.cursor.as_deref(),
         args.page.limit.into(),
         graph.selected_graph_supported,
+        args.page.summary_only,
     )
 }

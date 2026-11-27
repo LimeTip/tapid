@@ -77,6 +77,63 @@ fn explicit_graph_snapshots_are_inspected_compared_and_paged_without_project_sta
 }
 
 #[test]
+fn summary_only_graph_queries_keep_summary_and_offer_full_detail_opt_in() {
+    let project = TempProject::new("json-lock-summary-only").unwrap();
+    let mut lock = tapid_lockfile::Lockfile::new(&format!("sha256-{}", "a".repeat(64))).unwrap();
+    let package = tapid_lockfile::LockedPackage::new_with_provenance(
+        "https://registry.example.com",
+        "pkg",
+        "1.0.0",
+        &format!("sha512-{}==", "A".repeat(86)),
+        &format!("sha256-{}", "b".repeat(64)),
+        tapid_lockfile::RegistryIntegrityProvenance::RegistryDeclared,
+    )
+    .unwrap();
+    lock.insert_package(package.clone()).unwrap();
+    lock.set_roots([package.key()]).unwrap();
+    project
+        .write("snapshot.lock", lock.to_json().unwrap().as_bytes())
+        .unwrap();
+
+    let (summary_output, summary) = invoke(
+        &project,
+        &[
+            "--json",
+            "lock",
+            "inspect",
+            "snapshot.lock",
+            "--summary-only",
+        ],
+    );
+    assert!(summary_output.status.success(), "{summary}");
+    assert_eq!(summary["data"]["summary"]["instances"], 1);
+    assert_eq!(summary["data"]["coverage"]["analysis_complete"], true);
+    assert_eq!(summary["data"]["records"].as_array().unwrap().len(), 0);
+    assert_eq!(summary["data"]["detail_coverage"]["omitted"], 2);
+
+    let (full_output, full) = invoke(&project, &["--json", "lock", "inspect", "snapshot.lock"]);
+    assert!(full_output.status.success(), "{full}");
+    assert_eq!(full["data"]["records"].as_array().unwrap().len(), 2);
+    assert!(summary_output.stdout.len() < full_output.stdout.len());
+
+    let (compare_output, comparison) = invoke(
+        &project,
+        &[
+            "--json",
+            "lock",
+            "compare",
+            "snapshot.lock",
+            "snapshot.lock",
+            "--summary-only",
+        ],
+    );
+    assert!(compare_output.status.success(), "{comparison}");
+    assert_eq!(comparison["data"]["summary"]["added_instances"], 0);
+    assert_eq!(comparison["data"]["records"].as_array().unwrap().len(), 0);
+    assert_eq!(comparison["data"]["detail_coverage"]["omitted"], 0);
+}
+
+#[test]
 fn graph_failures_preserve_pending_recovery_and_forbidden_store() {
     let project = TempProject::new("json-lock-read-only").unwrap();
     let home = TempHome::new("json-lock-read-only").unwrap();
